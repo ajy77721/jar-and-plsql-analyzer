@@ -1,6 +1,8 @@
-# JAR Analyzer -- Complete User Manual
+# JAR / WAR Analyzer -- Complete User Manual
 
-This document is the authoritative reference for every piece of UI functionality in the JAR Analyzer tool. It covers the sidebar, top bar, JAR header controls, all three main tabs (Code Structure, Endpoint Flows, Summary), export capabilities, and the AI chat system.
+This document is the authoritative reference for every piece of UI functionality in the JAR / WAR Analyzer tool. It covers the sidebar, top bar, JAR header controls, all three main tabs (Code Structure, Endpoint Flows, Summary), export capabilities, and the AI chat system.
+
+The analyzer accepts both `.jar` and `.war` files. It detects not just REST HTTP endpoints but also asynchronous entry points: RabbitMQ listeners, Kafka consumers, WebSocket message handlers, `@Scheduled` tasks, and Spring event listeners.
 
 ---
 
@@ -51,7 +53,7 @@ Each entry in the JAR list represents one uploaded and analyzed JAR file. Entrie
 |---|---|
 | **Project / JAR Name** | The display name of the uploaded JAR. Clicking the name selects this JAR and loads its analysis into the main content area. |
 | **Class Count** | Numeric badge showing the total number of Java classes found in the JAR. |
-| **Endpoint Count** | Numeric badge showing the total number of HTTP endpoints detected. |
+| **Endpoint Count** | Numeric badge showing the total number of entry points detected. This includes HTTP REST endpoints, RabbitMQ listeners (`@RabbitListener`), Kafka consumers (`@KafkaListener`), WebSocket handlers (`@MessageMapping`), scheduled tasks (`@Scheduled`), and Spring event listeners (`@EventListener`, `@TransactionalEventListener`). |
 | **AI Badge** | Status indicator for Claude enrichment. Possible values: `IDLE` (no Claude scan started), `RUNNING` (Claude scan in progress), `COMPLETE` (Claude scan finished successfully), `FAILED` (Claude scan encountered an error). |
 | **Corrected Badge** | Shows `C` when Claude corrections have been applied once, or `C(N)` (e.g., `C(2)`) when multiple correction rounds have been applied. Only visible after a Claude scan has produced corrections. |
 | **Relative Date** | Displays how long ago the JAR was uploaded (e.g., "2 hours ago", "3 days ago"). |
@@ -63,7 +65,8 @@ The upload section sits below the JAR list and provides controls for adding new 
 
 | Control | Description |
 |---|---|
-| **Upload Button** | Opens a file input dialog. Accepts `.jar` files up to **2 GB** in size. After selecting a file, analysis begins automatically based on the selected mode. |
+| **Upload Button** | Opens a file input dialog. Accepts `.jar` and `.war` files up to **2 GB** in size. After selecting a file, analysis begins automatically based on the selected mode. |
+| **Analyze from Local Path** | A text field for submitting a JAR or WAR already on the server's local filesystem by its absolute path (e.g. `C:\builds\app-0.0.1-SNAPSHOT.jar`). No file transfer needed. |
 | **Analysis Mode Toggle** | A two-option toggle switch: **Static** and **Claude**. In **Static** mode, only static bytecode analysis is performed (decompilation, class inspection, endpoint detection). In **Claude** mode, static analysis is performed first, followed by AI-powered enrichment that adds business context, corrections, and insights. |
 | **Source Project Path** | A text input field that appears **only when Claude mode is selected**. Enter the absolute filesystem path to the original source project. This helps Claude correlate decompiled bytecode with the original source code for higher-quality analysis. |
 
@@ -237,14 +240,27 @@ The left pane shows all endpoints grouped by their controller class.
 - Each group header shows the controller name and the **count** of endpoints in that controller.
 - Groups are collapsible.
 
+#### Supported Entry Point Types
+
+The analyzer detects all of the following entry types, not just REST endpoints:
+
+| HTTP Method Label | Source Annotation | Description |
+|---|---|---|
+| `GET`, `POST`, `PUT`, `DELETE`, `PATCH` | `@RequestMapping` / `@GetMapping` / etc. | Standard HTTP REST endpoints |
+| `AMQP` | `@RabbitListener` | RabbitMQ message consumers |
+| `KAFKA` | `@KafkaListener` | Apache Kafka consumers |
+| `WS` | `@MessageMapping` | WebSocket message handlers |
+| `SCHEDULED` | `@Scheduled` | Timed tasks (cron / fixedRate / fixedDelay) |
+| `EVENT` | `@EventListener` / `@TransactionalEventListener` | Spring application event handlers |
+
 #### Filter Search
 
 A search input at the top of the left pane filters across:
 
-- HTTP method (GET, POST, PUT, DELETE, PATCH)
-- URL path
+- Entry type (GET, POST, AMQP, KAFKA, WS, SCHEDULED, EVENT)
+- URL path or queue/topic name
 - Method name
-- Controller class name
+- Controller or listener class name
 
 Filtering is case-insensitive and updates the visible list in real time.
 
@@ -312,9 +328,21 @@ A detailed step-by-step table of every method call in the endpoint's execution c
 |---|---|
 | **QUALIFIED** | The call target was resolved with full certainty from explicit type information. |
 | **DYNAMIC** | The call target was resolved through dynamic dispatch (e.g., interface polymorphism, runtime binding). Multiple implementations may exist. |
+| **DYNAMIC_DISPATCH** | Dynamic dispatch variant tracked at the bytecode level with implementations found. |
 | **HEURISTIC** | The call target was resolved using heuristic matching (e.g., naming conventions, single-implementation inference). |
 | **IFACE ONLY** | Only the interface declaration was found; no concrete implementation was located in the analyzed JAR. |
+| **INTERFACE_FALLBACK** | Call resolved to the interface/abstract definition because no concrete implementation was found via index traversal. |
 | **@PRIMARY** | The call target was resolved using Spring's `@Primary` annotation to select among multiple candidates. |
+
+##### Additional Call Node Indicators
+
+| Indicator | Meaning |
+|---|---|
+| **Recursive** | The method call is detected as directly or indirectly recursive. |
+| **Cache op** | Method is annotated with `@Cacheable`, `@CacheEvict`, or `@CachePut`. |
+| **SQL** | Raw SQL string literals were detected inside this method's bytecode. |
+| **Stored proc** | A stored procedure call was detected via `SimpleJdbcCall`, `Connection.prepareCall`, `@Procedure`, or `EntityManager.createStoredProcedureQuery`. |
+| **Aggregation pipeline** | MongoDB aggregation pipeline code was detected in this node. |
 
 #### Breadcrumb Navigation
 
@@ -399,14 +427,14 @@ A tabular view of all MongoDB collections and views detected across the JAR.
 | Column | Description |
 |---|---|
 | **Collection Name** | The MongoDB collection name. Accompanied by a badge: `DATA` for standard collections, `VIEW` for MongoDB views. |
-| **Domain** | The business domain this collection belongs to. |
-| **Type** | The collection type (e.g., standard collection, capped collection, view). |
+| **Domain** | The business domain this collection belongs to (e.g., Claims, Accounting, Underwriting, Policy). |
+| **Type** | The collection type (standard collection, capped collection, or view). |
 | **Read Ops** | Number of read operations detected against this collection. |
 | **Write Ops** | Number of write operations detected against this collection. |
 | **Agg Ops** | Number of aggregation pipeline operations detected against this collection. |
-| **Detected Via** | How the collection reference was discovered (e.g., annotation, query string, template method). |
-| **Complexity** | An assessed complexity level for this collection's usage patterns. |
-| **Verification** | A status indicating whether the collection was confirmed to exist in the database. Values: `IN_DB` (confirmed present), `NOT_IN_DB` (not found in the database), `NEED_REVIEW` (could not be automatically verified). |
+| **Detected Via** | How the collection reference was discovered. Possible values: `REPOSITORY_MAPPING` (from generic `MongoRepository<Entity, Id>` signature), `DOCUMENT_ANNOTATION` (from `@Document(collection="...")` on entity), `STRING_LITERAL` (from string constant matching collection-name pattern), `FIELD_CONSTANT` (from `static final String` field on repository class), `PIPELINE_ANNOTATION` (from `@Aggregation` pipeline reference). |
+| **Complexity** | Weighted complexity score based on: endpoint count (×1.0), write ops (×1.5), aggregation pipelines (×2.0), cross-domain access (×3.0). Classified as Low (≤4), Medium (≤10), or High (>10). |
+| **Verification** | Whether the collection was confirmed to exist in the database. Values: `IN_DB` (confirmed present), `NOT_IN_DB` (not found in the database), `NEED_REVIEW` (could not be automatically verified), `CLAUDE_*` (status assigned by Claude enrichment). |
 
 #### View Toggle
 
@@ -606,16 +634,25 @@ The Export feature allows you to download the analysis results for offline use o
 
 ### Exportable Sections
 
-The export includes the following data sections (each becomes a separate sheet in Excel or a top-level key in JSON):
+The Excel workbook contains **13 sheets**. The JSON export includes equivalent top-level keys.
 
-| Section | Contents |
+| Sheet | Contents |
 |---|---|
-| **Endpoints** | All endpoint data including paths, methods, call chains, collections, and metrics. |
-| **Collections** | All MongoDB collections and views with their operation counts and verification status. |
-| **External Dependencies** | All external module dependencies with call counts and callers. |
-| **Batch Jobs** | All detected batch jobs with their domains, collections, and sizing. |
-| **Scheduled Jobs** | All scheduled methods with their cron/rate expressions and execution details. |
-| **Aggregation Flows** | All aggregation pipelines with their stages, collections, and complexity assessments. |
+| **Summary** | Key metrics: total endpoints, collections, views, business domains, cross-module endpoints, batch jobs. |
+| **Endpoints** | HTTP method, path, name, collections count, views count, DB ops, methods, LOC, scope calls, operation types, size (S/M/L/XL), performance classification. |
+| **Endpoint-Collections** | Per-endpoint → collection mapping with operation type and detection source per row. |
+| **Collections** | Per-collection metrics: number of endpoints, domains, usage count, verification status. |
+| **Collection Summary** | Aggregated collection view with read/write/aggregation op breakdown. |
+| **Collection Usage Detail** | Detailed cross-reference of every endpoint accessing every collection. |
+| **Transactions** | Transaction requirement classification per endpoint (REQUIRED / ADVISORY / NONE). |
+| **Batch** | Scheduled and batch jobs with domains, collections, and sizing. |
+| **Views** | MongoDB views detected with their source collections. |
+| **External** | Cross-module dependency details with call counts. |
+| **Extended Calls Detail** | External call breadcrumb chains (full call path per external invocation). |
+| **Vertical Method Calls** | Method invocation patterns across domain boundaries. |
+| **Vertical Cross-Domain** | Cross-domain dependency chains with refactoring recommendations. |
+
+Excel formatting includes: conditional color fills (XL = red, L = orange), header/title/section row styles, alternating data row shading, column freeze, and auto-filters on all data sheets.
 
 ---
 

@@ -1,8 +1,8 @@
 # PL/SQL Parse Analyzer -- Complete User Manual
 
 > **Version:** 1.0  
-> **Last Updated:** 2026-04-23  
-> **Application Port:** 8085
+> **Last Updated:** 2026-04-27  
+> **Application Port:** 8083
 
 ---
 
@@ -40,6 +40,59 @@
 14. [Connection Manager Modal](#14-connection-manager-modal)
 15. [Scope Controls](#15-scope-controls)
 16. [Chat](#16-chat)
+
+---
+
+## What the Parser Engine Extracts
+
+The ANTLR4 grammar-based engine extracts the following from every PL/SQL object in the dependency tree:
+
+| Category | Details |
+|----------|---------|
+| **Flow nodes** | Calls, DML statements, conditional branches, loops, exception handlers |
+| **Table operations** | SELECT / INSERT / UPDATE / DELETE / MERGE / TRUNCATE with table name, schema, WHERE predicate, line number |
+| **Cursor declarations** | OPEN / FETCH / CLOSE operations with cursor names and result set types |
+| **Dynamic SQL** | `EXECUTE IMMEDIATE` statements, `DBMS_SQL` usage, concatenated string patterns |
+| **Exception handlers** | Exception name, handler body, re-raise detection |
+| **JOIN expressions** | Left/right table, join type (INNER/LEFT/RIGHT/FULL/CROSS), ON predicate, line number |
+| **Sequence references** | `NEXTVAL` / `CURRVAL` usage with sequence name and line number |
+| **Variable declarations** | Name, type, initial value, scope |
+| **Parameters** | Name, type, mode (IN / OUT / IN OUT) |
+| **Subprograms** | Nested procedures and functions inside package bodies |
+| **FORALL / BULK COLLECT** | Bulk DML patterns with collection variable binding |
+| **Non-parseable types** | TYPE, SYNONYM, SEQUENCE, JAVA CLASS — detected and skipped gracefully |
+
+Dependency crawling uses BFS traversal with configurable depth and timeout limits. Schema resolution is cached to `data/cache-plsql/*.tsv` for faster repeated analysis.
+
+---
+
+## CLI Mode (FlowAnalysisMain)
+
+The parser engine can also be invoked directly from the command line without the web UI:
+
+```bash
+java -cp unified-web.jar com.plsql.parser.flow.FlowAnalysisMain \
+  --config config/plsql-config.yaml \
+  --entry "PKG_CUSTOMER.PROC_GET_ACCOUNT" \
+  --entry "PKG_ORDERS.PROC_CREATE_ORDER" \
+  --output-dir /tmp/analysis-output \
+  --max-depth 30 \
+  --pretty
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--config <path>` | Yes | Path to `plsql-config.yaml` containing Oracle connection details |
+| `--entry "SCHEMA.PKG.PROC"` | Yes | Entry point(s) to analyze. Repeat `--entry` for multiple entry points |
+| `--output-dir <dir>` | No | Output directory for chunked JSON files (defaults to current directory) |
+| `--max-depth <N>` | No | Maximum BFS recursion depth; `-1` = unlimited |
+| `--pretty` | No | Pretty-print JSON output |
+| `--clear-cache` | No | Delete cached schema resolver TSV files before running |
+
+Supported entry-point name formats:
+- `PKG.PROC` — package-qualified
+- `SCHEMA.PKG.PROC` — fully qualified
+- `PROCEDURE_NAME` — standalone
 
 ---
 
@@ -98,6 +151,10 @@ Once the **Analyze** button is clicked, a progress bar appears showing the curre
 ### Manage Connections
 
 The **gear button** next to the connection dropdowns opens the Connection Manager modal. See [Connection Manager Modal](#14-connection-manager-modal) for full details.
+
+### Schema Cache
+
+The parser caches Oracle schema resolver query results to `data/cache-plsql/*.tsv` to speed up repeated analyses. If the database schema has changed significantly (new synonyms, relocated objects), you can force a fresh resolve by passing `--clear-cache` via the CLI mode or using the **Clear Cache** option in the UI settings panel.
 
 ### Logs
 

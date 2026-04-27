@@ -2,7 +2,16 @@
 
 ## Overview
 
-The Home Dashboard is the central hub of the Code Analyzer platform. It provides a consolidated view of both analysis tools, quick submission capabilities, real-time queue monitoring, progress tracking, and AI session oversight. All interaction begins here.
+The Home Dashboard is the central hub of the Code Analyzer platform. It provides a consolidated view of all analysis tools, quick submission capabilities, real-time queue monitoring, progress tracking, and AI session oversight. All interaction begins here.
+
+The application exposes four web UIs accessible from the dashboard:
+
+| URL | Tool |
+|-----|------|
+| `/` | Home Dashboard (this page) |
+| `/jar/` | JAR / WAR Analyzer |
+| `/parser/` | PL/SQL Parse Analyzer |
+| `/plsql/` | Legacy PL/SQL Analyzer |
 
 The layout is organized top to bottom:
 
@@ -18,14 +27,14 @@ The layout is organized top to bottom:
 
 Two clickable cards appear at the top of the dashboard, one for each analyzer.
 
-### JAR / Java Analyzer
+### JAR / WAR Analyzer
 
 - **Navigation:** Click to open `/jar/`.
 - **Live statistics displayed on the card:**
-  - Total JARs analyzed
-  - Endpoints discovered
+  - Total JARs / WARs analyzed
+  - Entry points discovered (REST, AMQP, Kafka, WebSocket, Scheduled, Event-driven)
   - Classes cataloged
-  - AI Enriched count (number of endpoints enriched by Claude)
+  - AI Enriched count (number of entry points enriched by Claude)
 
 ### PL/SQL Parse Analyzer
 
@@ -215,18 +224,20 @@ The following elements are available on every screen in the application, not jus
 
 ### Log FAB (Bottom-Left)
 
-A floating action button anchored to the bottom-left corner of the viewport. Click to open a panel displaying live application logs.
+A floating action button anchored to the bottom-left corner of the viewport. Click to open a panel displaying live application logs (served from `GET /api/jar/logs` or `GET /api/plsql/logs`).
 
 ### Chat FAB (Bottom-Right)
 
-A floating action button anchored to the bottom-right corner of the viewport. Click to open the AI chatbox for conversational interaction with the analyzer.
+A floating action button anchored to the bottom-right corner of the viewport. Click to open the AI chatbox for conversational interaction with the analyzer. The chatbox uses the current tool's analysis context.
 
 ### Chat Toggle (Top Bar)
 
 When available, a toggle in the top navigation bar switches between two chat interface modes:
 
-- **New** — Opens the chatbox overlay (floating panel).
-- **Classic** — Opens the chat in a side panel embedded in the page layout.
+- **New** — Opens the chatbox overlay (floating panel). Uses the JAR-specific chatbox API (`/api/jars/{id}/chat`).
+- **Classic** — Opens the chat in a session-based side panel with full conversation history. Uses the shared sessions API (`/api/chat/sessions`).
+
+Chat mode preference persists across page reloads.
 
 ### Help Button (?)
 

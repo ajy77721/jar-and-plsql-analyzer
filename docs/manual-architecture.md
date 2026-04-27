@@ -194,33 +194,51 @@ com.jaranalyzer
 ```
 
 **Key Services:**
-- `JarParserService` -- Orchestrates end-to-end JAR analysis
-- `BytecodeClassParser` -- ASM-based visitor extracting class/method/field metadata
+- `JarParserService` -- Orchestrates end-to-end JAR and WAR analysis
+- `WarParserService` / `WarDataPaths` / `WarPersistenceService` -- WAR file support (servlet containers, Spring Boot WARs)
+- `BytecodeClassParser` -- ASM-based visitor extracting class/method/field metadata including `@Field`/`@BsonProperty`/`@Column` DB field mappings and lambda/InvokeDynamic instructions
 - `DecompilerService` -- CFR wrapper for on-demand source decompilation
-- `CallGraphService` / `CallGraphIndex` / `CallTreeBuilder` -- Method-level call
-  graph construction and querying
-- `ExcelExportService` -- Multi-sheet XLSX reports with styled output
-- `MongoCatalogService` -- Persists analysis results to MongoDB (optional)
+- `CallGraphService` / `CallGraphIndex` / `CallTreeBuilder` -- Method-level call graph construction and querying with memoization and global subtree caching
+- `CollectionResolver` -- MongoDB collection detection across 5 source types (REPOSITORY_MAPPING, DOCUMENT_ANNOTATION, STRING_LITERAL, FIELD_CONSTANT, PIPELINE_ANNOTATION) with CamelCase → UPPER_SNAKE derivation fallback
+- `JpaMethodDetector` -- JPA/JDBC table access detection from EntityManager, JdbcTemplate, SimpleJdbcCall, @NamedQuery, criteria API
+- `MongoMethodDetector` -- MongoDB operation type detection from MongoTemplate, MongoRepository, native driver, BulkWrite
+- `AggregationDetector` -- MongoDB aggregation pipeline analysis with per-stage metadata ($match, $group, $project, $lookup, $unwind, $graphLookup, $unionWith, $merge, $out, $facet, $addFields, $replaceRoot)
+- `ExcelExportService` -- 13-sheet XLSX report with conditional formatting, column freeze, auto-filters
+- `MongoCatalogService` -- Extracts MongoDB connection details from bundled application.yml/properties; catalog fetch from live MongoDB (optional, configurable)
 - `ProgressService` -- Tracks analysis progress for SSE streaming
+- `AbstractAnalysisDataProvider` -- Streaming JSON parser for large analysis files (>10 MB) to prevent OOM; per-endpoint streaming for summary, class tree, and call tree slices
+- `PersistenceService` -- Streaming write of analysis to disk; lightweight `_header.json` sidecar for fast listing
+
+**Entry point detection:**
+- REST: `@RequestMapping`, `@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`, `@PatchMapping`
+- Async: `@RabbitListener` (AMQP), `@KafkaListener` (KAFKA), `@MessageMapping` (WS)
+- Scheduled: `@Scheduled` with cron / fixedRate / fixedDelay
+- Event-driven: `@EventListener`, `@TransactionalEventListener`
+
+**Call dispatch resolution modes:**
+- `QUALIFIED` -- Resolved from explicit type information
+- `DYNAMIC` / `DYNAMIC_DISPATCH` -- Interface polymorphism or runtime binding
+- `HEURISTIC` -- Naming-convention inference (single-implementation or stem match)
+- `IFACE ONLY` / `INTERFACE_FALLBACK` -- Only interface declaration found; no concrete implementation in JAR
+- `@PRIMARY` -- Spring `@Primary` annotation used to choose among candidates
 
 **Claude AI Services (within jar-analyzer-core):**
-- `ClaudeAnalysisService` -- Manages enrichment sessions (chunking, verification, merging)
-- `ClaudeProcessRunner` -- Spring `@Component("jarClaudeProcessRunner")` that invokes
-  Claude CLI as an external process
-- `ClaudeResultMerger` / `CorrectionMerger` -- Merges AI-generated corrections into
-  analysis data
-- `ClaudeSessionManager` / `ClaudeEnrichmentTracker` -- Session lifecycle and progress
-- `TreeChunker` / `SwarmClusterer` -- Splits large call trees into Claude-friendly chunks
-- `FragmentStore` / `CorrectionPersistence` -- Caches fragments and persists corrections
+- `ClaudeAnalysisService` -- Manages enrichment sessions (chunking, swarm clustering, verification, merging)
+- `ClaudeProcessRunner` -- Spring `@Component("jarClaudeProcessRunner")` that invokes Claude CLI as an external process; prompt piped via stdin to avoid Windows 32KB CLI arg limit
+- `ClaudeCorrectionService` -- Full-scan correction with **resume capability** (skips already-corrected endpoints), parallel workers, per-run timestamped log files
+- `ClaudeResultMerger` / `CorrectionMerger` -- Merges AI-generated corrections into analysis data
+- `ClaudeSessionManager` / `ClaudeEnrichmentTracker` -- Session lifecycle, progress tracking, per-thread process kill
+- `ClaudeCallLogger` -- Logs every Claude interaction: prompt, response, token counts, latency, success/failure
+- `TreeChunker` / `SwarmClusterer` -- Splits large call trees into chunks; groups endpoints by shared dependencies for coherent multi-endpoint Claude context
+- `FragmentStore` / `CorrectionPersistence` -- Caches fragments and persists corrections alongside static analysis for side-by-side versioning
 
 **Dependencies:** Spring Boot Web, ASM 9.7, CFR 0.152, Apache POI 5.2.5,
 MongoDB Driver Sync 4.11.2.
 
 ### 2.5 unified-web
 
-**Purpose:** Spring Boot web application providing a single deployment for both tools.
-Serves REST APIs, hosts three static web UIs, manages the unified queue system, and
-handles SSE progress streaming.
+**Purpose:** Spring Boot web application providing a single deployment for all tools.
+Serves REST APIs, hosts **four** static web UIs (Home, JAR Analyzer, PL/SQL Parser, Legacy PL/SQL Analyzer), manages the unified queue system, and handles SSE progress streaming.
 
 **Packages:**
 
@@ -832,25 +850,37 @@ to Claude:
   - `max-tree-nodes` (default 500) -- Node count budget per chunk
   - `max-chunk-depth` (default 3) -- Depth budget per chunk
   - `max-prompt-chars` (default 180,000) -- Total prompt size ceiling
+- Chunking produces a **skeleton chunk** (top-level structure) and one or more **branch chunks** (subtrees analyzed in parallel)
+- Each chunk carries its branch context label so Claude understands where it sits in the full tree
 
-- `SwarmClusterer` groups related endpoints/methods for coherent analysis
+- `SwarmClusterer` groups related endpoints/methods by shared dependencies before sending to Claude. This provides coherent multi-endpoint context, improving analysis quality for inter-related business flows.
 
 ### 7.6 Session Management
 
 - `ClaudeSessionManager` tracks active Claude sessions per analysis
 - Sessions can be individually killed (`POST .../sessions/{id}/kill`)
   or bulk-killed (`POST .../sessions/kill-all`)
-- Each running Claude process is tracked by its thread ID for precise teardown
+- Each running Claude process is tracked by its thread ID (`ConcurrentHashMap<Long, Process>`) for precise teardown
 
 ### 7.7 Persistence and Versioning
 
-- `FragmentStore` caches individual Claude response fragments to disk
-- `CorrectionPersistence` saves corrected analysis versions alongside originals
+- `FragmentStore` caches individual Claude response fragments to disk in `data/jar/{key}/claude/`
+- `CorrectionPersistence` saves corrected analysis alongside originals for side-by-side versioning
 - Version management supports loading different analysis versions:
   - Static (original, no Claude data)
   - Claude-enriched
   - Previous Claude version
   - Revert to static
+
+### 7.8 Correction Resume and Logging
+
+The correction pipeline (`ClaudeCorrectionService`) supports **resume**: on re-run it skips endpoints that already have a correction file, making it safe to restart after failure. Each correction run produces a **timestamped log file** in `data/jar/{key}/` containing per-endpoint statistics (attempted, corrected, empty, errors, skipped, total elapsed time).
+
+`ClaudeCallLogger` records every Claude interaction: prompt content, response content, estimated token counts, wall-clock latency, and success/failure flag.
+
+### 7.9 Large File Handling
+
+Analysis JSON files for large JARs can reach 100–400 MB. `AbstractAnalysisDataProvider` uses a **streaming Jackson parser** for all reads to avoid loading the full DOM into heap memory. Summary slices, class trees, and endpoint call trees are all produced via streaming without holding the full analysis in memory simultaneously.
 
 ---
 
