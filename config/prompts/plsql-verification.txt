@@ -1,0 +1,41 @@
+You are verifying the results of a PL/SQL static code analysis tool.
+The tool analyzed Oracle PL/SQL packages and extracted table operations (SELECT, INSERT, UPDATE, DELETE, MERGE).
+Your task is to verify whether these table operations are correct by examining the actual PL/SQL source code.
+
+For each table operation found by static analysis, determine:
+- CONFIRMED: The operation is present in the code and correctly identified
+- REMOVED: The operation is NOT actually in the code (false positive from static analysis)
+- NEW: You found table operations that the static analysis MISSED
+
+=== STATIC ANALYSIS FINDINGS ===
+
+{{STATIC_ANALYSIS_FINDINGS}}
+
+{{SOURCE_WINDOW_NOTE}}
+
+=== PL/SQL SOURCE CODE ===
+
+{{SOURCE_CODE}}
+
+=== RESPONSE FORMAT ===
+
+Respond ONLY with a JSON object in this exact format (no markdown, no explanation outside JSON):
+```json
+{
+  "tables": [
+    {
+      "tableName": "TABLE_NAME",
+      "operations": [
+        {
+          "operation": "SELECT|INSERT|UPDATE|DELETE|MERGE",
+          "status": "CONFIRMED|REMOVED|NEW",
+          "procedureName": "procedure that performs this",
+          "lineNumber": 123,
+          "reason": "brief explanation"
+        }
+      ]
+    }
+  ],
+  "summary": "brief overall summary"
+}
+```

@@ -1,0 +1,1503 @@
+# Unified Analyzer -- Architecture Manual
+
+> **Version:** 1.0.0-SNAPSHOT  
+> **Runtime:** Java 17, Spring Boot 3.2.5  
+> **Group ID:** `com.codeanalyzer`  
+> **Artifact:** `plsql-jar-analyzer`
+
+---
+
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Module Structure](#2-module-structure)
+3. [Build & Deploy](#3-build--deploy)
+4. [Configuration](#4-configuration)
+5. [Data Flow Pipeline](#5-data-flow-pipeline)
+6. [Queue System](#6-queue-system)
+7. [Claude AI Integration](#7-claude-ai-integration)
+8. [REST API Map](#8-rest-api-map)
+9. [Storage Layout](#9-storage-layout)
+10. [Frontend Architecture](#10-frontend-architecture)
+11. [Security Considerations](#11-security-considerations)
+
+---
+
+## 1. Overview
+
+The Unified Analyzer is a multi-module Maven project that combines two complementary
+static analysis engines into a single deployable Spring Boot application:
+
+- **JAR Analyzer** -- Inspects compiled Java bytecode (`.jar` files) using ASM 9.7 and
+  CFR 0.152. Extracts REST endpoints, class hierarchies, call graphs, complexity metrics,
+  and JPA/MongoDB data-access patterns. Optionally enriches results with Claude AI
+  natural-language descriptions.
+
+- **PL/SQL Parser** -- Parses Oracle PL/SQL source code (8i through 23c) using ANTLR4
+  4.13.1. Crawls dependency trees via Oracle data dictionary views, extracts control flow,
+  table operations, triggers, cursors, joins, and exception handlers. Produces structured
+  JSON for downstream consumption.
+
+Both engines share a unified queue system that serializes analysis jobs on a single
+worker thread, a common configuration subsystem (`ConfigDirService`), Server-Sent Events
+(SSE) for real-time progress streaming, and a Claude AI integration layer for
+AI-assisted enrichment and verification.
+
+The application runs as a single fat JAR on a configurable port (default `8083`) and
+serves three static web UIs alongside the REST API layer. No external database is
+required for core functionality; all data persists to the local filesystem. MongoDB
+connectivity is optional and used only for the JAR Analyzer's catalog feature.
+
+### Technology Stack Summary
+
+| Concern               | Technology            | Version        |
+|-----------------------|-----------------------|----------------|
+| Language              | Java (JDK)            | 17             |
+| Framework             | Spring Boot           | 3.2.5          |
+| PL/SQL Parsing        | ANTLR4                | 4.13.1         |
+| SQL Normalization     | JSqlParser            | 5.0            |
+| Bytecode Analysis     | OW2 ASM               | 9.7            |
+| Java Decompilation    | CFR                   | 0.152          |
+| Excel Export          | Apache POI            | 5.2.5          |
+| Catalog Storage       | MongoDB Driver Sync   | 4.11.2         |
+| Oracle Connectivity   | ojdbc11               | 23.3.0.23.09   |
+| Serialization         | Jackson (YAML + JSON) | Managed by Boot|
+| AI Enrichment         | Claude CLI (external)  | Any            |
+| Frontend              | Vanilla JS (IIFE)     | No build step  |
+
+---
+
+## 2. Module Structure
+
+The project is organized as a Maven multi-module build with a parent POM that inherits
+from `spring-boot-starter-parent:3.2.5`. The parent POM declares five child modules and
+manages cross-module dependency versions centrally.
+
+```
+plsql-jar-analyzer/                     (parent POM, packaging=pom)
+  plsql-config/                         Module 1 -- Shared configuration
+  plsql-parser/                         Module 2 -- ANTLR4 PL/SQL parser
+  plsql-analyzer-core/                  Module 3 -- Legacy PL/SQL analyzer
+  jar-analyzer-core/                    Module 4 -- Bytecode analysis engine
+  unified-web/                          Module 5 -- Spring Boot web application
+  docs/                                 Documentation
+  config/                               Runtime configuration files
+  data/                                 Runtime data directory
+  start.bat / start.sh                  Launch scripts
+  dist/ / deploy/                       Distribution packaging
+```
+
+### 2.1 plsql-config
+
+**Purpose:** Shared configuration model and YAML/JSON loader.
+
+**Package:** `com.plsqlanalyzer.config`
+
+**Key Classes:**
+- `PlsqlConfig` -- Root configuration POJO (deserialized from `plsql-config.yaml`)
+- `ConnectionConfig` -- Oracle JDBC connection parameters (host, port, SID/service, credentials)
+- `ProjectConfig` -- Named project with multiple environments
+- `EnvironmentConfig` -- Named environment with connection list
+- `DbUserConfig` -- Per-user database credentials
+- `SchemaMapping` -- Schema alias resolution mappings
+- `ConfigLoader` -- YAML/JSON deserialization utility
+
+**Dependencies:** Jackson Databind, Jackson YAML format.
+
+**Consumers:** All other modules depend on `plsql-config` for configuration types.
+
+### 2.2 plsql-parser
+
+**Purpose:** ANTLR4-based PL/SQL flow analysis engine. This is the most test-intensive
+module with 395 tests (zero failures), including an 88-test grammar hardening suite
+covering Oracle syntax from 8i through 23c.
+
+**Packages:**
+
+```
+com.plsql.parser
+  flow/           Orchestration layer
+  model/          Data classes (FlowResult, FlowNode, FlowEdge, ParseResult, etc.)
+  visitor/        PlSqlAnalysisVisitor -- main ANTLR visitor
+  (root)          PlSqlParserEngine, PlSqlParserMain, PlSqlLexerBase, PlSqlParserBase
+
+com.plsqlanalyzer.parser
+  grammar/        PlSqlAnalyzer.g4 (combined grammar for legacy path)
+  model/          PlsqlProcedure, PlsqlUnit, DependencyGraph, SqlAnalysisResult
+  service/        Parsing services for the legacy analyzer model
+  cache/          Grammar and parse-tree caching
+  visitor/        Visitor for the legacy analyzer grammar
+```
+
+**ANTLR4 Grammars (three files):**
+- `PlSqlLexer.g4` -- Tokenizer for Oracle PL/SQL (split lexer grammar)
+- `PlSqlParser.g4` -- Full parser grammar (DDL, DML, PL/SQL blocks, Oracle-specific syntax)
+- `PlSqlAnalyzer.g4` -- Combined grammar for the legacy analyzer code path
+
+**Key Classes:**
+- `FlowAnalysisMain` -- Entry point coordinating the full analysis pipeline
+- `DependencyCrawler` -- Walks the dependency tree, downloads source from Oracle,
+  recursively parses called objects
+- `SchemaResolver` -- Resolves unqualified object names to schemas using Oracle data
+  dictionary views (`ALL_OBJECTS`, `ALL_SYNONYMS`, `ALL_DEPENDENCIES`). Uses
+  `CONNECT BY` transitive dependency queries. Results are cached to disk as TSV files
+  in `data/cache-plsql/`
+- `TriggerDiscoverer` -- Identifies triggers attached to tables referenced by the
+  analyzed procedure
+- `PlSqlAnalysisVisitor` -- ANTLR visitor extracting flow nodes, table operations,
+  calls, cursors, variables, exception handlers, and dynamic SQL
+- `PlSqlParserEngine` -- Wraps ANTLR lexer/parser setup with error handling and
+  parse-tree caching
+- `ChunkedFlowWriter` -- Writes large analysis results in chunked JSON to avoid memory
+  issues
+
+**Dependencies:** ANTLR4 Runtime, JSqlParser, ojdbc11, Jackson, SnakeYAML, plsql-config.
+
+### 2.3 plsql-analyzer-core
+
+**Purpose:** Legacy PL/SQL analyzer service layer. Provides higher-level analysis
+constructs (call graphs, table operation summaries, join/cursor/sequence summaries)
+built on top of the parser output.
+
+**Package:** `com.plsqlanalyzer.analyzer`
+
+**Key Classes:**
+- `AnalysisService` -- Orchestrates full PL/SQL analysis (delegates to parser, builds
+  call graphs, collects summaries)
+- `FastAnalysisService` -- Lightweight analysis mode for quick results
+- `CallGraphBuilder` / `CallGraph` -- Builds and queries PL/SQL call graphs
+- `TriggerResolver` -- Resolves trigger metadata for referenced tables
+- `TableOperationCollector` -- Aggregates table operations across the dependency tree
+- `JoinOperationCollector` -- Extracts and summarizes join operations
+- `CursorOperationCollector` -- Extracts and summarizes cursor usage
+- `SequenceOperationCollector` -- Extracts and summarizes sequence references
+
+**Models:** `AnalysisResult`, `CallGraphNode`, `CallEdge`, `TableOperationSummary`,
+`JoinOperationSummary`, `CursorOperationSummary`, `SequenceOperationSummary`.
+
+**Dependencies:** plsql-config, plsql-parser, SLF4J.
+
+### 2.4 jar-analyzer-core
+
+**Purpose:** Java bytecode analysis engine. Extracts structural metadata, REST endpoints,
+call graphs, class hierarchies, and complexity metrics from compiled JAR files. Includes
+the full Claude AI enrichment pipeline for JAR analysis.
+
+**Package:** `com.jaranalyzer`
+
+```
+com.jaranalyzer
+  model/        ClassInfo, MethodInfo, EndpointInfo, CallNode, FieldInfo,
+                AnnotationInfo, JarAnalysis, ParameterInfo, etc.
+  service/      56 service classes covering analysis, Claude AI, and export
+  util/         SpringAnnotations, SqlStatementParser, TypeUtils
+```
+
+**Key Services:**
+- `JarParserService` -- Orchestrates end-to-end JAR analysis
+- `BytecodeClassParser` -- ASM-based visitor extracting class/method/field metadata
+- `DecompilerService` -- CFR wrapper for on-demand source decompilation
+- `CallGraphService` / `CallGraphIndex` / `CallTreeBuilder` -- Method-level call
+  graph construction and querying
+- `ExcelExportService` -- Multi-sheet XLSX reports with styled output
+- `MongoCatalogService` -- Persists analysis results to MongoDB (optional)
+- `ProgressService` -- Tracks analysis progress for SSE streaming
+
+**Claude AI Services (within jar-analyzer-core):**
+- `ClaudeAnalysisService` -- Manages enrichment sessions (chunking, verification, merging)
+- `ClaudeProcessRunner` -- Spring `@Component("jarClaudeProcessRunner")` that invokes
+  Claude CLI as an external process
+- `ClaudeResultMerger` / `CorrectionMerger` -- Merges AI-generated corrections into
+  analysis data
+- `ClaudeSessionManager` / `ClaudeEnrichmentTracker` -- Session lifecycle and progress
+- `TreeChunker` / `SwarmClusterer` -- Splits large call trees into Claude-friendly chunks
+- `FragmentStore` / `CorrectionPersistence` -- Caches fragments and persists corrections
+
+**Dependencies:** Spring Boot Web, ASM 9.7, CFR 0.152, Apache POI 5.2.5,
+MongoDB Driver Sync 4.11.2.
+
+### 2.5 unified-web
+
+**Purpose:** Spring Boot web application providing a single deployment for both tools.
+Serves REST APIs, hosts three static web UIs, manages the unified queue system, and
+handles SSE progress streaming.
+
+**Packages:**
+
+```
+com.analyzer
+  chat/           ChatController, ChatService, ChatSession, ChatConfig
+  config/         WebConfig, GlobalSessionsController, PollingConfigController
+  queue/          AnalysisQueueService, QueueController, QueueJob,
+                  JarAnalysisExecutor, PlsqlAnalysisExecutor,
+                  FastAnalysisExecutor, ParserAnalysisExecutor,
+                  ClaudeJobExecutor
+
+com.jaranalyzer.controller
+                  AnalyzerController, DecompileController, ChatboxController,
+                  ProgressController, LogController
+
+com.plsqlanalyzer.web
+  config/         AppConfig, ConfigDirService, ApiLoggingFilter
+  controller/     AnalyzerController, DatabaseController, SourceController,
+                  ConfigController, ClaudeController, DocsController,
+                  LogController, ProgressController
+  parser/
+    config/       ComplexityConfig, JoinComplexityConfig
+    controller/   ParserAnalysisController, ParserConfigController, ClaudeController
+    model/        AnalysisInfo, ParserAnalysisInfo
+    service/      AnalysisService, ClaudeProcessRunner, ClaudeSessionManager,
+                  ClaudePersistenceService, ClaudePromptBuilder, ChunkingUtils
+```
+
+**Dependencies:** Spring Boot Web, Spring Boot JDBC, jar-analyzer-core,
+plsql-analyzer-core, plsql-parser, ojdbc11, Jackson YAML, Jackson JSR-310.
+
+### Module Dependency Graph
+
+```
+plsql-config
+    ^
+    |
+    +-- plsql-parser
+    |       ^
+    |       |
+    +-- plsql-analyzer-core
+    |       ^
+    |       |
+    +-- jar-analyzer-core (independent, no PL/SQL deps)
+    |       ^
+    |       |
+    +-- unified-web (depends on all four modules above)
+```
+
+---
+
+## 3. Build & Deploy
+
+### 3.1 Prerequisites
+
+- **Java 17+** -- Required for compilation and runtime
+- **Maven 3.8+** -- Multi-module build tool
+- **Claude CLI** (optional) -- Required only for AI enrichment features.
+  Install via: `npm install -g @anthropic-ai/claude-code`
+- **Oracle Database** (optional) -- Required only for PL/SQL source fetching
+
+### 3.2 Building
+
+```bash
+# Full build (all modules, with tests)
+mvn clean package
+
+# Full build, skip tests
+mvn clean package -DskipTests
+
+# Build only unified-web and its dependencies
+mvn clean package -pl unified-web -am
+
+# Build a specific module
+mvn clean install -pl plsql-parser
+mvn clean install -pl jar-analyzer-core
+```
+
+The build produces a Spring Boot fat JAR at:
+```
+unified-web/target/unified-web-1.0.0-SNAPSHOT.jar
+```
+
+### 3.3 Running
+
+**Direct launch:**
+```bash
+java -Xms512m -Xmx4g -XX:+UseG1GC -XX:+UseStringDeduplication \
+     -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
+     --server.port=8083 \
+     --app.config-dir=config \
+     --app.data-dir=data
+```
+
+**Using start scripts:**
+```bash
+# Windows
+start.bat
+
+# Linux
+start.sh
+```
+
+The `start.bat` script performs pre-flight checks before launch:
+1. Validates Java is installed and in PATH
+2. Verifies the built JAR file exists
+3. Checks for Claude CLI availability (warns if missing, does not block)
+4. Creates required directories (`config/`, `data/`, subdirectories)
+5. Sets JVM tuning flags
+6. Launches with configured port, config-dir, and data-dir
+
+### 3.4 JVM Tuning
+
+The recommended JVM configuration (set by `start.bat` and the Maven plugin):
+
+| Flag                           | Purpose                                       |
+|--------------------------------|-----------------------------------------------|
+| `-Xms512m`                     | Initial heap size                             |
+| `-Xmx4g`                       | Maximum heap size                             |
+| `-XX:MaxMetaspaceSize=256m`    | Metaspace ceiling                             |
+| `-XX:+UseG1GC`                 | G1 garbage collector                          |
+| `-XX:G1HeapRegionSize=4m`      | G1 region size                                |
+| `-XX:+UseStringDeduplication`  | Deduplicate identical strings (saves memory)  |
+| `-XX:ParallelGCThreads=4`     | Parallel GC threads                           |
+| `-XX:ConcGCThreads=2`         | Concurrent GC threads                         |
+| `-XX:+HeapDumpOnOutOfMemoryError` | Dump heap on OOM                           |
+
+### 3.5 Verifying the Deployment
+
+After startup, the following URLs should be accessible:
+
+| URL                           | Description                    |
+|-------------------------------|--------------------------------|
+| `http://localhost:8083/`      | Home page (launcher)           |
+| `http://localhost:8083/jar/`  | JAR Analyzer UI                |
+| `http://localhost:8083/parser/` | PL/SQL Parser UI             |
+| `http://localhost:8083/api/queue` | Queue state (JSON)          |
+
+---
+
+## 4. Configuration
+
+### 4.1 ConfigDirService
+
+`ConfigDirService` is the central directory manager for all configuration and data
+paths. It is a Spring `@Component` that reads two properties at startup:
+
+| Property          | Default   | Description                                   |
+|-------------------|-----------|-----------------------------------------------|
+| `app.config-dir`  | `config`  | Root directory for configuration files         |
+| `app.data-dir`    | `data`    | Root directory for analysis data and logs      |
+
+Both are fully dynamic -- pass any absolute or relative path at startup:
+
+```bash
+java -jar app.jar --app.config-dir=/etc/analyzer/config --app.data-dir=/var/data/analyzer
+```
+
+At startup, `ConfigDirService` performs the following initialization:
+
+1. Resolves both paths to absolute form
+2. Creates directory trees if they do not exist
+3. Migrates legacy config files from old locations
+4. Seeds missing config files from classpath resources (built into the JAR)
+5. Seeds prompt templates into `config/prompts/`
+6. Wires `PromptTemplates` to check the external config dir first
+7. Runs data layout migration (flat layout to per-analysis layout)
+
+### 4.2 application.properties
+
+The file `unified-web/src/main/resources/application.properties` is the central
+configuration file. All values are overridable via command-line flags (`--key=value`).
+
+**Server:**
+
+| Property                                | Default   | Description                          |
+|-----------------------------------------|-----------|--------------------------------------|
+| `server.port`                           | `8083`    | HTTP port                            |
+| `spring.application.name`              | `unified-analyzer` | Application name             |
+| `server.tomcat.threads.max`            | `50`      | Max Tomcat threads                   |
+| `server.tomcat.threads.min-spare`      | `4`       | Min idle threads                     |
+| `server.tomcat.connection-timeout`     | `60s`     | Connection timeout                   |
+| `spring.servlet.multipart.max-file-size` | `2GB`   | Max upload file size                 |
+| `spring.mvc.async.request-timeout`     | `-1`      | Async timeout (infinite for SSE)     |
+
+**Directories:**
+
+| Property                   | Description                                              |
+|----------------------------|----------------------------------------------------------|
+| `app.config-dir`           | Config files root (plsql-config.yaml, domain-config.json)|
+| `app.data-dir`             | Data files root (jar/, plsql/, logs)                     |
+| `app.parser-config-path`   | Absolute path to `plsql-config.yaml` for parser DB conn  |
+
+**Claude AI:**
+
+| Property                              | Default    | Description                        |
+|---------------------------------------|------------|------------------------------------|
+| `claude.binary`                       | `claude`   | Path to Claude CLI binary          |
+| `claude.analysis.max-endpoints`       | `-1`       | Max endpoints to enrich (-1 = all) |
+| `claude.analysis.parallel-chunks`     | `5`        | Concurrent chunk processing        |
+| `claude.allowed-tools`                | `Read,Grep,Glob,Bash,Write,Edit` | Tools Claude may use |
+| `claude.timeout.per-endpoint`         | `7200`     | Per-endpoint timeout (seconds)     |
+| `claude.timeout.version-check`        | `30`       | CLI version check timeout (seconds)|
+| `claude.timeout.stream-drain`         | `3000`     | Stream drain timeout (seconds)     |
+| `claude.timeout.executor-shutdown`    | `60`       | Executor shutdown timeout (seconds)|
+| `claude.chunking.max-chunk-chars`     | `50000`    | Max characters per chunk           |
+| `claude.chunking.max-tree-nodes`      | `500`      | Max nodes per call tree chunk      |
+| `claude.chunking.max-chunk-depth`     | `3`        | Max depth per chunk                |
+| `claude.chunking.max-prompt-chars`    | `180000`   | Max total prompt size              |
+
+**Call Tree Limits:**
+
+| Property                     | Default | Description                             |
+|------------------------------|---------|-----------------------------------------|
+| `calltree.max-depth`        | `20`    | Maximum call tree depth                  |
+| `calltree.max-children-per-node` | `30` | Max children per node                 |
+| `calltree.max-nodes-per-tree`| `2000`  | Max nodes per tree                      |
+
+**PL/SQL Threading:**
+
+| Property                        | Default | Description                          |
+|---------------------------------|---------|--------------------------------------|
+| `plsql.threads.source-fetch`   | `8`     | Parallel source download threads     |
+| `plsql.threads.trigger-resolve`| `4`     | Parallel trigger resolution threads  |
+| `plsql.threads.metadata`       | `4`     | Parallel metadata fetch threads      |
+| `plsql.threads.claude-parallel`| `5`     | Parallel Claude verification threads |
+| `plsql.tree.max-depth`         | `50`    | Max dependency tree depth            |
+| `plsql.tree.max-nodes`         | `2000`  | Max nodes in dependency tree         |
+
+**Chat:**
+
+| Property               | Default | Description                                |
+|-------------------------|---------|--------------------------------------------|
+| `chat.classic.enabled`  | `true`  | Enable session-based classic chat panel    |
+| `chat.chatbox.enabled`  | `true`  | Enable floating AI chatbox (JAR-specific)  |
+
+**MongoDB (optional):**
+
+| Property                          | Default | Description                     |
+|-----------------------------------|---------|---------------------------------|
+| `mongo.timeout.connect`          | `30`    | Connection timeout (seconds)     |
+| `mongo.timeout.server-selection` | `30`    | Server selection timeout (seconds)|
+
+**Logging:**
+
+| Property                                    | Default                      |
+|---------------------------------------------|------------------------------|
+| `logging.file.name`                        | `{data-dir}/unified-analyzer.log` |
+| `logging.logback.rollingpolicy.max-file-size` | `10MB`                    |
+| `logging.logback.rollingpolicy.max-history`   | `10`                      |
+| `logging.logback.rollingpolicy.total-size-cap`| `500MB`                   |
+
+**DataSource:** Auto-configuration is excluded (`DataSourceAutoConfiguration`).
+PL/SQL manages Oracle connections manually via `DbConnectionManager` using
+parameters from `plsql-config.yaml`.
+
+### 4.3 plsql-config.yaml
+
+Located at `{config-dir}/plsql-config.yaml`. Defines Oracle database connections
+organized by project and environment:
+
+```yaml
+projects:
+  - name: MyProject
+    environments:
+      - name: DEV
+        connections:
+          - name: primary
+            host: db-host
+            port: 1521
+            service: ORCL
+            username: app_user
+            password: "..."
+            schemas:
+              - APP_SCHEMA
+              - COMMON_SCHEMA
+```
+
+Managed at runtime via the REST API (`/api/plsql/config/projects/...`).
+
+### 4.4 domain-config.json
+
+Located at `{config-dir}/domain-config.json`. Defines domain-specific clustering
+rules for the JAR Analyzer. Used to group endpoints and classes into business domains
+for more meaningful analysis output.
+
+### 4.5 Prompt Templates
+
+Located at `{config-dir}/prompts/*.txt`. These files define the prompt templates
+sent to Claude CLI during enrichment and verification. Seeded from classpath on
+first startup. Templates include:
+
+| Template File                    | Purpose                                     |
+|----------------------------------|---------------------------------------------|
+| `plsql-verification.txt`        | PL/SQL analysis verification prompt         |
+| `java-mongo-analysis.txt`       | JAR analysis (MongoDB context)              |
+| `java-mongo-chunk-analysis.txt` | JAR chunk analysis (MongoDB context)         |
+| `java-mongo-correction.txt`     | JAR correction prompt (MongoDB context)      |
+| `java-both-analysis.txt`        | JAR analysis (both DB types)                 |
+| `java-both-chunk-analysis.txt`  | JAR chunk analysis (both DB types)           |
+| `java-both-correction.txt`      | JAR correction prompt (both DB types)        |
+| `java-oracle-analysis.txt`      | JAR analysis (Oracle context)                |
+| `java-oracle-chunk-analysis.txt`| JAR chunk analysis (Oracle context)          |
+| `java-oracle-correction.txt`    | JAR correction prompt (Oracle context)       |
+
+---
+
+## 5. Data Flow Pipeline
+
+### 5.1 JAR Analysis Pipeline
+
+```
+User uploads .jar file
+  |
+  v
+AnalyzerController receives multipart upload
+  |
+  v
+QueueJob(JAR_UPLOAD) submitted to AnalysisQueueService
+  |
+  v
+JarAnalysisExecutor.execute():
+  |
+  +-- Store uploaded JAR to data/jar/{normalizedKey}/stored.jar
+  |
+  +-- JarParserService.analyze():
+  |     +-- BytecodeClassParser extracts ClassInfo/MethodInfo via ASM visitors
+  |     +-- CallGraphService builds method-level call graphs
+  |     +-- CallTreeBuilder constructs per-endpoint call trees
+  |     +-- EndpointDetector identifies REST endpoints (Spring MVC annotations)
+  |     +-- ProgressService.update() --> SSE events to browser
+  |
+  +-- Write analysis.json to data/jar/{normalizedKey}/
+  |
+  +-- (Optional) MongoCatalogService fetches MongoDB collection metadata
+  |
+  v
+Browser receives "job-complete" SSE event
+```
+
+### 5.2 PL/SQL Parser Analysis Pipeline
+
+```
+User selects entry points (procedures/packages) via UI
+  |
+  v
+ParserAnalysisController receives analysis request
+  |
+  v
+QueueJob(PARSER_ANALYSIS) submitted to AnalysisQueueService
+  |
+  v
+ParserAnalysisExecutor.execute():
+  |
+  +-- FlowAnalysisMain orchestrates:
+  |     +-- SchemaResolver resolves object names to schemas via Oracle queries
+  |     |     (cached to data/cache-plsql/ as TSV)
+  |     +-- DependencyCrawler walks the dependency tree:
+  |     |     +-- Downloads PL/SQL source from Oracle (ALL_SOURCE)
+  |     |     +-- Parses each object via PlSqlParserEngine
+  |     |     +-- PlSqlAnalysisVisitor extracts flow nodes, table ops, calls
+  |     |     +-- Recursively crawls called objects
+  |     +-- TriggerDiscoverer finds triggers on referenced tables
+  |     +-- ChunkedFlowWriter writes results as chunked JSON
+  |
+  +-- Write output to data/plsql-parse/{analysisName}/
+  |
+  v
+Browser receives "job-complete" SSE event
+```
+
+### 5.3 Legacy PL/SQL Analysis Pipeline
+
+```
+User submits PL/SQL analysis via legacy UI
+  |
+  v
+AnalyzerController (/api/plsql/analysis/analyze)
+  |
+  v
+QueueJob(PLSQL_ANALYSIS) submitted
+  |
+  v
+PlsqlAnalysisExecutor.execute():
+  |
+  +-- AnalysisService orchestrates:
+  |     +-- Parser engine processes source code
+  |     +-- CallGraphBuilder constructs call graph
+  |     +-- TableOperationCollector / JoinOperationCollector /
+  |     |   CursorOperationCollector / SequenceOperationCollector
+  |     |   aggregate summary data
+  |     +-- TriggerResolver resolves trigger metadata
+  |
+  +-- Write AnalysisResult to data/plsql/{analysisName}/
+  |
+  v
+Browser receives "job-complete" SSE event
+```
+
+### 5.4 Claude AI Enrichment Pipeline
+
+```
+User clicks "Enrich with Claude" in UI
+  |
+  v
+QueueJob(CLAUDE_ENRICH | CLAUDE_FULL_SCAN | ...) submitted
+  |
+  v
+ClaudeJobExecutor.execute():
+  |
+  +-- Load analysis data from disk
+  |
+  +-- TreeChunker splits call trees into manageable chunks
+  |     (respects max-chunk-chars, max-tree-nodes, max-chunk-depth)
+  |
+  +-- For each chunk:
+  |     +-- ClaudePromptBuilder assembles prompt from template + chunk data
+  |     +-- ClaudeProcessRunner spawns Claude CLI process:
+  |     |     +-- Prompt piped via stdin (avoids Windows 32KB CLI arg limit)
+  |     |     +-- stdout/stderr read in separate threads
+  |     |     +-- Configurable timeout per endpoint
+  |     +-- ClaudeResultMerger extracts JSON from Claude response
+  |     +-- FragmentStore caches intermediate results
+  |
+  +-- CorrectionMerger applies corrections to analysis data
+  |
+  +-- CorrectionPersistence saves corrected version to disk
+  |
+  v
+Browser receives "job-complete" SSE event
+```
+
+---
+
+## 6. Queue System
+
+### 6.1 Architecture
+
+The `AnalysisQueueService` is a Spring `@Service` that provides a unified, thread-safe
+job queue for all analysis types. It enforces sequential execution -- only one analysis
+job runs at a time -- preventing concurrent heavy workloads from exhausting memory or
+CPU.
+
+**Key design decisions:**
+- **Single worker thread** -- A daemon `ExecutorService` with exactly one thread
+  (`Executors.newSingleThreadExecutor`). Jobs execute sequentially in FIFO order.
+- **Linked list queue** -- Pending jobs are stored in a `LinkedList<QueueJob>` guarded
+  by an explicit `Object lock`.
+- **History retention** -- Completed, failed, and cancelled jobs are kept in a bounded
+  history list (`MAX_HISTORY = 50`).
+- **SSE broadcasting** -- All state changes (queued, started, completed, failed,
+  cancelled) are broadcast to connected SSE clients via `CopyOnWriteArrayList<SseEmitter>`.
+
+### 6.2 Job Types
+
+```java
+public enum Type {
+    JAR_UPLOAD,              // Upload + analyze a JAR file
+    PLSQL_ANALYSIS,          // Full PL/SQL analysis (legacy path)
+    PLSQL_FAST_ANALYSIS,     // Lightweight PL/SQL analysis
+    PARSER_ANALYSIS,         // PL/SQL Parser flow analysis
+    CLAUDE_ENRICH,           // Claude AI enrichment (batch)
+    CLAUDE_ENRICH_SINGLE,    // Claude AI enrichment (single endpoint)
+    CLAUDE_RESCAN,           // Re-scan with Claude
+    CLAUDE_FULL_SCAN,        // Full Claude scan
+    CLAUDE_CORRECT,          // Claude correction (batch)
+    CLAUDE_CORRECT_SINGLE,   // Claude correction (single endpoint)
+    PLSQL_CLAUDE_VERIFY      // PL/SQL Claude verification
+}
+```
+
+### 6.3 Job Lifecycle
+
+```
+QUEUED  -->  RUNNING  -->  COMPLETE
+                |
+                +--->  FAILED
+                |
+                +--->  CANCELLED
+```
+
+**Status fields tracked per job:**
+- `id` -- UUID-based short identifier (8 chars)
+- `type` -- Job type enum
+- `displayName` -- Human-readable name
+- `status` -- Current lifecycle status
+- `currentStep` -- Description of what is happening now
+- `stepNumber` / `totalSteps` / `progressPercent` -- Progress tracking
+- `submittedAt` / `startedAt` / `completedAt` -- Timestamps
+- `error` -- Error message (if failed)
+- `log` -- Synchronized list of log messages (last 50 exposed via API)
+- `metadata` -- Arbitrary key-value pairs for job-specific parameters
+- `followUpJob` -- Optional chained job to submit on completion
+
+### 6.4 Job Executors
+
+Each job type is handled by a dedicated executor class:
+
+| Executor                  | Job Types                                          |
+|---------------------------|----------------------------------------------------|
+| `JarAnalysisExecutor`     | `JAR_UPLOAD`                                       |
+| `PlsqlAnalysisExecutor`   | `PLSQL_ANALYSIS`                                   |
+| `FastAnalysisExecutor`    | `PLSQL_FAST_ANALYSIS`                              |
+| `ParserAnalysisExecutor`  | `PARSER_ANALYSIS`                                  |
+| `ClaudeJobExecutor`       | `CLAUDE_ENRICH`, `CLAUDE_ENRICH_SINGLE`,           |
+|                           | `CLAUDE_RESCAN`, `CLAUDE_FULL_SCAN`,               |
+|                           | `CLAUDE_CORRECT`, `CLAUDE_CORRECT_SINGLE`,         |
+|                           | `PLSQL_CLAUDE_VERIFY`                              |
+
+### 6.5 Cancellation
+
+Jobs can be cancelled in two ways:
+- **Pending jobs** -- Removed from the queue immediately, status set to `CANCELLED`.
+- **Running jobs** -- Status set to `CANCELLED`, worker thread interrupted via
+  `Thread.interrupt()`. The executor must check for interruption and clean up.
+
+### 6.6 Reordering
+
+Clients can reorder pending jobs by sending an ordered list of job IDs to
+`POST /api/queue/reorder`. The queue rebuilds itself in the specified order, appending
+any unmentioned jobs at the end.
+
+### 6.7 Follow-up Jobs
+
+A job can specify a `followUpJob` map in its metadata. When the job completes
+successfully, `AnalysisQueueService` automatically submits the follow-up job. This
+enables chaining (e.g., run analysis, then enrich with Claude).
+
+---
+
+## 7. Claude AI Integration
+
+### 7.1 Architecture Overview
+
+Claude AI integration exists in **two separate implementations**, one for each
+analysis domain:
+
+| Location                                          | Bean Name                    | Type         | Domain       |
+|---------------------------------------------------|------------------------------|--------------|--------------|
+| `jar-analyzer-core/.../ClaudeProcessRunner.java`  | `jarClaudeProcessRunner`     | `@Component` | JAR analysis |
+| `unified-web/.../parser/service/ClaudeProcessRunner.java` | `parserClaudeProcessRunner` | `@Service` | PL/SQL Parser|
+| `unified-web/.../web/service/ClaudeProcessRunner.java` | (legacy PL/SQL)          | Plain POJO   | Legacy PL/SQL|
+
+Both implementations share the same core approach:
+1. Spawn Claude CLI as an external process via `ProcessBuilder`
+2. Pipe prompts via stdin (avoiding the Windows 32KB command-line argument limit)
+3. Read stdout/stderr in separate threads to prevent deadlocks
+4. Track active processes per thread ID for targeted kill support
+5. Enforce configurable timeouts
+
+### 7.2 Process Execution Model
+
+```
+Java Application
+  |
+  +-- ProcessBuilder("claude", "--allowedTools", "Read,Grep,...", "-p", ...)
+  |
+  +-- Prompt piped to stdin (buffered, 8KB chunks, 64KB buffer)
+  |
+  +-- stdout reader thread --> StringBuilder
+  |
+  +-- stderr reader thread --> StringBuilder (logged)
+  |
+  +-- waitFor(timeoutSeconds) --> result or TimeoutException
+  |
+  +-- Process tree destroyed on timeout/cancellation
+```
+
+**Key implementation details:**
+
+- **Stdin piping** uses a dedicated daemon thread with 64KB `BufferedOutputStream`.
+  The thread writes in 8KB chunks. This avoids the Windows 32KB CLI argument limit
+  that would cause error 206 if the prompt were passed as a command-line argument.
+
+- **Process tracking** uses a `ConcurrentHashMap<Long, Process>` keyed by thread ID.
+  This supports both targeted kills (single session) and bulk kills (all sessions for
+  a JAR).
+
+- **Prompt truncation** is applied when stdin content exceeds `MAX_PROMPT_CHARS`
+  (configurable, default 180KB). A truncation notice is appended.
+
+### 7.3 Environment Variables
+
+The PL/SQL Parser's `ClaudeProcessRunner` pre-configures AWS Bedrock environment
+variables for Claude:
+
+| Variable                     | Default Value  |
+|------------------------------|----------------|
+| `CLAUDE_CODE_USE_BEDROCK`    | `1`            |
+| `AWS_PROFILE`                | `ClaudeCode`   |
+| `AWS_REGION`                 | `eu-central-1` |
+
+These can be overridden at runtime via the `setEnv()` method.
+
+### 7.4 Availability Detection
+
+Both implementations check for Claude CLI availability by running `claude --version`.
+The parser-side implementation caches the result for 60 seconds to avoid repeated
+subprocess spawns.
+
+### 7.5 Chunking Strategy
+
+For large analysis results, the enrichment pipeline chunks the data before sending
+to Claude:
+
+- `TreeChunker` splits call trees based on configurable limits:
+  - `max-chunk-chars` (default 50,000) -- Character budget per chunk
+  - `max-tree-nodes` (default 500) -- Node count budget per chunk
+  - `max-chunk-depth` (default 3) -- Depth budget per chunk
+  - `max-prompt-chars` (default 180,000) -- Total prompt size ceiling
+
+- `SwarmClusterer` groups related endpoints/methods for coherent analysis
+
+### 7.6 Session Management
+
+- `ClaudeSessionManager` tracks active Claude sessions per analysis
+- Sessions can be individually killed (`POST .../sessions/{id}/kill`)
+  or bulk-killed (`POST .../sessions/kill-all`)
+- Each running Claude process is tracked by its thread ID for precise teardown
+
+### 7.7 Persistence and Versioning
+
+- `FragmentStore` caches individual Claude response fragments to disk
+- `CorrectionPersistence` saves corrected analysis versions alongside originals
+- Version management supports loading different analysis versions:
+  - Static (original, no Claude data)
+  - Claude-enriched
+  - Previous Claude version
+  - Revert to static
+
+---
+
+## 8. REST API Map
+
+### 8.1 Queue Management (`/api/queue`)
+
+| Method | Path                    | Description                         |
+|--------|-------------------------|-------------------------------------|
+| GET    | `/api/queue`            | Get full queue state (current, pending, history) |
+| GET    | `/api/queue/{id}`       | Get single job details              |
+| POST   | `/api/queue/{id}/cancel`| Cancel a queued or running job      |
+| POST   | `/api/queue/reorder`    | Reorder pending jobs                |
+| GET    | `/api/queue/events`     | SSE stream of queue state changes   |
+
+### 8.2 JAR Analyzer (`/api/jar/*`)
+
+**Analysis & Data** (`/api/jar/jars`):
+
+| Method | Path                                          | Description                              |
+|--------|-----------------------------------------------|------------------------------------------|
+| POST   | `/api/jar/jars`                               | Upload and analyze a JAR file            |
+| POST   | `/api/jar/jars/analyze-local`                 | Analyze a JAR from local filesystem path |
+| GET    | `/api/jar/jars`                               | List all analyzed JARs                   |
+| GET    | `/api/jar/jars/{id}`                          | Get analysis result for a specific JAR   |
+| DELETE | `/api/jar/jars/{id}`                          | Delete a JAR analysis                    |
+| GET    | `/api/jar/jars/{id}/summary`                  | Endpoint summary with enrichment data    |
+| GET    | `/api/jar/jars/{id}/summary/headers`          | Summary column headers                   |
+| GET    | `/api/jar/jars/{id}/summary/external-calls`   | External call summary                    |
+| GET    | `/api/jar/jars/{id}/summary/dynamic-flows`    | Dynamic flow summary                     |
+| GET    | `/api/jar/jars/{id}/summary/aggregation-flows`| Aggregation flow summary                 |
+| GET    | `/api/jar/jars/{id}/summary/beans`            | Spring bean summary                      |
+| GET    | `/api/jar/jars/{id}/classes/tree`             | Class tree structure                     |
+| GET    | `/api/jar/jars/{id}/classes/by-index/{idx}`   | Get class by index                       |
+| GET    | `/api/jar/jars/{id}/endpoints/by-index/{idx}/call-tree` | Call tree for endpoint      |
+| GET    | `/api/jar/jars/{id}/versions`                 | List analysis versions                   |
+| GET    | `/api/jar/jars/{id}/collections`              | MongoDB collections for this JAR         |
+| POST   | `/api/jar/jars/export-excel`                  | Export analysis to XLSX                  |
+| POST   | `/api/jar/jars/reanalyze-all`                 | Re-analyze all stored JARs               |
+| POST   | `/api/jar/jars/{id}/reanalyze`                | Re-analyze a specific JAR                |
+
+**Decompilation & Claude** (`/api/jar/jars`):
+
+| Method | Path                                                   | Description                         |
+|--------|--------------------------------------------------------|-------------------------------------|
+| GET    | `/api/jar/jars/{id}/decompile`                         | Decompile a class via CFR           |
+| GET    | `/api/jar/jars/settings/claude-status`                 | Check Claude CLI availability       |
+| GET    | `/api/jar/jars/settings/claude-test`                   | Run Claude stdin pipe integration test |
+| GET    | `/api/jar/jars/{id}/claude-progress`                   | Get Claude enrichment progress      |
+| GET    | `/api/jar/jars/{id}/claude-fragments`                  | List Claude response fragments      |
+| GET    | `/api/jar/jars/{id}/claude-fragments/{filename}`       | Get a specific fragment             |
+| GET    | `/api/jar/jars/{id}/endpoints`                         | List endpoints for a JAR            |
+| GET    | `/api/jar/jars/{id}/endpoints/{endpoint}/nodes`        | Get call tree nodes                 |
+| GET    | `/api/jar/jars/{id}/endpoints/{endpoint}/nodes/{nodeId}` | Get specific node              |
+| GET    | `/api/jar/jars/{id}/endpoints/{endpoint}/call-tree`    | Get call tree for endpoint          |
+| POST   | `/api/jar/jars/{id}/claude-enrich-single`              | Enrich single endpoint with Claude  |
+| POST   | `/api/jar/jars/{id}/claude-rescan`                     | Re-scan with Claude                 |
+| POST   | `/api/jar/jars/{id}/claude-full-scan`                  | Full Claude scan                    |
+| POST   | `/api/jar/jars/{id}/claude-correct`                    | Run Claude corrections (batch)      |
+| POST   | `/api/jar/jars/{id}/claude-correct-single`             | Run Claude correction (single)      |
+| POST   | `/api/jar/jars/{id}/revert-claude`                     | Revert to pre-Claude version        |
+| GET    | `/api/jar/jars/{id}/corrections`                       | List correction summaries           |
+| GET    | `/api/jar/jars/{id}/corrections/{endpoint}`            | Get correction for endpoint         |
+| GET    | `/api/jar/jars/{id}/correction-logs`                   | List correction log files           |
+| GET    | `/api/jar/jars/{id}/correction-logs/{endpointName}`    | Correction log for endpoint         |
+| GET    | `/api/jar/jars/{id}/correction-logs/file/{fileName}`   | Read correction log file            |
+| GET    | `/api/jar/jars/{id}/run-logs`                          | List run log files                  |
+| GET    | `/api/jar/jars/{id}/run-logs/{logName}`                | Read run log file                   |
+| GET    | `/api/jar/jars/{name}/claude-stats`                    | Claude enrichment statistics        |
+| GET    | `/api/jar/jars/{name}/claude-stats/{sessionId}`        | Stats for specific session          |
+| POST   | `/api/jar/jars/{id}/kill-sessions`                     | Kill all Claude sessions for JAR    |
+| GET    | `/api/jar/jars/sessions`                               | List all active Claude sessions     |
+| POST   | `/api/jar/jars/sessions/{sessionId}/kill`              | Kill specific Claude session        |
+| POST   | `/api/jar/jars/{id}/fetch-catalog`                     | Fetch MongoDB catalog               |
+| GET    | `/api/jar/jars/{id}/catalog`                           | Get cached MongoDB catalog          |
+
+**Progress & Logs:**
+
+| Method | Path                    | Description                         |
+|--------|-------------------------|-------------------------------------|
+| GET    | `/api/jar/progress`     | SSE stream of JAR analysis progress |
+| GET    | `/api/jar/logs`         | Tail the application log            |
+
+**Chatbox** (`/api/jars`):
+
+| Method | Path                            | Description                     |
+|--------|---------------------------------|---------------------------------|
+| POST   | `/api/jars/{id}/chat`           | Send message to chatbot         |
+| GET    | `/api/jars/{id}/chat/history`   | Get chat history                |
+| DELETE | `/api/jars/{id}/chat/history`   | Clear chat history              |
+
+### 8.3 PL/SQL Parser (`/api/parser/*`)
+
+**Analysis:**
+
+| Method | Path                                        | Description                         |
+|--------|---------------------------------------------|-------------------------------------|
+| GET    | `/api/parser/analyses`                      | List all parser analyses            |
+| POST   | `/api/parser/analyze`                       | Start a new parser analysis         |
+| GET    | `/api/parser/analyses/{name}/index`         | Get analysis index                  |
+| GET    | `/api/parser/analyses/{name}/node/{file}`   | Get a specific parsed node          |
+| GET    | `/api/parser/analyses/{name}/tables`        | Table operations summary            |
+| GET    | `/api/parser/analyses/{name}/call-graph`    | Call graph data                     |
+| GET    | `/api/parser/analyses/{name}/source/{file}` | Get PL/SQL source file              |
+| GET    | `/api/parser/analyses/{name}/procedures`    | List parsed procedures              |
+| GET    | `/api/parser/analyses/{name}/joins`         | Join operations summary             |
+| GET    | `/api/parser/analyses/{name}/cursors`       | Cursor usage summary                |
+| GET    | `/api/parser/analyses/{name}/sequences`     | Sequence references                 |
+| GET    | `/api/parser/analyses/{name}/call-tree/{nodeId}` | Call tree for node            |
+| GET    | `/api/parser/analyses/{name}/call-tree/{nodeId}/callers` | Reverse call tree    |
+| GET    | `/api/parser/analyses/{name}/resolver/{type}` | Schema resolver results by type  |
+
+**Claude Enrichment for Parser:**
+
+| Method | Path                                                      | Description                     |
+|--------|-----------------------------------------------------------|---------------------------------|
+| POST   | `/api/parser/analyses/{name}/claude/verify`               | Start Claude verification       |
+| GET    | `/api/parser/analyses/{name}/claude/progress`             | Get verification progress       |
+| GET    | `/api/parser/analyses/{name}/claude/progress/stream`      | SSE stream of progress          |
+| GET    | `/api/parser/analyses/{name}/claude/result`               | Get verification result         |
+| GET    | `/api/parser/analyses/{name}/claude/chunks`               | List prompt chunks              |
+| GET    | `/api/parser/analyses/{name}/claude/chunks/summary`       | Chunk summary statistics        |
+| GET    | `/api/parser/analyses/{name}/claude/chunks/{id}`          | Get specific chunk              |
+| GET    | `/api/parser/analyses/{name}/claude/table-chunks`         | Table-oriented chunks           |
+| POST   | `/api/parser/analyses/{name}/claude/review`               | Submit manual review            |
+| POST   | `/api/parser/analyses/{name}/claude/apply`                | Apply corrections               |
+| POST   | `/api/parser/analyses/{name}/claude/sessions/{id}/kill`   | Kill session                    |
+| GET    | `/api/parser/analyses/{name}/claude/versions`             | List analysis versions          |
+| POST   | `/api/parser/analyses/{name}/claude/versions/load-static` | Load static version             |
+| POST   | `/api/parser/analyses/{name}/claude/versions/load-claude` | Load Claude-enriched version    |
+| POST   | `/api/parser/analyses/{name}/claude/versions/load-prev`   | Load previous version           |
+| POST   | `/api/parser/analyses/{name}/claude/versions/revert`      | Revert to static                |
+| GET    | `/api/parser/claude/status`                               | Claude CLI status               |
+| GET    | `/api/parser/claude/sessions`                             | List all active sessions        |
+| POST   | `/api/parser/claude/sessions/kill-all`                    | Kill all active sessions        |
+
+**Configuration:**
+
+| Method | Path                       | Description                    |
+|--------|----------------------------|--------------------------------|
+| GET    | `/api/parser/config`       | Get parser configuration       |
+
+### 8.4 Legacy PL/SQL Analyzer (`/api/plsql/*`)
+
+**Analysis** (`/api/plsql/analysis`):
+
+| Method | Path                                             | Description                    |
+|--------|--------------------------------------------------|--------------------------------|
+| POST   | `/api/plsql/analysis/analyze`                    | Start full analysis            |
+| POST   | `/api/plsql/analysis/analyze-fast`               | Start fast analysis            |
+| GET    | `/api/plsql/analysis`                            | List analyses                  |
+| GET    | `/api/plsql/analysis/history`                    | Analysis history               |
+| GET    | `/api/plsql/analysis/history/{name}`             | Get specific history entry     |
+| DELETE | `/api/plsql/analysis/history/{name}`             | Delete history entry           |
+| GET    | `/api/plsql/analysis/versions`                   | List analysis versions         |
+| GET    | `/api/plsql/analysis/call-graph`                 | Get call graph                 |
+| GET    | `/api/plsql/analysis/detail/{procName}`          | Procedure detail               |
+| GET    | `/api/plsql/analysis/call-tree/{procName}`       | Call tree for procedure        |
+| GET    | `/api/plsql/analysis/call-tree/{procName}/callers` | Reverse call tree           |
+| GET    | `/api/plsql/analysis/tables`                     | Table operations               |
+| GET    | `/api/plsql/analysis/tables/{tableName}`         | Operations on specific table   |
+| GET    | `/api/plsql/analysis/tables/{tableName}/metadata`| Table metadata                 |
+| GET    | `/api/plsql/analysis/tables/{tableName}/triggers`| Table triggers                 |
+| GET    | `/api/plsql/analysis/sequences`                  | Sequence references            |
+| GET    | `/api/plsql/analysis/joins`                      | Join operations                |
+| GET    | `/api/plsql/analysis/cursors`                    | Cursor usage                   |
+| GET    | `/api/plsql/analysis/errors`                     | Parse errors                   |
+| GET    | `/api/plsql/analysis/procedures`                 | List all procedures            |
+| GET    | `/api/plsql/analysis/source/{owner}/{objectName}`| PL/SQL source                  |
+| GET    | `/api/plsql/analysis/references/{objectName}`    | Object references              |
+| GET    | `/api/plsql/analysis/search`                     | Search procedures/objects      |
+| GET    | `/api/plsql/analysis/jobs`                       | Queue jobs (legacy)            |
+| GET    | `/api/plsql/analysis/jobs/{jobId}`               | Get job (legacy)               |
+| POST   | `/api/plsql/analysis/jobs/{jobId}/cancel`        | Cancel job (legacy)            |
+
+**Claude Verification** (`/api/plsql/claude`):
+
+| Method | Path                                        | Description                     |
+|--------|---------------------------------------------|---------------------------------|
+| GET    | `/api/plsql/claude/status`                  | Claude CLI status               |
+| POST   | `/api/plsql/claude/verify`                  | Start verification              |
+| GET    | `/api/plsql/claude/progress`                | Get progress                    |
+| GET    | `/api/plsql/claude/progress/stream`         | SSE progress stream             |
+| GET    | `/api/plsql/claude/result`                  | Get latest result               |
+| GET    | `/api/plsql/claude/result/{analysisName}`   | Get result by analysis name     |
+| GET    | `/api/plsql/claude/chunks`                  | List chunks                     |
+| GET    | `/api/plsql/claude/chunks/summary`          | Chunk summary                   |
+| GET    | `/api/plsql/claude/chunks/{chunkId}`        | Get specific chunk              |
+| GET    | `/api/plsql/claude/table-chunks`            | Table-oriented chunks           |
+| GET    | `/api/plsql/claude/sessions`                | Active sessions                 |
+| POST   | `/api/plsql/claude/sessions/{id}/kill`      | Kill session                    |
+| POST   | `/api/plsql/claude/sessions/kill-all`       | Kill all sessions               |
+| GET    | `/api/plsql/claude/versions`                | List versions                   |
+| POST   | `/api/plsql/claude/versions/load-static`    | Load static version             |
+| POST   | `/api/plsql/claude/versions/load-claude`    | Load Claude version             |
+| POST   | `/api/plsql/claude/versions/load-prev`      | Load previous version           |
+| POST   | `/api/plsql/claude/versions/revert`         | Revert to static                |
+
+**Database** (`/api/plsql/db`):
+
+| Method | Path                                               | Description                     |
+|--------|----------------------------------------------------|---------------------------------|
+| GET    | `/api/plsql/db/users`                              | List Oracle DB users/schemas    |
+| POST   | `/api/plsql/db/test`                               | Test database connection        |
+| GET    | `/api/plsql/db/objects/{username}`                 | List objects for a schema       |
+| GET    | `/api/plsql/db/source/{username}/{objectName}`     | Download PL/SQL source          |
+| GET    | `/api/plsql/db/cached-source`                      | Get cached source files         |
+| GET    | `/api/plsql/db/packages/{username}`                | List packages in schema         |
+| GET    | `/api/plsql/db/package/{username}/{packageName}`   | Package details                 |
+| GET    | `/api/plsql/db/find/{objectInput}`                 | Find object across schemas      |
+| GET    | `/api/plsql/db/table-info/{tableName}`             | Table metadata from Oracle      |
+| POST   | `/api/plsql/db/query`                              | Run ad-hoc SQL query            |
+
+**Configuration** (`/api/plsql/config`):
+
+| Method | Path                                                                     | Description              |
+|--------|--------------------------------------------------------------------------|--------------------------|
+| GET    | `/api/plsql/config`                                                      | Get current config       |
+| GET    | `/api/plsql/config/dir`                                                  | Get config/data dirs     |
+| GET    | `/api/plsql/config/schemas`                                              | List configured schemas  |
+| GET    | `/api/plsql/config/projects`                                             | List projects            |
+| POST   | `/api/plsql/config/projects`                                             | Create project           |
+| PUT    | `/api/plsql/config/projects/{name}`                                      | Update project           |
+| DELETE | `/api/plsql/config/projects/{name}`                                      | Delete project           |
+| GET    | `/api/plsql/config/projects/{project}/environments`                      | List environments        |
+| POST   | `/api/plsql/config/projects/{project}/environments`                      | Create environment       |
+| PUT    | `/api/plsql/config/projects/{project}/environments/{env}`                | Update environment       |
+| DELETE | `/api/plsql/config/projects/{project}/environments/{env}`                | Delete environment       |
+| GET    | `/api/plsql/config/projects/{project}/environments/{env}/connections`    | List connections         |
+| POST   | `/api/plsql/config/projects/{project}/environments/{env}/connections`    | Create connection        |
+| POST   | `/api/plsql/config/projects/{project}/environments/{env}/connections/test` | Test connection        |
+| PUT    | `/api/plsql/config/projects/{project}/environments/{env}/connections/{conn}` | Update connection  |
+| DELETE | `/api/plsql/config/projects/{project}/environments/{env}/connections/{conn}` | Delete connection  |
+| POST   | `/api/plsql/config/test-connection`                                      | Test ad-hoc connection   |
+| GET    | `/api/plsql/config/resolve`                                              | Resolve config path      |
+
+**Source, Logs, Progress:**
+
+| Method | Path                       | Description                           |
+|--------|----------------------------|---------------------------------------|
+| GET    | `/api/plsql/source/file`   | Read a PL/SQL source file from disk   |
+| GET    | `/api/plsql/logs`          | Tail the application log              |
+| GET    | `/api/plsql/progress`      | SSE stream of PL/SQL analysis progress|
+
+### 8.5 Shared APIs
+
+| Method | Path                         | Description                          |
+|--------|------------------------------|--------------------------------------|
+| GET    | `/api/config/polling`        | Get polling configuration            |
+| GET    | `/api/sessions`              | Global session overview (all tools)  |
+| GET    | `/api/sessions/summary`      | Session summary statistics           |
+| GET    | `/api/chat/config`           | Chat feature configuration           |
+| POST   | `/api/chat/sessions`         | Create new chat session              |
+| GET    | `/api/chat/sessions`         | List chat sessions                   |
+| GET    | `/api/chat/sessions/{id}`    | Get chat session                     |
+| DELETE | `/api/chat/sessions/{id}`    | Delete chat session                  |
+| POST   | `/api/chat/sessions/{id}/messages` | Send message in session        |
+| GET    | `/api/chat/sessions/{id}/report`   | Generate chat report           |
+| POST   | `/api/chat/files/read`       | Read file for chat context           |
+| POST   | `/api/chat/files/write`      | Write file from chat                 |
+| GET    | `/api/docs`                  | List documentation pages             |
+| GET    | `/api/docs/{id}`             | Get documentation page               |
+
+---
+
+## 9. Storage Layout
+
+### 9.1 Configuration Directory (`config/`)
+
+```
+config/
+  plsql-config.yaml              Oracle DB connections (projects/environments)
+  domain-config.json             Domain clustering rules for JAR analysis
+  prompts/
+    plsql-verification.txt       PL/SQL verification prompt template
+    java-mongo-analysis.txt      JAR analysis prompt (MongoDB)
+    java-mongo-chunk-analysis.txt
+    java-mongo-correction.txt
+    java-both-analysis.txt       JAR analysis prompt (both DBs)
+    java-both-chunk-analysis.txt
+    java-both-correction.txt
+    java-oracle-analysis.txt     JAR analysis prompt (Oracle)
+    java-oracle-chunk-analysis.txt
+    java-oracle-correction.txt
+```
+
+### 9.2 Data Directory (`data/`)
+
+```
+data/
+  unified-analyzer.log           Main application log (rolling, 10MB max)
+  unified-analyzer.*.log.gz      Rotated compressed logs
+
+  jar/                           JAR Analyzer data
+    {normalizedKey}/             Per-JAR analysis directory
+      stored.jar                 Uploaded JAR file
+      analysis.json              Raw analysis result (100-400MB for large JARs)
+      analysis_corrected.json    Claude-enriched version
+      analysis_corrected_prev.json  Previous Claude version
+      mongo-catalog.json         MongoDB collection metadata
+      claude/                    Claude enrichment fragments
+      corrections/               Claude correction files
+      endpoints/                 Per-endpoint breakdown files
+      chat/                      Chatbot conversation history
+
+  plsql/                         Legacy PL/SQL Analyzer data
+    {analysisName}/              Per-analysis directory
+      claude/                    Claude verification results
+
+  plsql-parse/                   PL/SQL Parser data
+    {analysisName}/              Per-analysis directory
+      index.json                 Analysis index (procedure list, metadata)
+      *.json                     Chunked flow analysis results per object
+      source/                    Downloaded PL/SQL source files
+      call-graph.json            Call graph data
+      tables.json                Table operations summary
+      claude/                    Claude enrichment results
+
+  cache-plsql/                   SchemaResolver disk cache
+    *.tsv                        Cached Oracle query results (tab-separated)
+
+  claude-chatbot/                Classic chat session data
+    {sessionId}/                 Per-session directory
+```
+
+### 9.3 Data Layout Migration
+
+`ConfigDirService` automatically migrates data from legacy flat layouts to
+per-analysis layouts on startup. The migration is idempotent (safe to run
+multiple times):
+
+- **JAR data:** Flat directories (`data/jar/analysis/`, `data/jar/jars/`,
+  `data/jar/claude/`, etc.) are consolidated into per-JAR directories
+  (`data/jar/{normalizedKey}/`).
+
+- **PL/SQL data:** Claude data from `data/plsql/claude/{name}/` is moved into
+  `data/plsql/{name}/claude/`.
+
+---
+
+## 10. Frontend Architecture
+
+### 10.1 Technology
+
+The frontend is built with vanilla JavaScript using the IIFE (Immediately Invoked
+Function Expression) module pattern. There is no build step, no bundler, no
+transpilation. CSS and JS files are served as static resources directly by Spring Boot.
+
+The visual design uses a Catppuccin-like dark theme across all three UIs, providing
+a consistent low-contrast color palette with accent colors for interactive elements.
+
+### 10.2 Static Resource Structure
+
+```
+unified-web/src/main/resources/static/
+  index.html                     Home page (launcher for both tools)
+
+  jar/                           JAR Analyzer UI
+    index.html                   Main page
+    style.css                    Primary stylesheet
+    css/
+      chatbox.css                Chatbox styles
+    js/
+      api.js                     API client
+      dashboard.js               Dashboard view
+      sidebar.js                 Navigation sidebar
+      summary.js                 Endpoint summary table
+      summary-claude.js          Claude enrichment columns
+      summary-corrections.js     Correction overlay
+      summary-explorer.js        Tree explorer
+      summary-trace.js           Call trace view
+      summary-export.js          Export functionality
+      summary-export-excel.js    Excel export
+      summary-export-modal.js    Export modal dialog
+      summary-export-style.js    Export styling
+      summary-col-filter.js      Column filter
+      summary-corr-logbrowser.js Correction log viewer
+      summary-popups.js          Popup overlays
+      summary-vert-popup.js      Vertical popup
+      summary-codeview.js        Decompiled code viewer
+      summary-helpers.js         Shared utilities
+      summary-aggregation.js     Aggregation flow view
+      summary-dynamic.js         Dynamic flow view
+      summary-scheduled.js       Scheduled task view
+      summary-vertical.js        Vertical layout view
+      codeTree.js                Class tree browser
+      codeTreePanel.js           Code tree panel
+      codeTreeViews.js           Code tree views
+      callGraph.js               Call graph visualization
+      endpointList.js            Endpoint listing
+      nav.js                     Navigation
+      sessions.js                Session management
+      chatbox.js                 AI chatbox
+      chat-toggle.js             Chat panel toggle
+      logviewer.js               Log viewer
+      utils.js                   Utilities
+
+  plsql/                         Legacy PL/SQL Analyzer UI
+    index.html                   Main page
+    css/
+      style.css                  Primary stylesheet
+      summary-views.css          Summary view styles
+    js/
+      api.js                     API client
+      app.js                     Application entry
+      summary.js                 Summary table
+      summary-analyzer.js        Analyzer view
+      summary-tables.js          Table operations view
+      summary-claude.js          Claude enrichment
+      summary-corrections.js     Corrections view
+      summary-explorer.js        Tree explorer
+      summary-trace.js           Call trace
+      summary-export.js          Export
+      summary-export-excel.js    Excel export
+      summary-export-modal.js    Export modal
+      summary-export-style.js    Export styling
+      summary-col-filter.js      Column filter
+      summary-corr-logbrowser.js Correction log viewer
+      summary-helpers.js         Shared utilities
+      summary-progress.js        Progress tracking
+      claude.js                  Claude integration
+      callGraph.js               Call graph
+      config.js                  Configuration
+      cursors.js                 Cursor view
+      export.js                  Export utilities
+      joins.js                   Join view
+      logViewer.js               Log viewer
+      predicates.js              Predicate analysis
+      sourceView.js              Source code viewer
+      tableFramework.js          Table framework
+      tableOps.js                Table operations
+      triggerModal.js            Trigger detail modal
+
+  parser/                        PL/SQL Parser UI
+    index.html                   Main page
+    css/
+      base.css                   Base styles and variables
+      buttons.css                Button styles
+      sidebar.css                Sidebar navigation
+      topbar.css                 Top bar
+      forms.css                  Form elements
+      scrollbar.css              Custom scrollbars
+      variables.css              CSS custom properties
+      summary.css                Summary table
+      table-ops.css              Table operations
+      table-detail.css           Table detail view
+      call-graph-viz.css         Call graph visualization
+      call-trace.css             Call trace
+      chunk-viewer.css           Chunk viewer
+      claude-enrichment.css      Claude enrichment panel
+      claude-overview.css        Claude overview
+      claude-insights.css        Claude insights
+      column-filter.css          Column filter
+      complexity.css             Complexity metrics
+      config.css                 Configuration panel
+      detail-header.css          Detail header
+      error-modal.css            Error modal
+      ex-handlers.css            Exception handlers
+      export.css                 Export
+      home.css                   Home view
+      join-detail.css            Join detail
+      join-summary.css           Join summary
+      log-viewer.css             Log viewer
+      pagination.css             Pagination controls
+      perf-summary.css           Performance summary
+      query-runner.css           Query runner
+      refs.css                   References view
+      right-panel.css            Right panel
+      sequences.css              Sequences view
+      source-view.css            Source code view
+      statements.css             Statement view
+      sync.css                   Sync indicators
+      toast.css                  Toast notifications
+      tooltips.css               Tooltips
+      trace.css                  Trace view
+      trigger-detail.css         Trigger detail
+      triggers.css               Triggers list
+    js/
+      home.js                    Home/landing view
+      router.js                  Client-side routing
+      config.js                  Configuration
+      history.js                 Analysis history
+      leftPanel.js               Left navigation panel
+      summary.js                 Summary table
+      tableFramework.js          Table framework
+      tableOps.js                Table operations
+      callGraph.js               Call graph
+      callGraphViz.js            Call graph visualization
+      callGraphModal.js          Call graph modal
+      callGraphFullscreen.js     Fullscreen graph
+      chunkViewer.js             Chunk viewer
+      claudeEnrichment.js        Claude enrichment panel
+      claudeInsights.js          Claude insights panel
+      complexity.js              Complexity metrics
+      cursors.js                 Cursor view
+      detailHeader.js            Detail header
+      errorModal.js              Error modal
+      exHandlers.js              Exception handlers
+      export.js                  Export
+      joinSummary.js             Join summary
+      joins.js                   Join detail
+      perfSummary.js             Performance summary
+      refs.js                    Object references
+      scope.js                   Scope analysis
+      sequences.js               Sequence references
+      sourceView.js              Source code viewer
+      statements.js              Statement analysis
+      tooltips.js                Tooltips
+      triggerDetail.js           Trigger detail
+      triggers.js                Trigger list
+      utils.js                   Utilities
+
+  shared/                        Shared assets
+    chat.js                      Classic chat widget
+    chat.css                     Classic chat styles
+    chatbox.js                   Floating chatbox widget
+    chatbox.css                  Floating chatbox styles
+    chat-api.js                  Chat API client
+    log-fab.js                   Floating log button
+    log-fab.css                  Log FAB styles
+    poll-config.js               Polling configuration
+    help.css                     Help panel styles
+    user-manual.css              User manual styles
+```
+
+### 10.3 JS Module Pattern
+
+Each JS file follows the IIFE module pattern to avoid global namespace pollution:
+
+```javascript
+(function() {
+    'use strict';
+    // Private state and functions
+    const state = { ... };
+    function init() { ... }
+
+    // Expose public API on window
+    window.ModuleName = { init, ... };
+})();
+```
+
+Files are loaded via `<script>` tags in the HTML pages. Order matters -- shared
+utilities load first, then domain-specific modules.
+
+### 10.4 SSE Integration
+
+The frontend uses `EventSource` for real-time updates:
+
+```javascript
+const source = new EventSource('/api/queue/events');
+source.addEventListener('job-started', (e) => { ... });
+source.addEventListener('job-complete', (e) => { ... });
+source.addEventListener('job-failed', (e) => { ... });
+source.addEventListener('job-cancelled', (e) => { ... });
+source.addEventListener('state', (e) => { ... });
+```
+
+SSE emitters are configured with a 30-minute timeout (`1,800,000ms`). Dead emitters
+(disconnected clients) are automatically cleaned up on send failure.
+
+### 10.5 Resource Caching
+
+In the default development configuration, static resource caching is disabled:
+
+```properties
+spring.web.resources.cache.period=0
+spring.web.resources.cache.cachecontrol.no-cache=true
+spring.web.resources.cache.cachecontrol.no-store=true
+```
+
+For production, these should be changed to enable browser caching.
+
+---
+
+## 11. Security Considerations
+
+### 11.1 No Authentication
+
+The application does not include authentication or authorization. It is designed for
+use within a trusted network or behind a corporate proxy that handles access control.
+All REST endpoints are open.
+
+### 11.2 Database Credentials
+
+Oracle database credentials are stored in `plsql-config.yaml` within the
+`config/` directory. Passwords are stored in plain text. Recommendations:
+
+- Restrict filesystem permissions on the config directory
+- Use a secrets management solution in production environments
+- The JDBC auto-configuration is disabled; the application manages connections manually
+
+### 11.3 File System Access
+
+The application reads and writes to the filesystem extensively:
+
+- `data/` directory contains all analysis outputs (potentially large JSON files)
+- `config/` directory contains configuration including database credentials
+- Claude CLI has access to tools (Read, Grep, Glob, Bash, Write, Edit) within its
+  allowed toolset -- this means Claude can read and modify files on the filesystem
+  within its working directory scope
+
+### 11.4 File Upload
+
+JAR file uploads are accepted up to 2GB (`spring.servlet.multipart.max-file-size=2GB`).
+There is no virus scanning or content validation beyond basic JAR structure verification.
+Uploaded JARs are stored persistently in `data/jar/{key}/stored.jar`.
+
+### 11.5 SQL Injection Protection
+
+- The legacy PL/SQL database controller exposes `POST /api/plsql/db/query` which
+  accepts ad-hoc SQL queries. This is intended for authorized analyst use only.
+- The SchemaResolver uses `PreparedStatement` with parameterized queries for all
+  Oracle data dictionary queries.
+
+### 11.6 Claude CLI Security
+
+- Claude processes run as external OS processes with the same privileges as the
+  application
+- The `--allowedTools` flag restricts which tools Claude can use
+- Environment variables for AWS Bedrock authentication are injected into the
+  process environment
+- Active processes are tracked per thread and can be forcibly killed via the API
+
+### 11.7 CORS
+
+No explicit CORS configuration is present. The application serves its own frontend
+from the same origin, so cross-origin requests are not needed in normal operation.
+
+### 11.8 Compression
+
+JSON response compression is enabled for responses over 1KB:
+
+```properties
+server.compression.enabled=true
+server.compression.mime-types=application/json
+server.compression.min-response-size=1024
+```
+
+### 11.9 Recommendations for Production Deployment
+
+1. Place behind a reverse proxy (nginx, Apache) with TLS termination
+2. Add authentication (Spring Security, OAuth2, or proxy-level)
+3. Encrypt database credentials in `plsql-config.yaml`
+4. Restrict the ad-hoc query endpoint or disable it entirely
+5. Set appropriate file upload size limits
+6. Enable static resource caching
+7. Review and restrict Claude CLI allowed tools
+8. Configure firewall rules to restrict access to the configured port
+9. Set `logging.level.root=WARN` for production (reduce log volume)
+10. Monitor heap usage -- large JAR analyses can produce 100-400MB JSON files
