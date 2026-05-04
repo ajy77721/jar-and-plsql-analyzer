@@ -200,6 +200,12 @@ After launch, the following endpoints should respond:
 | `http://localhost:8083/jar/` | JAR / WAR Analyzer — upload, browse call trees, dispatch analysis, export |
 | `http://localhost:8083/parser/` | PL/SQL Parser — run flow analysis, browse parsed procedures |
 
+### JAR / WAR Analyzer Highlights
+
+- **Connections modal** — the **Connections** button on any analyzed JAR/WAR opens a styled modal popup (not a browser alert) that lists every database connection detected in the archive's config files. Each database type is shown in its own color-coded section: MongoDB (green), Oracle (red), and PostgreSQL (blue). Passwords are masked. The modal shows which config file each entry was extracted from and can be closed via the × button, by clicking outside the panel, or by pressing Escape.
+
+- **Resource Files** — after analysis completes, the Code Structure tab's left panel includes a **Resource Files** section at the bottom. It lists up to 50 resource files (`.properties`, `.yml`, `.yaml`, `.json`, `.xml`, `.sql`, `.conf`, `.txt`) extracted from the JAR or WAR, grouped by type with file-type icons. Clicking any file loads its content in the right panel on demand.
+
 ---
 
 ## Modules
@@ -356,7 +362,7 @@ When Claude CLI is available on `PATH`, the platform enables:
 - **Chatbot** — conversational interface scoped to the currently selected JAR/WAR analysis
 - **Chunked prompts** — large call trees are automatically split into manageable chunks
 
-Static analysis (bytecode parsing, call trees, dispatch resolution, export) works
+Static analysis (bytecode parsing, call trees, dispatch resolution, resource file extraction, export) works
 fully without Claude CLI installed.
 
 ---

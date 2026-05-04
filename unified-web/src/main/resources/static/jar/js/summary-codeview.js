@@ -50,7 +50,7 @@ Object.assign(JA.summary, {
 
         // Interface/abstract redirect — offer implementation picker unless caller opted out
         if (!skipInterfaceRedirect && (cls.isInterface || cls.isAbstract)) {
-            if (JA.nav && !JA.nav._implMap) JA.nav.init();
+            if (JA.nav && (!JA.nav._implMap || (!Object.keys(JA.nav._implMap).length && JA.app.currentAnalysis))) JA.nav.init();
             const impls = (JA.nav && JA.nav._implMap)
                 ? (JA.nav._implMap[cls.fullyQualifiedName] || JA.nav._implMap[cls.simpleName] || [])
                 : [];
@@ -394,6 +394,14 @@ Object.assign(JA.summary, {
 
     _buildDecompCode(cls, source, highlightMethod, esc, containerSel) {
         const lines = source.split('\n');
+        if (!this._classIdx && JA.app.currentAnalysis) {
+            this._classIdx = {};
+            const classSource = JA.app.currentAnalysis.classIndex || JA.app.currentAnalysis.classes || [];
+            for (const c of classSource) {
+                this._classIdx[c.fullyQualifiedName] = c;
+                if (!this._classIdx[c.simpleName]) this._classIdx[c.simpleName] = c;
+            }
+        }
         const classIdx = this._classIdx;
 
         // Collect ALL unique navigable invocations (text-based matching, not line-number)
@@ -411,7 +419,7 @@ Object.assign(JA.summary, {
         // Build per-field dispatch narrowing — uses receiverFieldName from bytecode analysis
         // to resolve which implementation a specific field's call resolves to, rather than
         // treating every interface call as globally ambiguous.
-        if (JA.nav && !JA.nav._implMap) JA.nav.init();
+        if (JA.nav && (!JA.nav._implMap || (!Object.keys(JA.nav._implMap).length && JA.app.currentAnalysis))) JA.nav.init();
         if (!this._ambiPickers) this._ambiPickers = [];
 
         const STANDARD_ANNS = new Set(['Autowired','Inject','Qualifier','Named','Resource','Value',
@@ -649,6 +657,14 @@ Object.assign(JA.summary, {
 
     _buildFallbackCode(cls, highlightMethod, esc, containerSel) {
         const codeLines = this._reconstructJavaFallback(cls);
+        if (!this._classIdx && JA.app.currentAnalysis) {
+            this._classIdx = {};
+            const classSource = JA.app.currentAnalysis.classIndex || JA.app.currentAnalysis.classes || [];
+            for (const c of classSource) {
+                this._classIdx[c.fullyQualifiedName] = c;
+                if (!this._classIdx[c.simpleName]) this._classIdx[c.simpleName] = c;
+            }
+        }
         const classIdx = this._classIdx;
         let inHighlight = false;
 
@@ -819,7 +835,7 @@ Object.assign(JA.summary, {
     _buildImplementationsSection(cls, esc, highlightMethod) {
         if (!cls.isInterface && !cls.isAbstract) return '';
         if (!JA.nav) return '';
-        if (!JA.nav._implMap) JA.nav.init();
+        if (!JA.nav._implMap || (!Object.keys(JA.nav._implMap).length && JA.app.currentAnalysis)) JA.nav.init();
         const fqn = cls.fullyQualifiedName || '';
         const impls = (JA.nav._implMap[fqn] || JA.nav._implMap[cls.simpleName] || []);
         if (!impls.length) return '';

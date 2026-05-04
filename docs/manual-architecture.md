@@ -209,15 +209,15 @@ built on top of the parser output.
 | `FragmentStore` | Caches individual Claude response fragments to disk |
 | `ChatboxService` | JAR-scoped chatbox conversation handler |
 | `ChatHistoryService` | Classic chat session persistence and management |
-| `MongoCatalogService` | Fetches MongoDB collection metadata and verifies collection existence |
+| `MongoCatalogService` | Fetches MongoDB collection metadata and verifies collection existence; also detects MongoDB, Oracle, and PostgreSQL connection details from bundled config files |
 | `ExcelExportService` | Multi-sheet XLSX export using Apache POI |
 | `ExcelStyleHelper` | Reusable cell styling (colors, borders, fonts) for Excel output |
-| `PersistenceService` | Reads/writes `analysis.json` and version files |
+| `PersistenceService` | Reads/writes `analysis.json` and version files; exposes `storeResourceFiles()`, `listResourceFiles()`, and `loadResourceFile()` for resource file management |
 | `ProgressService` | Tracks analysis progress percentages for SSE streaming |
 | `SubtreeCache` | Caches built subtrees to avoid redundant re-traversal across endpoints |
 | `SourceEnrichmentService` | Correlates decompiled bytecode with original source code |
 | `EndpointOutputWriter` | Writes per-endpoint breakdown JSON files |
-| `JarDataPaths` | Resolves all file paths for a given JAR key |
+| `JarDataPaths` | Resolves all file paths for a given JAR key; includes `resourcesDir()` for the extracted resource files directory |
 | `WarDataPaths` | Resolves all file paths for a given WAR key |
 | `JarNameUtil` | Normalizes JAR/WAR names to filesystem-safe keys |
 | `PromptTemplates` | Loads Claude prompt templates from `config/prompts/` |
@@ -642,11 +642,21 @@ JarAnalysisExecutor.execute():
   |
   +-- Write analysis.json to data/jar/{normalizedKey}/
   |
+  +-- Resource file extraction (in try-catch, non-fatal):
+  |     +-- JarParserService.extractResourceFiles() scans the JAR entries:
+  |     |     +-- Includes: .properties, .yml, .yaml, .json, .xml, .sql, .conf, .txt
+  |     |     +-- Excludes: .class files, META-INF/maven/ paths, binary content
+  |     |     +-- Limits: max 50 files, max 200 KB per file
+  |     +-- PersistenceService.storeResourceFiles() writes each file to
+  |           data/jar/{normalizedKey}/resources/{filename}
+  |
   +-- (Optional) MongoCatalogService fetches MongoDB collection metadata
   |
   v
 Browser receives "job-complete" SSE event
 ```
+
+The same extraction logic is applied for WAR files via `WarParserService.extractResourceFiles()`, which reads only from `WEB-INF/classes/` — resource files bundled inside nested JARs under `WEB-INF/lib/` are not extracted.
 
 ### 5.2 PL/SQL Parser Analysis Pipeline
 
@@ -739,6 +749,26 @@ ClaudeJobExecutor.execute():
   v
 Browser receives "job-complete" SSE event
 ```
+
+### 5.5 Connection Detection Pipeline
+
+`MongoCatalogService` is responsible for scanning the uploaded JAR/WAR's bundled
+configuration files and extracting database connection details for display in the
+**Connections** modal. It detects three database types:
+
+| Database | Detection Logic | Config Property Keys / Patterns |
+|---|---|---|
+| **MongoDB** | Looks for `spring.data.mongodb.uri`, `spring.data.mongodb.host`, or MongoClient URI strings in `.properties` and `.yaml` config files | `spring.data.mongodb.*`, `mongodb.uri`, `mongo.uri` |
+| **Oracle** | Looks for JDBC URLs containing `oracle` or TNS-style connection descriptors | `spring.datasource.url` with `jdbc:oracle:*`, `oracle.jdbc.url` |
+| **PostgreSQL** | Looks for JDBC URLs containing `postgresql` or `postgres` | `spring.datasource.url` with `jdbc:postgresql:*`; also checks `spring.datasource.driver-class-name` for `org.postgresql.Driver` |
+
+Both `.properties` and `.yaml` (`.yml`) config files inside the archive are scanned.
+Passwords found in any connection string or property value are masked as `****` before
+the results are returned to the frontend.
+
+The detection runs on demand when the user clicks the **Connections** button in the JAR
+header. It does not run automatically during analysis. Results are not cached to disk;
+the archive is re-scanned on each request.
 
 ---
 
@@ -1020,6 +1050,29 @@ render navigation links:
    This preserves navigation for concrete class methods (e.g.,
    `orchestrator.runAllStrategiesOnMetric()`) even when they have a `receiverFieldName`.
 
+#### Bug Fix — Dispatch Links in Summary Modal Context
+
+When the decompile popup is opened from the Summary tab (rather than from the Code
+Structure tab), two initialization problems previously caused dispatch navigation links
+to be absent from the modal output:
+
+- **`_classIdx` lazy initialization** — `_classIdx` (the class-name-to-index lookup map
+  built in `JA.nav`) was not re-initialized inside `_buildDecompCode` and
+  `_buildFallbackCode` when those functions were called from the Summary modal context.
+  The fix adds a lazy-init guard at the entry point of both functions: if `_classIdx` is
+  null or empty, it is rebuilt from `JA.app.currentAnalysis.classes` before proceeding.
+
+- **`_implMap` stale empty guard** — `_implMap` (the interface-to-implementations map)
+  was initialized to an empty object early in the module load. If the analysis data
+  arrived after this early init, `_implMap` remained empty and dispatch links were never
+  rendered. The fix adds a re-initialization check: if `_implMap` has no keys at the
+  time `_buildDecompCode` runs but `JA.nav._implMap` is populated, the local reference
+  is refreshed before the narrowing logic executes.
+
+After these fixes, the Summary tab's decompile modal renders the same colored
+"→ N implementations: …" dispatch navigation links as the Code Structure tab's
+decompile panel.
+
 ---
 
 ## 7b. Chatbox and Chat History Architecture
@@ -1157,6 +1210,8 @@ availability so the frontend can enable/disable the View Previous button.
 | POST   | `/api/jar/jars/sessions/{sessionId}/kill`              | Kill specific Claude session        |
 | POST   | `/api/jar/jars/{id}/fetch-catalog`                     | Fetch MongoDB catalog               |
 | GET    | `/api/jar/jars/{id}/catalog`                           | Get cached MongoDB catalog          |
+| GET    | `/api/jar/jars/{id}/resources`                         | List extracted resource files       |
+| GET    | `/api/jar/jars/{id}/resources/{filename:.+}`           | Fetch content of a resource file    |
 
 **Progress & Logs:**
 
@@ -1386,6 +1441,9 @@ data/
       corrections/               Claude correction files
       endpoints/                 Per-endpoint breakdown files
       chat/                      Chatbot conversation history
+      resources/                 Extracted resource files (.properties, .yml, .yaml,
+                                 .json, .xml, .sql, .conf, .txt) — max 50 files,
+                                 200 KB each; populated during analysis
 
   plsql/                         Legacy PL/SQL Analyzer data
     {analysisName}/              Per-analysis directory
@@ -1631,7 +1689,7 @@ Object.assign(JA.summary, {
 | `JA.api` | `api.js` | All REST calls: `getCallTree()`, `getSummary()`, `decompile()` |
 | `JA.nav` | `nav.js` | Class navigation history, `_implMap` (interface → implementations), `_classIdx` |
 | `JA.summary` | `summary.js` + `summary-*.js` | All Summary tab logic (11 sub-tabs, trace views, export, dispatch) |
-| `JA.codeTree` | `codeTree.js` + `codeTreePanel.js` | Code Structure tab tree and right panel |
+| `JA.codeTree` | `codeTree.js` + `codeTreePanel.js` | Code Structure tab tree and right panel; manages `_resources` (extracted resource file list) and `_resourcesLoaded` (lazy-load guard) for the Resource Files section |
 | `JA.callGraph` | `callGraph.js` | Endpoint Flows tab and call chain table |
 | `JA.endpointList` | `endpointList.js` | Left pane of Endpoint Flows |
 | `JA.toast` | `utils.js` | Toast notification helper |
@@ -1647,6 +1705,7 @@ summary-explorer → summary-trace → summary-codeview → (other summary-* fil
 2. `JA.nav.init()` builds `_implMap` and `_classIdx` from the analysis class list
 3. Each tab module reads from `JA.app.currentAnalysis` when rendering
 4. `JA.summary._epReports` holds the per-endpoint report array used by all Summary sub-tabs
+5. When the Code Structure tab is first opened or a JAR is (re)selected, `JA.codeTree` checks `_resourcesLoaded`; if false, it fetches `GET /api/jar/jars/{id}/resources`, stores the result in `_resources`, and renders the Resource Files section at the bottom of the left panel. Resource file content is loaded individually on demand via `GET /api/jar/jars/{id}/resources/{filename:.+}`
 
 Files are loaded via `<script>` tags in the HTML pages. Order matters — shared
 utilities load first, then domain-specific modules.
@@ -1688,11 +1747,11 @@ For production, these should be changed to enable browser caching.
 | File | Purpose |
 |---|---|
 | `api.js` | All REST calls wrapped in `JA.api.*` methods |
-| `app.js` | Entry point — JAR selection, tab switching, upload control |
+| `app.js` | Entry point — JAR selection, tab switching, upload control; renders the styled Connections modal (replaces browser `alert()`) |
 | `callGraph.js` | Endpoint Flows tab — operation flow table with dispatch badges |
 | `chat-toggle.js` | Switches between New (chatbox) and Classic chat modes |
 | `chatbox.js` | Floating AI chatbox FAB and popover |
-| `codeTree.js` | Code Structure tab — package/project/visual tree views |
+| `codeTree.js` | Code Structure tab — package/project/visual tree views; manages `_resources` / `_resourcesLoaded` state for the Resource Files section |
 | `codeTreePanel.js` | Right code panel container in Code Structure tab |
 | `codeTreeViews.js` | View mode renderers (hierarchical, card grid) for code tree |
 | `dash-panel.js` | Statistics panels on the dashboard |
@@ -1704,7 +1763,7 @@ For production, these should be changed to enable browser caching.
 | `sidebar.js` | Persistent left sidebar — JAR list, upload, Claude progress |
 | `summary-aggregation.js` | Aggregation Flows sub-tab |
 | `summary-claude.js` | Claude Insights columns in the endpoint summary |
-| `summary-codeview.js` | Decompiled code modal with dispatch-aware navigation links |
+| `summary-codeview.js` | Decompiled code modal with dispatch-aware navigation links; `_classIdx` lazy-init and `_implMap` stale-guard fixes ensure dispatch links render correctly when the modal is opened from the Summary tab |
 | `summary-col-filter.js` | Advanced filter panel (range sliders, multi-select pills) |
 | `summary-corrections.js` | Claude Corrections sub-tab |
 | `summary-corr-logbrowser.js` | Correction log file browser |

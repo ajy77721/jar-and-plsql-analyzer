@@ -89,6 +89,10 @@ public class JarDataPaths {
         return jarRoot(jarName).resolve("chat").resolve("history.jsonl");
     }
 
+    public Path resourcesDir(String jarName) {
+        return jarRoot(jarName).resolve("resources");
+    }
+
     public void ensureJarRoot(String jarName) throws IOException {
         Files.createDirectories(jarRoot(jarName));
     }

@@ -281,6 +281,64 @@ public class JarParserService {
         return configs;
     }
 
+    private static final Set<String> RESOURCE_EXTENSIONS = Set.of(
+            ".properties", ".yml", ".yaml", ".json", ".xml", ".sql", ".conf", ".txt"
+    );
+    private static final int MAX_RESOURCE_FILES = 50;
+    private static final int MAX_RESOURCE_BYTES = 200 * 1024;
+
+    public Map<String, String> extractResourceFiles(File jarFile) throws IOException {
+        Map<String, String> resources = new LinkedHashMap<>();
+        try (JarFile jar = new JarFile(jarFile)) {
+            boolean isSpringBoot = jar.getEntry("BOOT-INF/classes/") != null;
+            boolean isWar = jar.getEntry("WEB-INF/classes/") != null;
+
+            Enumeration<JarEntry> entries = jar.entries();
+            while (entries.hasMoreElements() && resources.size() < MAX_RESOURCE_FILES) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+                if (entry.isDirectory()) continue;
+                if (name.endsWith(".class")) continue;
+                if (name.contains("META-INF/maven/")) continue;
+
+                String lower = name.toLowerCase();
+                boolean matchesExt = false;
+                for (String ext : RESOURCE_EXTENSIONS) {
+                    if (lower.endsWith(ext)) { matchesExt = true; break; }
+                }
+                if (!matchesExt) continue;
+
+                if (isWar) {
+                    if (!name.startsWith("WEB-INF/classes/") && name.contains("/")) {
+                        String topDir = name.substring(0, name.indexOf('/'));
+                        if (!topDir.equals("WEB-INF") && name.contains("/")) continue;
+                    }
+                } else if (isSpringBoot) {
+                    if (!name.startsWith("BOOT-INF/classes/") && name.contains("/")) {
+                        String topDir = name.substring(0, name.indexOf('/'));
+                        if (!topDir.equals("BOOT-INF") && name.contains("/")) continue;
+                    }
+                }
+
+                String filename = name.contains("/") ? name.substring(name.lastIndexOf('/') + 1) : name;
+                if (filename.isBlank()) continue;
+                if (resources.containsKey(filename)) {
+                    filename = name.replace('/', '_');
+                }
+
+                try (InputStream is = jar.getInputStream(entry)) {
+                    byte[] bytes = is.readNBytes(MAX_RESOURCE_BYTES);
+                    String content = new String(bytes, StandardCharsets.UTF_8);
+                    resources.put(filename, content);
+                } catch (Exception e) { /* skip binary or unreadable */ }
+            }
+        }
+        if (!resources.isEmpty()) {
+            log.info("Extracted {} resource file(s) from JAR: {}", resources.size(), resources.keySet());
+        }
+        return resources;
+    }
+
     /**
      * Stream-read classes from JSONL file, processing each with a callback.
      * This avoids loading the whole list into memory.

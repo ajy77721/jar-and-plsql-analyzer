@@ -668,8 +668,12 @@ JA.app = {
                 const url = (info.oracle.jdbcUrl || '').replace(/(\/\/[^:]+:)[^@]+(@)/, '$1***$2');
                 parts.push(`Oracle${url ? ': ' + url : ''}`);
             }
+            if (info.postgres) {
+                const url = (info.postgres.jdbcUrl || '').replace(/(:)[^@/]+(@)/, '$1***$2');
+                parts.push(`PostgreSQL${url ? ': ' + url : ''}`);
+            }
             if (parts.length) {
-                el.innerHTML = `<span class="dash-conn-badge" title="${parts.join('\n')}" onclick="JA.app._showConnectionsModal('${id.replace(/'/g, "\\'")}')">🔗 ${parts.length} connection${parts.length > 1 ? 's' : ''}</span>`;
+                el.innerHTML = `<span class="dash-conn-badge" title="${parts.join('\n')}" onclick="JA.app._showConnectionsModal('${id.replace(/'/g, "\\'")}')">&#128279; ${parts.length} connection${parts.length > 1 ? 's' : ''}</span>`;
             } else {
                 el.innerHTML = '';
             }
@@ -680,17 +684,81 @@ JA.app = {
         try {
             const info = await JA.api.getConnections(id);
             if (!info || !info.available) { JA.toast.error('No connection info stored for this JAR'); return; }
-            let msg = `Connection Info — ${id}\n`;
+
+            const esc = JA.utils.escapeHtml;
+
+            const maskJdbcPassword = url => url ? url.replace(/(:)[^@/]+(@)/, '$1****$2') : 'N/A';
+            const maskMongoUri = uri => uri ? uri.replace(/(?<=:)[^/@:]+(?=@)/, '****') : 'N/A';
+
+            let sectionsHtml = '';
+
             if (info.mongodb) {
-                msg += `\nMongoDB:\n  URI: ${info.mongodb.uri || 'N/A'}`;
-                if (info.mongodb.database) msg += `\n  Database: ${info.mongodb.database}`;
+                const uri = maskMongoUri(info.mongodb.uri || '');
+                const db = info.mongodb.database || '';
+                sectionsHtml += `
+                <div class="conn-modal-section">
+                    <div class="conn-modal-section-header conn-modal-mongo">
+                        <span class="conn-modal-icon">&#127809;</span>
+                        <span>MongoDB</span>
+                    </div>
+                    <div class="conn-modal-rows">
+                        <div class="conn-modal-row"><span class="conn-modal-label">URI</span><span class="conn-modal-value conn-modal-mono">${esc(uri)}</span></div>
+                        ${db ? `<div class="conn-modal-row"><span class="conn-modal-label">Database</span><span class="conn-modal-value conn-modal-mono">${esc(db)}</span></div>` : ''}
+                    </div>
+                </div>`;
             }
+
             if (info.oracle) {
-                const url = (info.oracle.jdbcUrl || 'N/A').replace(/(\/\/[^:]+:)[^@]+(@)/, '$1***$2');
-                msg += `\nOracle JDBC URL:\n  ${url}`;
+                const url = maskJdbcPassword(info.oracle.jdbcUrl || '');
+                sectionsHtml += `
+                <div class="conn-modal-section">
+                    <div class="conn-modal-section-header conn-modal-oracle">
+                        <span class="conn-modal-icon">&#128150;</span>
+                        <span>Oracle</span>
+                    </div>
+                    <div class="conn-modal-rows">
+                        <div class="conn-modal-row"><span class="conn-modal-label">JDBC URL</span><span class="conn-modal-value conn-modal-mono">${esc(url)}</span></div>
+                    </div>
+                </div>`;
             }
-            msg += `\n\nExtracted: ${info.extractedAt || 'N/A'}`;
-            alert(msg);
+
+            if (info.postgres) {
+                const url = maskJdbcPassword(info.postgres.jdbcUrl || '');
+                sectionsHtml += `
+                <div class="conn-modal-section">
+                    <div class="conn-modal-section-header conn-modal-postgres">
+                        <span class="conn-modal-icon">&#128024;</span>
+                        <span>PostgreSQL</span>
+                    </div>
+                    <div class="conn-modal-rows">
+                        <div class="conn-modal-row"><span class="conn-modal-label">JDBC URL</span><span class="conn-modal-value conn-modal-mono">${esc(url)}</span></div>
+                    </div>
+                </div>`;
+            }
+
+            const extractedAt = info.extractedAt ? new Date(info.extractedAt).toLocaleString() : 'N/A';
+
+            const overlay = document.createElement('div');
+            overlay.className = 'conn-modal-overlay';
+            overlay.innerHTML = `
+                <div class="conn-modal-dialog" role="dialog" aria-modal="true">
+                    <div class="conn-modal-header">
+                        <span class="conn-modal-title">Connection Info</span>
+                        <button class="conn-modal-close" aria-label="Close">&times;</button>
+                    </div>
+                    <div class="conn-modal-body">
+                        ${sectionsHtml || '<p class="conn-modal-empty">No connection details found.</p>'}
+                        <div class="conn-modal-footer-meta">Extracted: ${esc(extractedAt)}</div>
+                    </div>
+                </div>`;
+
+            const close = () => overlay.remove();
+            overlay.querySelector('.conn-modal-close').addEventListener('click', close);
+            overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+            document.addEventListener('keydown', function onKey(e) {
+                if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+            });
+            document.body.appendChild(overlay);
         } catch (e) { JA.toast.error('Failed to load connection info'); }
     },
 

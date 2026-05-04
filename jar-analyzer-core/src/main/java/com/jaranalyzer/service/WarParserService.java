@@ -256,6 +256,52 @@ public class WarParserService {
         return configs;
     }
 
+    private static final Set<String> RESOURCE_EXTENSIONS = Set.of(
+            ".properties", ".yml", ".yaml", ".json", ".xml", ".sql", ".conf", ".txt"
+    );
+    private static final int MAX_RESOURCE_FILES = 50;
+    private static final int MAX_RESOURCE_BYTES = 200 * 1024;
+
+    public Map<String, String> extractResourceFiles(File warFile) throws IOException {
+        Map<String, String> resources = new LinkedHashMap<>();
+        try (JarFile war = new JarFile(warFile)) {
+            Enumeration<JarEntry> entries = war.entries();
+            while (entries.hasMoreElements() && resources.size() < MAX_RESOURCE_FILES) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+                if (entry.isDirectory()) continue;
+                if (name.endsWith(".class")) continue;
+                if (name.contains("META-INF/maven/")) continue;
+                if (name.startsWith("WEB-INF/lib/")) continue;
+
+                if (name.contains("/") && !name.startsWith("WEB-INF/classes/")) continue;
+
+                String lower = name.toLowerCase();
+                boolean matchesExt = false;
+                for (String ext : RESOURCE_EXTENSIONS) {
+                    if (lower.endsWith(ext)) { matchesExt = true; break; }
+                }
+                if (!matchesExt) continue;
+
+                String filename = name.contains("/") ? name.substring(name.lastIndexOf('/') + 1) : name;
+                if (filename.isBlank()) continue;
+                if (resources.containsKey(filename)) {
+                    filename = name.replace('/', '_');
+                }
+
+                try (InputStream is = war.getInputStream(entry)) {
+                    byte[] bytes = is.readNBytes(MAX_RESOURCE_BYTES);
+                    String content = new String(bytes, StandardCharsets.UTF_8);
+                    resources.put(filename, content);
+                } catch (Exception e) { /* skip binary or unreadable */ }
+            }
+        }
+        if (!resources.isEmpty()) {
+            log.info("Extracted {} resource file(s) from WAR: {}", resources.size(), resources.keySet());
+        }
+        return resources;
+    }
+
     /** Stream-read classes from JSONL file, processing each with a callback. */
     public void streamClasses(Path jsonlFile, JarParserService.ClassConsumer consumer) throws IOException {
         try (BufferedReader reader = Files.newBufferedReader(jsonlFile)) {

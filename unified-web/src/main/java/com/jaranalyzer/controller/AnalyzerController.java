@@ -1020,4 +1020,36 @@ public class AnalyzerController {
                                                              @PathVariable String sessionId) {
         return claudeCallLogger.getSessionDetail(name, sessionId);
     }
+
+    @GetMapping("/{id}/resources")
+    public List<Map<String, Object>> listResources(@PathVariable String id) {
+        List<String> files = persistenceService.listResourceFiles(id);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (String filename : files) {
+            try {
+                String content = persistenceService.loadResourceFile(id, filename);
+                long size = content != null ? content.length() : 0;
+                result.add(Map.of("filename", filename, "size", size));
+            } catch (IOException e) {
+                result.add(Map.of("filename", filename, "size", 0));
+            }
+        }
+        return result;
+    }
+
+    @GetMapping("/{id}/resources/{filename:.+}")
+    public ResponseEntity<String> getResourceFile(@PathVariable String id,
+                                                   @PathVariable String filename) {
+        try {
+            String content = persistenceService.loadResourceFile(id, filename);
+            if (content == null) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Resource not found: " + filename);
+            }
+            return ResponseEntity.ok().contentType(MediaType.TEXT_PLAIN).body(content);
+        } catch (ResponseStatusException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to read resource: " + e.getMessage());
+        }
+    }
 }

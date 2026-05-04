@@ -178,6 +178,14 @@ public class WarAnalysisExecutor {
             progress(job, broadcast, "[5.7] Writing per-endpoint output folders...");
             claudeAnalysisService.writeEndpointOutputs(warName, targetEndpoints);
 
+            try {
+                Path warForResources = storedWar != null ? storedWar : tempWar;
+                Map<String, String> resourceFiles = warParserService.extractResourceFiles(warForResources.toFile());
+                warPersistenceService.storeResourceFiles(warName, resourceFiles);
+            } catch (Exception e) {
+                log.warn("Resource file extraction failed (non-fatal): {}", e.getMessage());
+            }
+
             job.resultName = warName;
             progress(job, broadcast, "Static analysis complete: " + parseResult.totalClasses()
                     + " classes, " + endpoints.size() + " endpoints");

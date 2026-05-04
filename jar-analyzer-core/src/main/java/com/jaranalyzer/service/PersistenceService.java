@@ -506,6 +506,45 @@ public class PersistenceService {
         }
     }
 
+    /* ---- Resource files ---- */
+
+    public void storeResourceFiles(String jarId, Map<String, String> resources) {
+        if (resources == null || resources.isEmpty()) return;
+        try {
+            Path dir = paths.resourcesDir(jarId);
+            Files.createDirectories(dir);
+            for (Map.Entry<String, String> entry : resources.entrySet()) {
+                Path dest = dir.resolve(entry.getKey());
+                if (!dest.startsWith(dir)) continue;
+                Files.writeString(dest, entry.getValue(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            log.info("Stored {} resource file(s) for {}", resources.size(), jarId);
+        } catch (IOException e) {
+            log.warn("Failed to store resource files for {}: {}", jarId, e.getMessage());
+        }
+    }
+
+    public List<String> listResourceFiles(String jarId) {
+        Path dir = paths.resourcesDir(jarId);
+        if (!Files.isDirectory(dir)) return Collections.emptyList();
+        try (Stream<Path> stream = Files.list(dir)) {
+            return stream.filter(Files::isRegularFile)
+                    .map(p -> p.getFileName().toString())
+                    .sorted()
+                    .collect(java.util.stream.Collectors.toList());
+        } catch (IOException e) {
+            log.warn("Failed to list resource files for {}: {}", jarId, e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    public String loadResourceFile(String jarId, String filename) throws IOException {
+        Path dir = paths.resourcesDir(jarId);
+        Path file = dir.resolve(filename);
+        if (!file.startsWith(dir) || !Files.isRegularFile(file)) return null;
+        return Files.readString(file, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     /* ---- Delete ---- */
 
     public boolean delete(String jarName) throws IOException {

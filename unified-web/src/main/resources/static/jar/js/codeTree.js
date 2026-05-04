@@ -15,12 +15,16 @@ JA.codeTree = {
     _viewMode: 'package', // 'package' | 'project' | 'visual'
 
     _loaded: false,
+    _resources: [],
+    _resourcesLoaded: false,
 
     /* ---- public API ---- */
 
     setLazy() {
         this._classes = [];
         this._loaded = false;
+        this._resources = [];
+        this._resourcesLoaded = false;
         const container = document.getElementById('class-tree');
         if (container) container.innerHTML = '<p style="padding:20px;color:var(--text-muted,#6b7280)">Switch to Code Structure tab to load classes</p>';
     },
@@ -39,6 +43,111 @@ JA.codeTree = {
             console.error('Failed to load class tree:', e);
             if (container) container.innerHTML = '<p style="padding:20px;color:#ef4444">Failed to load code structure: ' + (e.message || e) + '</p>';
         }
+        this._loadResources();
+    },
+
+    async _loadResources() {
+        if (this._resourcesLoaded) return;
+        const jarId = JA.app.currentJarId;
+        if (!jarId) return;
+        try {
+            const res = await fetch('/api/jar/jars/' + encodeURIComponent(jarId) + '/resources', { cache: 'no-store' });
+            if (!res.ok) return;
+            this._resources = await res.json();
+            this._resourcesLoaded = true;
+            this._appendResourcesSection();
+        } catch (e) {
+            console.warn('Failed to load resource files:', e);
+        }
+    },
+
+    _appendResourcesSection() {
+        if (!this._resources || !this._resources.length) return;
+        const container = document.getElementById('class-tree');
+        if (!container) return;
+        const existing = container.querySelector('.resources-section');
+        if (existing) existing.remove();
+
+        const grouped = {};
+        for (const f of this._resources) {
+            const ext = f.filename.includes('.') ? f.filename.slice(f.filename.lastIndexOf('.')).toLowerCase() : 'other';
+            (grouped[ext] = grouped[ext] || []).push(f);
+        }
+
+        const extIcon = ext => {
+            if (ext === '.properties') return '📄';
+            if (ext === '.yml' || ext === '.yaml') return '📋';
+            if (ext === '.json') return '📊';
+            if (ext === '.xml') return '📝';
+            if (ext === '.sql') return '🗄️';
+            return '📃';
+        };
+
+        const esc = JA.utils.escapeHtml;
+        let inner = '';
+        const sortedExts = Object.keys(grouped).sort();
+        for (const ext of sortedExts) {
+            const files = grouped[ext];
+            let fileItems = '';
+            for (const f of files) {
+                const safeName = f.filename.replace(/'/g, "\\'");
+                fileItems += `<div class="tree-node tree-resource-file">
+                    <div class="tree-leaf" style="cursor:pointer" onclick="JA.codeTree._openResourceFile('${esc(safeName)}')">
+                        <span class="leaf-icon" style="margin-right:4px">${extIcon(ext)}</span>
+                        <span class="resource-filename">${esc(f.filename)}</span>
+                        <span class="tree-count" style="margin-left:auto">${JA.utils.formatSize ? JA.utils.formatSize(f.size) : f.size + 'B'}</span>
+                    </div>
+                </div>`;
+            }
+            const label = ext === 'other' ? 'other' : ext.slice(1);
+            inner += `<div class="tree-node">
+                <div class="tree-toggle expanded" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span style="margin-right:4px">${extIcon(ext)}</span>
+                    <strong class="pkg-name">${esc(label)}</strong>
+                    <span class="tree-count">${files.length}</span>
+                </div>
+                <div class="tree-children">${fileItems}</div>
+            </div>`;
+        }
+
+        const section = document.createElement('div');
+        section.className = 'tree-node resources-section';
+        section.innerHTML = `<div class="jar-separator" style="margin-top:12px">Resources (${this._resources.length} files)</div>
+            <div class="tree-node">
+                <div class="tree-toggle expanded" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span class="jar-group-icon">&#128193;</span>
+                    <strong class="jar-group-name">Resource Files</strong>
+                    <span class="tree-count">${this._resources.length}</span>
+                </div>
+                <div class="tree-children">${inner}</div>
+            </div>`;
+        container.appendChild(section);
+    },
+
+    async _openResourceFile(filename) {
+        const panel = document.getElementById('code-panel');
+        if (!panel) return;
+        const jarId = JA.app.currentJarId;
+        if (!jarId) return;
+        panel.innerHTML = '<div class="cp-loading"><div class="cm-spinner"></div><div>Loading...</div></div>';
+        try {
+            const res = await fetch('/api/jar/jars/' + encodeURIComponent(jarId) + '/resources/' + encodeURIComponent(filename));
+            if (!res.ok) throw new Error('Not found');
+            const text = await res.text();
+            const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            panel.innerHTML = `<div class="cm-info-bar">
+                <span class="cm-classname">${esc(filename)}</span>
+                <span class="cm-src-badge cm-badge-recon">RESOURCE</span>
+                <button class="btn-sm cm-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('res-content-pre').textContent)" title="Copy to clipboard">Copy</button>
+            </div>
+            <div class="cm-content" style="padding:12px;overflow:auto;height:calc(100% - 40px)">
+                <pre id="res-content-pre" style="margin:0;white-space:pre-wrap;font-size:12px;font-family:monospace;tab-size:2">${esc(text)}</pre>
+            </div>`;
+        } catch (e) {
+            panel.innerHTML = '<div style="padding:20px;color:#ef4444">Failed to load resource: ' + (e.message || e) + '</div>';
+        }
     },
 
     render(classes) {
@@ -50,6 +159,7 @@ JA.codeTree = {
         this._updateNavState();
         if (JA.codeTreePanel) JA.codeTreePanel.clear();
         if (JA.codeTreeViews) JA.codeTreeViews.initJarSourceFilter(classes);
+        if (this._resourcesLoaded) this._appendResourcesSection();
     },
 
     setViewMode(mode) {
@@ -59,12 +169,12 @@ JA.codeTree = {
         });
         const treeButtons = document.getElementById('tree-view-actions');
         if (treeButtons) treeButtons.style.display = mode === 'visual' ? 'none' : '';
-        // If jar source filter is active, use filtered classes
         if (JA.codeTreeViews && JA.codeTreeViews._activeJarSources !== null) {
             JA.codeTreeViews._applyJarSourceFilter();
         } else {
             this._renderCurrentView();
         }
+        if (this._resourcesLoaded) this._appendResourcesSection();
     },
 
     _renderCurrentView() {

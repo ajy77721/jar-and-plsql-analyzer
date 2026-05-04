@@ -20,6 +20,7 @@ This document is the authoritative reference for every piece of UI functionality
    - [Class Detail (Expanded)](#54-class-detail-expanded)
    - [Code Structure Toolbar](#55-code-structure-toolbar)
    - [Code Panel (Right Side)](#56-code-panel-right-side)
+   - [Resource Files](#57-resource-files)
 6. [Tab 2: Endpoint Flows](#6-tab-2-endpoint-flows)
    - [Left Pane -- Endpoint List](#61-left-pane----endpoint-list)
    - [Right Pane -- Endpoint Detail](#62-right-pane----endpoint-detail)
@@ -133,6 +134,21 @@ A label indicating which data view is currently active:
 | No Claude scan has ever run | **Enable Claude** button | Initiates the first Claude enrichment scan for this JAR. |
 | A previous Claude scan completed | **Re-scan Claude** button | Starts a new Claude enrichment scan (useful after corrections or to improve results). |
 | Claude scan currently running | Button is **hidden**; a **progress bar** is shown instead | No action available -- wait for the scan to complete. |
+
+### Connections Button
+
+The **Connections** button appears in the JAR/WAR header whenever the analyzer has detected database connection details inside the archive's bundled config files.
+
+Clicking it opens a styled modal popup (not a browser `alert`) with the following layout:
+
+- One **color-coded section per database type** detected:
+  - **MongoDB** — green header, shows URI/host details
+  - **Oracle** — red header, shows JDBC URL or TNS connection info
+  - **PostgreSQL** — blue header, shows `spring.datasource.url` and related properties
+- Each section shows the **connection details** extracted from the config file, with passwords replaced by `****`.
+- Each entry indicates **which config file** inside the archive the information was extracted from (e.g., `application.properties`, `application.yml`).
+
+The modal is dismissed by clicking the **×** button in the top-right corner, by clicking anywhere outside the modal panel, or by pressing **Escape**.
 
 ---
 
@@ -310,6 +326,44 @@ Hovering over any dispatch link shows a tooltip with the resolution type and mat
 
 A search bar at the top of the code panel supports case-sensitive and case-insensitive text search within the displayed source. Use navigation arrows to jump between matches.
 
+### 5.7 Resource Files
+
+A **Resource Files** section appears at the bottom of the Code Structure left panel, below the class tree. It lists every resource file extracted from the JAR or WAR during analysis.
+
+#### What Files Are Shown
+
+The following file types are extracted and listed (maximum 50 files, up to 200 KB each):
+
+| Extension(s) | Icon | Notes |
+|---|---|---|
+| `.properties` | 📄 | Spring and Java property files |
+| `.yml`, `.yaml` | 📋 | YAML configuration files |
+| `.json` | 📊 | JSON configuration or data files |
+| `.xml` | 📝 | XML descriptors and Spring context files |
+| `.sql` | 🗄️ | SQL schema and migration scripts |
+| `.conf`, `.txt` | 📃 | Generic configuration and plain-text files |
+
+Binary files, `.class` files, and Maven metadata files (under `META-INF/maven/`) are skipped. For WAR files, only resources from `WEB-INF/classes/` are extracted; resources bundled inside `WEB-INF/lib/` nested JARs are not included.
+
+#### Viewing a Resource File
+
+Click any file name in the Resource Files section to load its content into the right panel. Content is fetched on demand from the backend — only the selected file is transferred, not all files at once.
+
+#### Where Files Are Stored
+
+Extracted resource files are stored in the JAR's analysis directory at:
+
+```
+data/jar/{normalizedKey}/resources/{filename}
+```
+
+They are accessible via the REST endpoints:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jar/jars/{id}/resources` | List all extracted resource files |
+| GET | `/api/jar/jars/{id}/resources/{filename:.+}` | Fetch the content of a specific resource file |
+
 ---
 
 ## 6. Tab 2: Endpoint Flows
@@ -453,6 +507,8 @@ A breadcrumb-driven drill-down navigator. Start at the endpoint root, then click
 ## 7. Tab 3: Summary
 
 The Summary tab contains **11 sub-tabs**, each providing a different analytical perspective on the JAR's contents. Click a sub-tab name to switch views.
+
+> **Decompile modal — dispatch navigation links:** When you click a method name in any Summary sub-tab's call tree to open the decompile popup, the modal now renders the same colored dispatch navigation links (the "→ N implementations: …" links) as the Code Structure tab's decompile panel. These links allow you to jump directly to a specific implementation without leaving the modal. This matches the full dispatch-aware navigation described in [Section 5.6](#56-code-panel-right-side).
 
 ### 7.1 Endpoint Report
 

@@ -311,6 +311,65 @@ public class MongoCatalogService {
         return null;
     }
 
+    // ========== PostgreSQL / JDBC URL Extraction ==========
+
+    public String extractPostgresJdbcUrl(Map<String, String> configFiles) {
+        if (configFiles == null || configFiles.isEmpty()) return null;
+        for (String name : CONFIG_PRIORITY) {
+            String content = configFiles.get(name);
+            if (content == null) continue;
+            String url = name.endsWith(".properties")
+                    ? extractPostgresFromProperties(content)
+                    : extractPostgresFromYaml(content);
+            if (url != null) {
+                log.info("Found PostgreSQL JDBC URL in {}", name);
+                return url;
+            }
+        }
+        return null;
+    }
+
+    private String extractPostgresFromProperties(String content) {
+        try {
+            Properties props = new Properties();
+            props.load(new StringReader(content));
+            for (String key : List.of(
+                    "spring.datasource.url",
+                    "spring.datasource.hikari.jdbc-url",
+                    "spring.jpa.properties.hibernate.connection.url")) {
+                String val = props.getProperty(key);
+                if (val != null && (val.contains("postgresql") || val.contains("postgres"))) {
+                    return resolvePlaceholders(val.trim(), props);
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String extractPostgresFromYaml(String content) {
+        try {
+            Yaml yaml = new Yaml();
+            Map<String, Object> data = yaml.load(content);
+            if (data == null) return null;
+            Object spring = data.get("spring");
+            if (!(spring instanceof Map<?,?> sm)) return null;
+            Object ds = sm.get("datasource");
+            if (ds instanceof Map<?,?> dsm) {
+                for (String key : List.of("url", "jdbc-url")) {
+                    Object val = dsm.get(key);
+                    if (val instanceof String s && (s.contains("postgresql") || s.contains("postgres"))) return s;
+                }
+                Object hikari = dsm.get("hikari");
+                if (hikari instanceof Map<?,?> hm) {
+                    Object val = hm.get("jdbc-url");
+                    if (val instanceof String s && (s.contains("postgresql") || s.contains("postgres"))) return s;
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     /**
      * Extract all connection info from config files.
      * Returns a map suitable for serializing to connections.json.
@@ -333,6 +392,13 @@ public class MongoCatalogService {
             Map<String, Object> oracle = new LinkedHashMap<>();
             oracle.put("jdbcUrl", oracleUrl);
             info.put("oracle", oracle);
+        }
+
+        String postgresUrl = extractPostgresJdbcUrl(configFiles);
+        if (postgresUrl != null) {
+            Map<String, Object> postgres = new LinkedHashMap<>();
+            postgres.put("jdbcUrl", postgresUrl);
+            info.put("postgres", postgres);
         }
 
         return info;

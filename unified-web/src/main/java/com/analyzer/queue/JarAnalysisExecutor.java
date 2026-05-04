@@ -178,6 +178,14 @@ public class JarAnalysisExecutor {
             progress(job, broadcast, "[5.7] Writing per-endpoint output folders...");
             claudeAnalysisService.writeEndpointOutputs(jarName, targetEndpoints);
 
+            try {
+                Path jarForResources = storedJar != null ? storedJar : tempJar;
+                Map<String, String> resourceFiles = parserService.extractResourceFiles(jarForResources.toFile());
+                persistenceService.storeResourceFiles(jarName, resourceFiles);
+            } catch (Exception e) {
+                log.warn("Resource file extraction failed (non-fatal): {}", e.getMessage());
+            }
+
             job.resultName = jarName;
             progress(job, broadcast, "Static analysis complete: " + parseResult.totalClasses()
                     + " classes, " + endpoints.size() + " endpoints");
