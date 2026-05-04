@@ -1,0 +1,205 @@
+/* ==================== MODE TOGGLE ==================== */
+
+.claude-mode-toggle {
+    display: inline-flex; gap: 0; background: var(--bg);
+    border-radius: var(--radius); padding: 2px;
+    border: 1px solid var(--border); flex-shrink: 0;
+}
+.claude-mode-btn {
+    border: none; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-muted);
+    padding: 3px 10px; font-size: 10px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.claude-mode-btn.active { background: var(--accent); color: white; }
+.claude-mode-btn:hover:not(.active) { background: rgba(99,102,241,0.08); }
+.claude-mode-btn:disabled { opacity: 0.35; cursor: default; }
+
+/* ==================== MODE BADGES ==================== */
+
+.pa-mode-claude {
+    background: linear-gradient(135deg, #dbeafe, #c7d2fe);
+    color: #3730a3; border: 1px solid #818cf8;
+    box-shadow: 0 1px 3px rgba(99,102,241,0.15);
+}
+.pa-mode-previous {
+    background: linear-gradient(135deg, #f3e8ff, #ede9fe);
+    color: #6b21a8; border: 1px solid #c084fc;
+    box-shadow: 0 1px 3px rgba(168,85,247,0.15);
+}
+
+/* ==================== VERIFY BUTTON ==================== */
+
+.claude-verify-btn {
+    padding: 3px 10px; font-size: 10px; font-weight: 700;
+    background: linear-gradient(135deg, #6366f1, #818cf8);
+    color: white; border: none; border-radius: var(--radius-sm);
+    cursor: pointer; transition: all 0.15s; text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.claude-verify-btn:hover { background: linear-gradient(135deg, #4f46e5, #6366f1); }
+.claude-verify-btn:disabled { opacity: 0.4; cursor: default; }
+
+.claude-kill-btn {
+    padding: 3px 8px; font-size: 10px; font-weight: 700;
+    background: var(--badge-red-bg); color: var(--red);
+    border: 1px solid var(--red); border-radius: var(--radius-sm);
+    cursor: pointer; transition: all 0.15s;
+}
+.claude-kill-btn:hover { background: var(--red); color: white; }
+
+/* ==================== APPLY BUTTON ==================== */
+
+.claude-apply-btn {
+    padding: 3px 10px; font-size: 10px; font-weight: 700;
+    background: linear-gradient(135deg, #059669, #10b981);
+    color: white; border: none; border-radius: var(--radius-sm);
+    cursor: pointer; transition: all 0.15s; text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.claude-apply-btn:hover { background: linear-gradient(135deg, #047857, #059669); }
+.claude-apply-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ==================== PROGRESS BAR ==================== */
+
+.claude-progress-wrap {
+    display: none; align-items: center; gap: 6px; flex-shrink: 0;
+}
+.claude-progress-wrap.active { display: flex; }
+.claude-progress-bar {
+    width: 100px; height: 6px; background: var(--bg);
+    border-radius: 3px; overflow: hidden; border: 1px solid var(--border);
+}
+.claude-progress-fill {
+    height: 100%; width: 0%; transition: width 0.3s;
+    background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+    border-radius: 3px;
+}
+.claude-progress-text {
+    font-size: 9px; color: var(--text-muted); white-space: nowrap;
+    font-family: var(--font-mono);
+}
+
+/* ==================== STATUS INDICATOR ==================== */
+
+.claude-status {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 9px; font-weight: 600; color: var(--text-muted);
+    padding: 2px 6px; border-radius: 10px; background: var(--bg);
+    border: 1px solid var(--border);
+}
+.claude-status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-muted);
+}
+.claude-status.available .claude-status-dot { background: var(--green); }
+.claude-status.unavailable .claude-status-dot { background: var(--red); }
+
+/* ==================== VERIFICATION BADGES ==================== */
+
+.cv-badge {
+    display: inline-block; padding: 1px 6px; border-radius: var(--radius-sm);
+    font-size: 8px; font-weight: 700; margin-left: 4px;
+    text-transform: uppercase; letter-spacing: 0.3px;
+}
+.cv-badge.CONFIRMED { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-badge.REMOVED { background: var(--badge-red-bg); color: var(--badge-red); }
+.cv-badge.NEW { background: var(--badge-blue-bg); color: var(--badge-blue); }
+
+.cv-table-status {
+    display: inline-block; padding: 1px 6px; border-radius: var(--radius-sm);
+    font-size: 8px; font-weight: 700; letter-spacing: 0.3px;
+}
+.cv-table-status.CONFIRMED { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-table-status.PARTIAL { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.cv-table-status.EXPANDED { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.cv-table-status.MODIFIED { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.cv-table-status.UNVERIFIED { background: var(--badge-gray-bg); color: var(--badge-gray); }
+
+/* ==================== CHUNK PANEL ==================== */
+
+.claude-chunk-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    z-index: 1200; display: none; justify-content: center; align-items: center;
+}
+.claude-chunk-overlay.open { display: flex; }
+
+.claude-chunk-panel {
+    width: 700px; max-width: 90vw; max-height: 80vh;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-md); box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.claude-chunk-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    font-size: 13px; font-weight: 700; color: var(--accent);
+}
+.claude-chunk-stats {
+    display: flex; gap: 8px; padding: 8px 16px;
+    border-bottom: 1px solid var(--border); font-size: 11px;
+}
+.claude-chunk-list {
+    flex: 1; overflow-y: auto; padding: 4px 0;
+}
+.claude-chunk-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 16px; font-size: 11px; cursor: pointer;
+    border-bottom: 1px solid var(--border); transition: background 0.1s;
+}
+.claude-chunk-item:hover { background: rgba(99,102,241,0.04); }
+.claude-chunk-item.active { background: rgba(99,102,241,0.08); }
+
+.claude-chunk-status {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; flex-shrink: 0;
+}
+.claude-chunk-status.COMPLETE { background: var(--green); }
+.claude-chunk-status.ERROR { background: var(--red); }
+.claude-chunk-status.PENDING { background: var(--orange); }
+
+.claude-chunk-detail {
+    border-top: 1px solid var(--border);
+    max-height: 300px; overflow-y: auto; padding: 12px 16px;
+    font-size: 11px; font-family: var(--font-mono);
+    white-space: pre-wrap; word-break: break-all;
+    background: var(--bg);
+}
+.claude-chunk-detail-label {
+    font-size: 10px; font-weight: 700; color: var(--text-muted);
+    text-transform: uppercase; margin-bottom: 4px; font-family: var(--font-sans);
+}
+
+/* ==================== ENRICHMENT DETAIL SECTION ==================== */
+
+.cv-detail-section {
+    margin-top: 10px; padding-top: 8px;
+    border-top: 1px dashed var(--border);
+}
+.cv-detail-title {
+    font-size: 10px; font-weight: 700; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+}
+.cv-detail-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; font-size: 11px;
+}
+.cv-detail-reason {
+    font-size: 10px; color: var(--text-muted); font-style: italic;
+    margin-left: 4px;
+}
+
+/* ==================== SIDEBAR CLAUDE VERIFICATION ==================== */
+
+.cm-sb-cv-item {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 8px; font-size: 11px; cursor: pointer;
+    border-bottom: 1px solid var(--border); transition: background 0.1s;
+}
+.cm-sb-cv-item:hover { background: rgba(99,102,241,0.06); }
+
+/* ==================== TOPBAR CLAUDE GROUP ==================== */
+
+.topbar-claude-group {
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}

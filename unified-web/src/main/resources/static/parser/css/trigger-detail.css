@@ -1,0 +1,79 @@
+.tds-overlay {
+    position: fixed; inset: 0; z-index: 1050;
+    background: rgba(0,0,0,0.4); backdrop-filter: blur(1px);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity 0.2s ease;
+}
+.tds-overlay.open { opacity: 1; }
+
+.tds-modal {
+    width: 48vw; min-width: 480px; max-width: 85vw; max-height: 80vh;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-md); display: flex; flex-direction: column;
+    box-shadow: 0 16px 50px rgba(0,0,0,0.35); overflow: hidden;
+    transform: translateY(8px); transition: transform 0.2s ease;
+}
+.tds-overlay.open .tds-modal { transform: translateY(0); }
+
+.tds-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    background: var(--bg); flex-shrink: 0;
+}
+.tds-header-left {
+    display: flex; align-items: center; min-width: 0; flex: 1;
+}
+.tds-title {
+    font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+    color: var(--accent); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tds-close {
+    font-size: 16px; line-height: 1; padding: 2px 6px; flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.tds-meta {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.tds-meta-tag {
+    font-size: 10px; color: var(--text-muted); font-weight: 600;
+}
+
+.tds-body {
+    overflow-y: auto; flex: 1; min-height: 0;
+}
+
+.tds-actions {
+    display: flex; gap: 6px; padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+}
+.tds-action-btn {
+    font-size: 10px; font-weight: 600;
+    background: var(--accent); color: #fff; border: none;
+    padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer;
+}
+.tds-action-btn:hover { background: var(--accent-hover); }
+
+.tds-section {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+}
+.tds-section:last-child { border-bottom: none; }
+.tds-def-section { overflow-y: auto; }
+.tds-section-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.3px; color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.tds-table-op {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 0; font-size: 11px;
+}
+.tds-table-link {
+    font-family: var(--font-mono); color: var(--teal);
+    cursor: pointer; font-weight: 600;
+}
+.tds-table-link:hover { text-decoration: underline; }

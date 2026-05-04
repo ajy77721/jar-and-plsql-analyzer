@@ -1,0 +1,100 @@
+source_paths:
+- "./plsql-sources"
+schema_mappings:
+  opus_core:
+    schema: "OPUS_CORE"
+    description: "OPUS Core schema"
+    db_link: null
+  customer:
+    schema: "CUSTOMER"
+    description: "Customer schema"
+    db_link: null
+  customer_i:
+    schema: "CUSTOMER_I"
+    description: "Customer Interface schema"
+    db_link: null
+file_extensions:
+- ".sql"
+- ".pks"
+- ".pkb"
+- ".prc"
+- ".fnc"
+- ".trg"
+exclude_patterns:
+- "**/test/**"
+- "**/backup/**"
+db_hostname: "slc13305.srv.allianz"
+db_port: 1521
+db_service_name: "AGICPROD"
+db_users:
+- username: "OPUS_CORE"
+  password: "OP#USCOREAPR_24042025"
+  description: "OPUS Core schema"
+- username: "CUSTOMER"
+  password: "CUSTOME#APR_24042025"
+  description: "Customer schema"
+- username: "CUSTOMER_I"
+  password: "CUSTOMER#IAPR_24042025"
+  description: "Customer Interface schema"
+projects:
+- name: "OPUS"
+  description: "OPUS Insurance"
+  environments:
+  - name: "PROD"
+    zone: "EU-CENTRAL"
+    connections:
+    - name: "OPUS_CORE_PROD"
+      username: "OPUS_CORE"
+      password: "OP#USCOREAPR_24042025"
+      hostname: "slc13305.srv.allianz"
+      port: 1521
+      service_name: "AGICPROD"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: "OPUS Core schema"
+      tested: true
+      jdbc_url: "jdbc:oracle:thin:@//slc13305.srv.allianz:1521/AGICPROD"
+    - name: "CUSTOMER_PROD"
+      username: "CUSTOMER"
+      password: "CUSTOME#APR_24042025"
+      hostname: "slc13305.srv.allianz"
+      port: 1521
+      service_name: "AGICPROD"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: "Customer schema"
+      tested: true
+      jdbc_url: "jdbc:oracle:thin:@//slc13305.srv.allianz:1521/AGICPROD"
+    - name: "CUSTOMER_I_PROD"
+      username: "CUSTOMER_I"
+      password: "CUSTOMER#IAPR_24042025"
+      hostname: "slc13305.srv.allianz"
+      port: 1521
+      service_name: "AGICPROD"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: "Customer Interface schema"
+      tested: true
+      jdbc_url: "jdbc:oracle:thin:@//slc13305.srv.allianz:1521/AGICPROD"
+    jdbc_url: "jdbc:oracle:thin:@//slc13305.srv.allianz:1521/AGICPROD"
+    users:
+    - username: "OPUS_CORE"
+      password: "OP#USCOREAPR_24042025"
+      description: "OPUS Core schema"
+    - username: "CUSTOMER"
+      password: "CUSTOME#APR_24042025"
+      description: "Customer schema"
+    - username: "CUSTOMER_I"
+      password: "CUSTOMER#IAPR_24042025"
+      description: "Customer Interface schema"
+jdbc_url: "jdbc:oracle:thin:@//slc13305.srv.allianz:1521/AGICPROD"
+legacy_mode: false

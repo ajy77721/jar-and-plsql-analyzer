@@ -1,0 +1,98 @@
+.ct-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 24px 4px; min-height: 30px; gap: 6px;
+}
+.ct-actions { display: flex; gap: 4px; }
+
+.breadcrumb {
+    display: flex; align-items: center; gap: 0; font-size: 12px;
+    flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    padding: 0 8px; color: var(--text-muted);
+}
+.bc-item { color: var(--text-muted); cursor: pointer; padding: 2px 4px; border-radius: 3px; font-size: 12px; }
+.bc-item:hover { color: var(--accent); background: rgba(99,102,241,0.06); }
+.bc-sep { color: var(--text-muted); margin: 0 2px; opacity: 0.5; }
+.bc-item.bc-current { color: var(--text); font-weight: 600; cursor: default; }
+.bc-item.bc-current:hover { background: none; color: var(--text); }
+
+.ct-container {
+    flex: 1; overflow: auto; padding: 4px 12px;
+    background: var(--bg-card); margin: 0 24px 8px;
+    border-radius: var(--radius-md); border: 1px solid var(--border);
+}
+
+.ct-row {
+    display: flex; align-items: center; padding: 4px 12px 4px 0;
+    font-size: 12px; cursor: pointer; min-height: 28px; line-height: 20px;
+    border-radius: var(--radius); transition: background var(--transition);
+}
+.ct-row:hover { background: rgba(99,102,241,0.04); }
+.ct-row.active { background: rgba(99,102,241,0.08); }
+
+.ct-indent { flex-shrink: 0; }
+.ct-depth-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; min-width: 20px; font-size: 9px; font-weight: 700;
+    color: #a6adc8; background: rgba(99,102,241,0.1); border-radius: 3px;
+    margin-right: 4px; flex-shrink: 0;
+}
+.ct-step {
+    width: 30px; min-width: 30px; text-align: right; padding-right: 8px;
+    font-weight: 700; font-size: 11px; color: var(--text-muted);
+}
+.ct-schema-badge {
+    display: inline-block; font-size: 9px; padding: 1px 6px;
+    border-radius: var(--radius-sm); font-weight: 700; margin-right: 6px; flex-shrink: 0;
+}
+.ct-name {
+    font-family: var(--font-mono); font-weight: 600; font-size: 12px;
+    color: var(--text); word-break: break-all;
+}
+.ct-name:hover { color: var(--accent); text-decoration: underline; }
+.ct-line {
+    font-size: 10px; color: var(--teal); margin-left: 8px;
+    cursor: pointer; flex-shrink: 0; font-family: var(--font-mono);
+}
+.ct-line:hover { text-decoration: underline; color: var(--accent); }
+.ct-call-line {
+    font-size: 9px; color: var(--orange); margin-left: 4px;
+    cursor: pointer; flex-shrink: 0; font-family: var(--font-mono);
+    opacity: 0.8;
+}
+.ct-call-line:hover { text-decoration: underline; opacity: 1; }
+
+.ct-call-badge {
+    display: inline-block; font-size: 9px; padding: 1px 6px;
+    border-radius: var(--radius-sm); margin-left: 6px; flex-shrink: 0; font-weight: 700;
+}
+.ct-call-badge.INTERNAL { background: var(--badge-green-bg); color: var(--badge-green); }
+.ct-call-badge.EXTERNAL { background: var(--badge-red-bg); color: var(--badge-red); }
+.ct-call-badge.TRIGGER { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.ct-call-badge.DYNAMIC { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.ct-call-badge.CIRCULAR { background: var(--badge-red-bg); color: var(--badge-red); }
+
+.ct-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; min-width: 16px; text-align: center;
+    color: var(--text-muted); cursor: pointer; font-size: 10px;
+    flex-shrink: 0; transition: transform 0.2s;
+}
+.ct-toggle:hover { color: var(--accent); }
+.ct-children { border-left: 1px solid var(--border); margin-left: 8px; padding-left: 4px; }
+
+.ct-lock { font-size: 10px; margin-right: 4px; flex-shrink: 0; opacity: 0.6; }
+
+.ct-search-hit { background: rgba(250, 204, 21, 0.2) !important; border-left: 3px solid #f59e0b; }
+
+.ct-loc-badge {
+    font-size: 9px; color: var(--text-muted); margin-left: 6px;
+    font-family: var(--font-mono); flex-shrink: 0;
+}
+.ct-cx-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 8px; font-weight: 800; width: 16px; height: 16px;
+    border-radius: 3px; margin-left: 4px; flex-shrink: 0; letter-spacing: 0.5px;
+}
+.ct-cx-badge.high { background: #fff1f2; color: #e11d48; }
+.ct-cx-badge.medium { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.ct-cx-badge.low { background: var(--badge-green-bg); color: var(--badge-green); }

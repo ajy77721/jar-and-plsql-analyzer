@@ -1,0 +1,42 @@
+.cf-icon {
+    display: inline-block; cursor: pointer; color: var(--text-muted); opacity: 0.4;
+    transition: opacity 0.15s; margin-left: 3px; vertical-align: middle;
+}
+.cf-icon:hover { opacity: 1; color: var(--accent); }
+.cf-icon.cf-active { opacity: 1; color: var(--accent); }
+.cf-popover {
+    position: absolute; z-index: 9999; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    min-width: 180px; max-width: 280px; font-size: 12px;
+}
+.cf-header {
+    padding: 8px 12px; font-weight: 700; font-size: 11px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
+}
+.cf-actions { padding: 4px 12px; display: flex; gap: 6px; border-bottom: 1px solid var(--border); }
+.cf-btn {
+    font-size: 10px; padding: 2px 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); cursor: pointer; color: var(--text-muted);
+}
+.cf-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.cf-list { max-height: 240px; overflow-y: auto; padding: 6px 12px; }
+.cf-item {
+    display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer;
+    font-size: 12px; color: var(--text);
+}
+.cf-item:hover { color: var(--accent); }
+.cf-item input[type=checkbox] { margin: 0; accent-color: var(--accent); }
+.cf-footer {
+    padding: 6px 12px; display: flex; gap: 6px; border-top: 1px solid var(--border);
+    justify-content: flex-end;
+}
+.cf-apply {
+    font-size: 10px; padding: 3px 12px; background: var(--accent); color: #fff;
+    border: none; border-radius: var(--radius-sm); cursor: pointer; font-weight: 600;
+}
+.cf-apply:hover { background: var(--accent-hover); }
+.cf-cancel {
+    font-size: 10px; padding: 3px 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); cursor: pointer; color: var(--text-muted);
+}
+.cf-cancel:hover { color: var(--red); border-color: var(--red); }

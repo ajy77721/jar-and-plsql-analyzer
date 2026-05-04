@@ -1,0 +1,32 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    font-size: 13px;
+}
+
+#app { height: 100vh; display: flex; flex-direction: column; }
+
+.screen { display: none; height: 100vh; flex-direction: column; }
+.screen.active { display: flex; }
+
+.badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--badge-gray-bg);
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.empty-msg {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}

@@ -1,0 +1,86 @@
+/* tooltips.css — CSS-only tooltip styles using [data-tip] attribute */
+
+[data-tip] {
+    position: relative;
+}
+
+[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 8px;
+    background: var(--sidebar-bg, #1e1e2e);
+    color: #f1f5f9;
+    font-size: 11px;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    line-height: 1.3;
+    white-space: nowrap;
+    border-radius: var(--radius-sm, 4px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--transition, 0.15s) ease;
+    z-index: 9999;
+}
+
+[data-tip]::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 4px solid transparent;
+    border-top-color: var(--sidebar-bg, #1e1e2e);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--transition, 0.15s) ease;
+    z-index: 9999;
+}
+
+[data-tip]:hover::after,
+[data-tip]:hover::before {
+    opacity: 1;
+}
+
+/* Suppress CSS tooltips when JS tooltip div is active (avoids double tooltip) */
+.pa-tooltip-active [data-tip]::after,
+.pa-tooltip-active [data-tip]::before {
+    display: none;
+}
+
+/* Right-aligned variant for elements near left edge */
+[data-tip-pos="right"]::after {
+    left: 0;
+    transform: none;
+}
+[data-tip-pos="right"]::before {
+    left: 8px;
+    transform: none;
+}
+
+/* Left-aligned variant for elements near right edge */
+[data-tip-pos="left"]::after {
+    left: auto;
+    right: 0;
+    transform: none;
+}
+[data-tip-pos="left"]::before {
+    left: auto;
+    right: 8px;
+    transform: none;
+}
+
+/* Below variant for elements near top */
+[data-tip-pos="below"]::after {
+    bottom: auto;
+    top: calc(100% + 6px);
+}
+[data-tip-pos="below"]::before {
+    bottom: auto;
+    top: calc(100% + 2px);
+    border-top-color: transparent;
+    border-bottom-color: var(--sidebar-bg, #1e1e2e);
+}

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JAR Analyzer</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- D3 removed: call graph now uses JProfiler-style HTML tree -->
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 16px 0 16px">
+                <a href="/" style="color:#a6adc8;text-decoration:none;font-size:13px;opacity:0.7" title="Back to Home">&larr; Home</a>
+            </div>
+            <div class="logo" onclick="JA.app.goHome()" style="cursor:pointer" title="Go to home">
+                <h1>JAR Analyzer</h1>
+                <span class="subtitle">Spring Boot Flow Viewer</span>
+            </div>
+            <div class="upload-section">
+                <button class="upload-btn" id="upload-label" onclick="JA.app.showUploadModal()" data-file-accept=".jar" data-file-label="JAR">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    Upload JAR
+                </button>
+            </div>
+            <div class="jar-list" id="jar-list">
+                <p class="empty-state">No JARs analyzed yet</p>
+            </div>
+            <div class="claude-sidebar-progress" id="claude-sidebar-progress" style="display:none"></div>
+        </aside>
+        <main class="content">
+            <div class="content-top-bar">
+                <button class="top-bar-btn" id="sessions-btn" onclick="JA.sessions.show()" title="Claude Sessions">
+                    <span class="session-dot" id="sessions-dot"></span>
+                    Sessions
+                </button>
+                <button class="top-bar-btn" id="logviewer-btn" onclick="JA.logviewer.toggle()" title="View application logs">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                    Logs
+                </button>
+            </div>
+            <div id="welcome" class="welcome">
+                <div class="welcome-header">
+                    <div class="welcome-hero">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                            <line x1="16" y1="13" x2="8" y2="13"/>
+                            <line x1="16" y1="17" x2="8" y2="17"/>
+                        </svg>
+                        <div>
+                            <h2>JAR Analyzer</h2>
+                            <p>Upload a Spring Boot JAR to analyze code structure and endpoint flows</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="welcome-body">
+                    <div id="dashboard-content"></div>
+                </div>
+            </div>
+
+            <div id="analysis" class="analysis" style="display:none">
+                <div class="analysis-header">
+                    <h2 id="jar-title"></h2>
+                    <div class="stats" id="jar-stats"></div>
+                    <span id="jar-conn-info" style="font-size:11px;cursor:pointer;margin-left:8px"></span>
+                    <button id="analysis-status-btn" class="analysis-status-btn" style="display:none"
+                            onclick="JA.app._toggleProgressLog()">Analysis Complete</button>
+                </div>
+                <!-- Collapsible progress log panel -->
+                <div id="progress-log-panel" class="progress-log-panel" style="display:none">
+                    <div class="progress-log-header">
+                        <span>Analysis Progress Log</span>
+                        <button class="btn-sm" onclick="JA.app._toggleProgressLog()">Close</button>
+                    </div>
+                    <div id="progress-log" class="progress-log"></div>
+                </div>
+                <div class="tabs">
+                    <button class="tab active" data-tab="structure" onclick="switchTab('structure')">Code Structure</button>
+                    <button class="tab" data-tab="endpoints" onclick="switchTab('endpoints')">Endpoint Flows</button>
+                    <button class="tab" data-tab="summary" onclick="switchTab('summary')">Summary</button>
+                </div>
+                <div id="tab-structure" class="tab-content">
+                    <div class="toolbar">
+                        <div class="view-mode-toggle">
+                            <button class="view-mode-btn active" data-mode="package" onclick="JA.codeTree.setViewMode('package')" title="Package Level">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                                Package
+                            </button>
+                            <button class="view-mode-btn" data-mode="project" onclick="JA.codeTree.setViewMode('project')" title="Project Level (IntelliJ-style)">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>
+                                Project
+                            </button>
+                            <button class="view-mode-btn" data-mode="visual" onclick="JA.codeTree.setViewMode('visual')" title="Visual Overview">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="7" height="5" rx="1"/><rect x="9" y="3" width="7" height="5" rx="1"/><rect x="17" y="3" width="6" height="5" rx="1"/><rect x="1" y="10" width="7" height="5" rx="1"/><rect x="9" y="10" width="14" height="5" rx="1"/><rect x="1" y="17" width="22" height="4" rx="1"/></svg>
+                                Visual
+                            </button>
+                        </div>
+                        <input type="text" id="search-classes" placeholder="Search classes, methods, annotations..." oninput="filterTree()">
+                        <span id="tree-view-actions">
+                            <button class="btn-sm" onclick="expandAll()">Expand All</button>
+                            <button class="btn-sm" onclick="collapseAll()">Collapse All</button>
+                        </span>
+                    </div>
+                    <div class="jar-source-filter-bar" id="jarSourceFilterBar" style="display:none"></div>
+                    <div class="nav-bar" id="code-nav-bar">
+                        <button class="nav-btn" id="nav-back" onclick="JA.codeTree.goBack()" disabled title="Back">&#9664; Back</button>
+                        <button class="nav-btn" id="nav-forward" onclick="JA.codeTree.goForward()" disabled title="Forward">Next &#9654;</button>
+                        <div class="nav-breadcrumb" id="nav-breadcrumb"></div>
+                        <button class="nav-btn nav-history-btn" id="nav-history-toggle" onclick="JA.codeTree.toggleHistory()" title="Jump History">History</button>
+                    </div>
+                    <div class="nav-history-panel" id="nav-history-panel" style="display:none"></div>
+                    <div class="code-split-container">
+                        <div class="code-split-left">
+                            <div id="class-tree" class="class-tree"></div>
+                        </div>
+                        <div class="code-split-right" id="code-panel">
+                            <div class="cp-placeholder"><p>Select a class or method to view code</p></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="tab-endpoints" class="tab-content" style="display:none">
+                    <div class="endpoint-panel">
+                        <div class="endpoint-sidebar" id="endpoint-list"></div>
+                        <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+                            <div class="graph-breadcrumb-bar" id="graph-breadcrumb-bar" style="display:none">
+                                <button class="nav-btn" id="graph-back-btn" onclick="JA.callGraph.goBack()">&#9664; Back</button>
+                                <div class="graph-breadcrumb" id="graph-breadcrumb"></div>
+                                <button class="nav-btn" onclick="JA.callGraph.goToRoot()">Root</button>
+                            </div>
+                            <div class="endpoint-graph" id="graph-container">
+                                <p class="graph-placeholder">Select an endpoint to view its call flow</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="tab-summary" class="tab-content" style="display:none">
+                    <div id="summary-container" class="summary-container"></div>
+                </div>
+            </div>
+
+            <div id="loading" class="loading" style="display:none">
+                <div class="spinner"></div>
+                <p>Analyzing JAR bytecode...</p>
+            </div>
+        </main>
+    </div>
+    <script src="../shared/poll-config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/sidebar.js"></script>
+    <script src="js/nav.js"></script>
+    <script src="js/codeTree.js"></script>
+    <script src="js/codeTreeViews.js"></script>
+    <script src="js/codeTreePanel.js"></script>
+    <script src="js/endpointList.js"></script>
+    <script src="js/callGraph.js"></script>
+    <!-- Summary components (order matters: helpers first, orchestrator last) -->
+    <script src="js/summary-helpers.js"></script>
+    <script src="js/summary-analyzer.js"></script>
+    <script src="js/summary-tables.js"></script>
+    <script src="js/summary-trace.js"></script>
+    <script src="js/summary-explorer.js"></script>
+    <script src="js/summary-codeview.js"></script>
+    <script src="js/summary-claude.js"></script>
+    <script src="js/summary-scheduled.js"></script>
+    <script src="js/summary-dynamic.js"></script>
+    <script src="js/summary-aggregation.js"></script>
+    <script src="js/summary-corrections.js"></script>
+    <script src="js/summary-corr-logbrowser.js"></script>
+    <script src="js/summary-col-filter.js"></script>
+    <script src="js/summary-vertical.js"></script>
+    <script src="js/summary-vert-popup.js"></script>
+    <script src="js/summary-popups.js"></script>
+    <script src="js/summary-export.js"></script>
+    <script src="js/summary-export-modal.js"></script>
+    <script src="js/summary-export-style.js"></script>
+    <script src="js/summary-export-excel.js"></script>
+    <script src="js/summary.js"></script>
+    <script src="js/sessions.js"></script>
+    <!-- Log viewer button moved to content area via CSS -->
+    <script src="js/logviewer.js"></script>
+    <script src="js/dashboard.js"></script>
+    <!-- dash-panel removed: sessions/logs available via top bar buttons -->
+    <script src="js/app.js"></script>
+
+    <!-- Log FAB (bottom-left, always visible) -->
+    <link rel="stylesheet" href="../shared/log-fab.css">
+    <script src="../shared/log-fab.js"></script>
+    <script>LogFab.init();</script>
+
+    <!-- Classic Chat -->
+    <link rel="stylesheet" href="../shared/chat.css">
+    <script src="../shared/chat-api.js"></script>
+    <script src="../shared/chat.js"></script>
+    <div id="chatRoot"></div>
+    <script>ChatPanel.init('#chatRoot', 'JAR', () => ({ jarName: JA.app?.currentJar || '' }));</script>
+
+    <!-- New Chatbox + Toggle -->
+    <link rel="stylesheet" href="../shared/chatbox.css">
+    <script src="../shared/chatbox.js"></script>
+    <script src="../shared/chat-toggle.js"></script>
+    <script>SharedChatToggle.init('JAR', () => ({ jarName: JA.app?.currentJar || '' }));</script>
+
+    <!-- Help System -->
+    <link rel="stylesheet" href="../shared/help.css">
+    <script src="../shared/help.js"></script>
+    <script>HelpSystem.init('jar');</script>
+</body>
+</html>

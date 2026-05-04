@@ -1,0 +1,9 @@
+:root {
+    --seq-nextval: #8b5cf6;
+    --seq-currval: #06b6d4;
+}
+
+.seq-name {
+    font-weight: 600; font-size: 12px; font-family: var(--font-mono);
+    color: var(--seq-nextval); letter-spacing: 0.3px;
+}

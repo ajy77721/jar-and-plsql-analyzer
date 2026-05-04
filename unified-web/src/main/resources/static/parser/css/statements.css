@@ -1,0 +1,36 @@
+.stmt-type-badge {
+    font-weight: 700; font-size: 11px; font-family: var(--font-mono);
+    letter-spacing: 0.3px;
+}
+
+.stmt-bar-wrap {
+    display: flex; align-items: center; gap: 6px; min-width: 120px;
+}
+.stmt-bar {
+    height: 6px; border-radius: 3px; min-width: 2px;
+    transition: width 0.2s ease;
+}
+.stmt-bar-label {
+    font-size: 9px; color: var(--text-muted); min-width: 30px;
+}
+
+.stmt-proc-count {
+    font-weight: 700; font-size: 12px; min-width: 36px;
+    text-align: right; margin-right: 6px; font-family: var(--font-mono);
+}
+
+/* Type pill color overrides */
+.op-filter-pill.stmt-blue { border-color: var(--badge-blue-bg); }
+.op-filter-pill.stmt-blue.active { background: var(--badge-blue-bg); color: var(--badge-blue); border-color: var(--badge-blue); }
+.op-filter-pill.stmt-green { border-color: var(--badge-green-bg); }
+.op-filter-pill.stmt-green.active { background: var(--badge-green-bg); color: var(--badge-green); border-color: var(--badge-green); }
+.op-filter-pill.stmt-orange { border-color: var(--badge-orange-bg); }
+.op-filter-pill.stmt-orange.active { background: var(--badge-orange-bg); color: var(--badge-orange); border-color: var(--badge-orange); }
+.op-filter-pill.stmt-red { border-color: var(--badge-red-bg); }
+.op-filter-pill.stmt-red.active { background: var(--badge-red-bg); color: var(--badge-red); border-color: var(--badge-red); }
+.op-filter-pill.stmt-purple { border-color: var(--badge-purple-bg); }
+.op-filter-pill.stmt-purple.active { background: var(--badge-purple-bg); color: var(--badge-purple); border-color: var(--badge-purple); }
+.op-filter-pill.stmt-ctrl { border-color: rgba(45, 212, 191, 0.2); }
+.op-filter-pill.stmt-ctrl.active { background: rgba(45, 212, 191, 0.15); color: var(--badge-teal); border-color: var(--badge-teal); }
+.op-filter-pill.stmt-other { border-color: var(--border); }
+.op-filter-pill.stmt-other.active { background: var(--bg); color: var(--text); }

@@ -1,0 +1,203 @@
+/* ==================== CHUNK VIEWER OVERLAY ==================== */
+
+.cv-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 1300; display: none; justify-content: center; align-items: center;
+}
+.cv-overlay.open { display: flex; }
+
+.cv-panel {
+    width: 95vw; max-width: 1400px; height: 85vh;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-md); box-shadow: 0 16px 48px rgba(0,0,0,0.35);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+
+/* ==================== TOP BAR ==================== */
+
+.cv-top-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.cv-title {
+    font-size: 14px; font-weight: 700; color: var(--accent); white-space: nowrap;
+}
+.cv-top-stats {
+    display: flex; align-items: center; gap: 6px; flex: 1; flex-wrap: wrap;
+}
+.cv-stat-badge {
+    font-size: 9px; font-weight: 700; padding: 2px 8px; border-radius: 10px;
+}
+.cv-stat-badge.complete { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-stat-badge.error { background: var(--badge-red-bg); color: var(--badge-red); }
+.cv-stat-badge.pending { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.cv-stat-badge.total { background: var(--badge-gray-bg); color: var(--badge-gray); }
+.cv-stat-badge.confirmed { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-stat-badge.removed { background: var(--badge-red-bg); color: var(--badge-red); }
+.cv-stat-badge.new-ops { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.cv-stat-sep { color: var(--border); font-size: 12px; }
+
+/* ==================== SPLIT LAYOUT ==================== */
+
+.cv-split {
+    display: flex; flex: 1; overflow: hidden;
+}
+.cv-left {
+    width: 340px; min-width: 260px; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.cv-right {
+    flex: 1; overflow-y: auto; display: flex; flex-direction: column;
+}
+
+/* ==================== LEFT: SEARCH + LIST ==================== */
+
+.cv-search-wrap {
+    padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.cv-search {
+    width: 100%; padding: 5px 10px; font-size: 11px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg); color: var(--text); outline: none;
+}
+.cv-search:focus { border-color: var(--accent); }
+
+.cv-chunk-scroll {
+    flex: 1; overflow-y: auto;
+}
+.cv-chunk-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; cursor: pointer;
+    border-bottom: 1px solid var(--border); transition: background 0.1s;
+}
+.cv-chunk-row:hover { background: rgba(99,102,241,0.04); }
+.cv-chunk-row.active { background: rgba(99,102,241,0.10); border-left: 3px solid var(--accent); }
+
+.cv-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.cv-dot.COMPLETE { background: var(--green); }
+.cv-dot.ERROR { background: var(--red); }
+.cv-dot.PENDING { background: var(--orange); }
+
+.cv-chunk-info { flex: 1; min-width: 0; }
+.cv-chunk-name {
+    display: block; font-size: 11px; font-weight: 600;
+    color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cv-chunk-meta {
+    display: block; font-size: 9px; color: var(--text-muted); margin-top: 1px;
+}
+.cv-chunk-status-label {
+    font-size: 8px; font-weight: 700; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 8px; flex-shrink: 0;
+}
+.cv-chunk-status-label.COMPLETE { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-chunk-status-label.ERROR { background: var(--badge-red-bg); color: var(--badge-red); }
+.cv-chunk-status-label.PENDING { background: var(--badge-orange-bg); color: var(--badge-orange); }
+
+/* ==================== RIGHT: DETAIL ==================== */
+
+.cv-detail-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.cv-detail-name {
+    flex: 1; font-size: 12px; font-weight: 600; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cv-detail-tabs { display: flex; gap: 0; flex-shrink: 0; }
+.cv-tab {
+    padding: 4px 14px; font-size: 10px; font-weight: 700;
+    background: transparent; color: var(--text-muted);
+    border: 1px solid var(--border); cursor: pointer; transition: all 0.12s;
+}
+.cv-tab:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.cv-tab:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.cv-tab:not(:first-child) { border-left: none; }
+.cv-tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+.cv-tab:hover:not(.active) { background: rgba(99,102,241,0.06); }
+.cv-tab-error { color: var(--red) !important; }
+.cv-tab-error.active { background: var(--red) !important; border-color: var(--red) !important; color: white !important; }
+
+.cv-tab-content { display: none; flex: 1; overflow-y: auto; padding: 12px 16px; }
+.cv-tab-content.active { display: block; }
+
+/* ==================== RESPONSE RENDERING ==================== */
+
+.cv-resp-summary {
+    padding: 8px 12px; margin-bottom: 10px;
+    background: rgba(99,102,241,0.06); border-radius: var(--radius-sm);
+    font-size: 11px; color: var(--text); line-height: 1.5;
+    border-left: 3px solid var(--accent);
+}
+.cv-resp-counts {
+    display: flex; gap: 6px; margin-bottom: 12px;
+}
+.cv-resp-table {
+    margin-bottom: 12px; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); overflow: hidden;
+}
+.cv-resp-table-name {
+    padding: 6px 10px; font-size: 11px; font-weight: 700;
+    background: var(--bg); color: var(--accent);
+    border-bottom: 1px solid var(--border);
+}
+.cv-resp-ops {
+    width: 100%; border-collapse: collapse; font-size: 11px;
+}
+.cv-resp-op-row td {
+    padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top;
+}
+.cv-resp-op-row:last-child td { border-bottom: none; }
+.cv-resp-op-row.REMOVED { background: rgba(239,68,68,0.04); }
+.cv-resp-op-row.NEW { background: rgba(59,130,246,0.04); }
+.cv-resp-proc { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
+.cv-resp-line { font-family: var(--font-mono); font-size: 10px; color: var(--teal); white-space: nowrap; }
+.cv-resp-reason { font-size: 10px; color: var(--text-muted); font-style: italic; max-width: 300px; }
+
+/* ==================== PROMPT RENDERING ==================== */
+
+.cv-prompt-meta {
+    display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px;
+    background: var(--bg); border-radius: var(--radius-sm);
+    margin-bottom: 10px; border: 1px solid var(--border);
+}
+.cv-prompt-meta-item {
+    font-size: 10px; color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+.cv-prompt-section-title {
+    padding: 6px 10px; margin: 10px 0 4px;
+    background: linear-gradient(90deg, rgba(99,102,241,0.10), transparent);
+    border-left: 3px solid var(--accent);
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.cv-code-block {
+    padding: 10px 12px; margin: 0 0 8px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 11px; font-family: var(--font-mono);
+    line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    overflow-x: auto; max-height: 400px; overflow-y: auto;
+}
+.cv-plsql .cv-line-num { color: var(--text-muted); user-select: none; }
+.cv-plsql .cv-src-header { color: var(--accent); font-weight: 700; }
+.cv-findings .cv-op-hl { color: var(--teal); font-weight: 700; }
+
+.cv-error-pre {
+    padding: 12px; background: rgba(239,68,68,0.06);
+    border: 1px solid var(--red); border-radius: var(--radius-sm);
+    color: var(--red); font-size: 11px; font-family: var(--font-mono);
+    white-space: pre-wrap;
+}
+
+/* ==================== EMPTY STATE ==================== */
+
+.cv-empty {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; font-size: 12px; color: var(--text-muted);
+    padding: 24px;
+}

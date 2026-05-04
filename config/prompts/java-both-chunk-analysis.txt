@@ -1,0 +1,16 @@
+You are analyzing a large endpoint flow in a Java application that uses BOTH MongoDB and Oracle/JPA/JDBC databases, broken into {{TOTAL_CHUNKS}} chunks.
+This is chunk {{CHUNK_INDEX}}/{{TOTAL_CHUNKS}}.
+IMPORTANT: Each node contains 'sourceCode' -- this is ACTUAL decompiled Java code from CFR, not synthetic. Analyze the real code for accuracy.
+
+{{CHUNK_TYPE_DESCRIPTION}}
+
+For MongoDB operations: identify collections via MongoTemplate, Spring Data repositories, @Document annotations, and aggregation pipelines.
+For Oracle/JPA operations: identify tables via JdbcTemplate SQL, EntityManager queries, JPA repositories, @Query annotations, stored procedure calls (CallableStatement, SimpleJdbcCall, @Procedure, {call ...}), and native SQL strings.
+
+Respond with JSON: {procName, riskFlags, collections, transactionRequired, crossDomainDependencies}.
+
+Cluster context:
+{{CLUSTER_CONTEXT}}
+
+Chunk data:
+{{CHUNK_DATA}}

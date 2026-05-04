@@ -1,0 +1,59 @@
+.left-panel {
+    width: 280px; min-width: 280px;
+    background: var(--sidebar-bg); color: var(--sidebar-text);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.left-tabs { display: flex; border-bottom: 1px solid var(--sidebar-border); }
+.ltab {
+    flex: 1; padding: 8px 4px; border: none; background: none;
+    color: var(--sidebar-muted); font-size: 11px; cursor: pointer;
+    border-bottom: 2px solid transparent; text-transform: uppercase;
+    font-weight: 700; letter-spacing: 0.5px; transition: all var(--transition);
+}
+.ltab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.ltab:hover { color: var(--sidebar-text); }
+
+.left-filter { padding: 6px 8px; }
+.left-filter .form-input {
+    background: var(--sidebar-hover); border-color: rgba(69,71,90,0.6);
+    color: var(--sidebar-text); font-size: 12px; width: 100%; padding: 7px 10px;
+}
+.left-filter .form-input:focus { border-color: var(--accent); box-shadow: none; }
+.left-filter .form-input::placeholder { color: #6c7086; }
+
+.left-content { flex: 1; overflow-y: auto; }
+
+.lp-item {
+    padding: 7px 10px; font-size: 12px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; margin-bottom: 1px;
+    border-radius: var(--radius); margin: 0 4px 1px; transition: background var(--transition);
+}
+.lp-item:hover { background: var(--sidebar-hover); }
+.lp-item.active { background: var(--accent); color: white; }
+.lp-item.active .lp-name { color: white; }
+.lp-item.active .lp-badge { color: rgba(255,255,255,0.7); }
+
+.lp-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: var(--radius-sm);
+    font-size: 9px; font-weight: 700; flex-shrink: 0;
+}
+.lp-icon.P { background: #ede9fe; color: #7c3aed; }
+.lp-icon.F { background: #dbeafe; color: #2563eb; }
+.lp-icon.T { background: #fef3c7; color: #a16207; }
+.lp-icon.PKG { background: #f3e8ff; color: #7e22ce; }
+.lp-icon.S { background: #ccfbf1; color: #0f766e; }
+
+.lp-name {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.1px;
+}
+.lp-badge { font-size: 10px; color: var(--sidebar-muted); flex-shrink: 0; }
+.lp-type-badge { font-size: 8px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; font-weight: 700; }
+.lp-type-badge.INTERNAL { background: var(--badge-green-bg); color: var(--badge-green); }
+.lp-type-badge.EXTERNAL { background: var(--badge-red-bg); color: var(--badge-red); }
+.lp-type-badge.TRIGGER { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.lp-type-badge.DYNAMIC { background: var(--badge-purple-bg); color: var(--badge-purple); }
+
+.lp-item.indent-1 { padding-left: 24px; }
+.lp-item.indent-2 { padding-left: 40px; }

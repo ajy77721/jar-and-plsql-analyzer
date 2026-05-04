@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PL/SQL Analyzer</title>
+    <link rel="stylesheet" href="css/style.css?v=20260419c">
+    <link rel="stylesheet" href="css/summary-views.css?v=20260419a">
+</head>
+<body>
+    <div id="app">
+
+        <!-- ==================== SCREEN 1: HOME ==================== -->
+        <div id="screenHome" class="screen active">
+            <div class="home-container">
+                <div style="margin-bottom:8px">
+                    <a href="/" style="color:#a6adc8;text-decoration:none;font-size:13px;opacity:0.7">&larr; Back to Home</a>
+                </div>
+                <div class="home-brand">
+                    <h1>PL/SQL Analyzer</h1>
+                    <p>Oracle PL/SQL Static Analysis &amp; Call Trace</p>
+                    <button class="btn btn-sm" style="margin-top:8px;color:var(--accent)" onclick="PA.config.showModal()">&#9881; Manage Connections</button>
+                </div>
+
+                <!-- New Analysis Form — Stepped Layout -->
+                <div class="home-form">
+                    <div class="af-step">
+                        <span class="af-step-num">1</span>
+                        <span class="af-label">Connection</span>
+                        <div class="af-fields">
+                            <select id="homeProject" class="form-select" onchange="PA.onProjectChange()">
+                                <option value="">Legacy (global)</option>
+                            </select>
+                            <select id="homeEnv" class="form-select" onchange="PA.onEnvChange()" disabled>
+                                <option value="">Select env</option>
+                            </select>
+                            <span class="af-hint" id="afConnHint">Optional — uses default DB config if empty</span>
+                        </div>
+                    </div>
+                    <div class="af-step disabled" id="afStep2">
+                        <span class="af-step-num">2</span>
+                        <span class="af-label">Owner</span>
+                        <div class="af-fields">
+                            <select id="homeSchema" class="form-select" style="min-width:200px" onchange="PA.updateFormSteps()">
+                                <option value="">Auto-detect (all schemas)</option>
+                            </select>
+                            <span class="af-hint" id="afOwnerHint">DB schema that owns the object</span>
+                        </div>
+                    </div>
+                    <div class="af-step disabled" id="afStep3">
+                        <span class="af-step-num">3</span>
+                        <span class="af-label">Target</span>
+                        <div class="af-fields">
+                            <input type="text" id="homeObject" class="form-input" placeholder="e.g. PKG_CUSTOMER or PKG.PROC_NAME" style="flex:2">
+                            <select id="homeType" class="form-select" style="min-width:140px">
+                                <option value="PACKAGE">PACKAGE</option>
+                                <option value="PROCEDURE">PROCEDURE</option>
+                                <option value="FUNCTION">FUNCTION</option>
+                                <option value="TRIGGER">TRIGGER</option>
+                            </select>
+                            <label class="af-fast-toggle" title="Fast mode: bulk queries, parallel parsing — much faster for large packages">
+                                <input type="checkbox" id="homeFastMode" checked> Fast
+                            </label>
+                            <button id="btnStartAnalysis" class="btn btn-primary af-analyze-btn" onclick="PA.startAnalysis()">Analyze</button>
+                        </div>
+                    </div>
+                    <div id="homeProgress" class="home-progress" style="display:none">
+                        <div class="progress-bar"><div class="progress-fill" id="homeProgressFill"></div></div>
+                        <span id="homeProgressText" class="progress-text">Starting...</span>
+                    </div>
+                </div>
+
+                <!-- Two-column layout: Jobs (left) + History (right) -->
+                <div class="home-columns">
+                    <!-- Left column: Jobs + Claude Sessions -->
+                    <div class="home-col home-col-left">
+                        <div class="home-section" id="jobsSection">
+                            <div class="home-section-header">
+                                <h2>Jobs</h2>
+                                <span id="jobsCount" class="badge">0</span>
+                            </div>
+                            <input type="text" id="jobsSearch" class="form-input home-search" placeholder="Search jobs..." oninput="PA.jobs.onSearch(this.value)">
+                            <div id="jobsList" class="history-list home-scroll"></div>
+                        </div>
+
+                        <div class="home-section home-section-claude">
+                            <div class="home-section-header">
+                                <h2 style="color:var(--purple,#a855f7)">Claude Sessions</h2>
+                                <span id="claudeSessionCount" class="badge" style="background:rgba(168,85,247,0.15);color:#a855f7">0</span>
+                            </div>
+                            <input type="text" id="claudeSearch" class="form-input home-search" placeholder="Search sessions..." oninput="PA.claude.onHomeSearch(this.value)">
+                            <div id="claudeHomeList" class="history-list home-scroll"></div>
+                        </div>
+                    </div>
+
+                    <!-- Right column: History -->
+                    <div class="home-col home-col-right">
+                        <div class="home-section">
+                            <div class="home-section-header">
+                                <h2>Analysis History</h2>
+                                <span id="historyCount" class="badge">0</span>
+                            </div>
+                            <input type="text" id="historySearch" class="form-input home-search" placeholder="Search history..." oninput="PA.onHistorySearch(this.value)">
+                            <div id="historyList" class="history-list home-scroll">
+                                <div class="empty-msg">Loading...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== SCREEN 2: ANALYSIS ==================== -->
+        <div id="screenAnalysis" class="screen">
+            <!-- Top Bar -->
+            <div class="topbar">
+                <button class="btn btn-back" onclick="PA.goHome()" title="Back to home">&larr; Home</button>
+                <div class="topbar-info">
+                    <span id="topbarTitle" class="topbar-title">No Analysis</span>
+                    <span id="topbarStats" class="topbar-stats"></span>
+                </div>
+                <div id="topbarVersionBadge" class="topbar-version" style="display:none"></div>
+                <div id="claudeHeaderProgress" class="claude-header-progress" style="display:none">
+                    <div class="claude-header-progress-fill" id="claudeHeaderProgressFill"></div>
+                </div>
+                <span id="topbarConnInfo" style="font-size:11px;cursor:pointer"></span>
+                <button class="btn btn-sm" onclick="PA.claude.showSessions()" title="View Claude AI sessions" style="color:var(--purple,#a855f7)">Claude Sessions</button>
+                <button class="enable-claude-btn" id="enableClaudeBtn" onclick="PA.triggerClaude()" style="display:none" title="Run Claude AI verification on this analysis">Enable Claude</button>
+                <div class="topbar-actions">
+                    <input type="text" id="globalSearch" class="form-input" placeholder="Search..." style="width:160px" oninput="PA.globalSearch(this.value)">
+                    <button class="btn btn-sm" onclick="PA.export.show()" title="Export">Export</button>
+                    <button class="btn btn-sm" onclick="PA.logViewer.open()" title="Logs">Logs</button>
+                </div>
+            </div>
+
+            <div id="versionBanner" class="version-banner" style="display:none"></div>
+
+            <div class="analysis-layout">
+                <!-- Left Panel: Sidebar -->
+                <div class="left-panel" id="leftPanel">
+                    <div class="left-tabs">
+                        <button class="ltab active" data-tab="procedures" onclick="PA.switchLeftTab('procedures')" title="Procedures and functions in the call flow — click to view details">Call Flow</button>
+                        <button class="ltab" data-tab="tables" onclick="PA.switchLeftTab('tables')" title="Database tables accessed in this analysis — click to view table info">Tables</button>
+                    </div>
+                    <div class="left-filter">
+                        <input type="text" id="leftFilter" class="form-input" placeholder="Filter..." oninput="PA.filterLeft()">
+                    </div>
+                    <div class="left-content" id="leftContent">
+                        <div class="left-panel-list" id="lpProcedures"></div>
+                        <div class="left-panel-list" id="lpTables" style="display:none"></div>
+                    </div>
+                </div>
+
+                <!-- Right Panel: Content -->
+                <div class="right-panel">
+                    <!-- Summary Header (jar-analyzer style — shows when a procedure is selected) -->
+                    <div class="detail-header" id="detailHeader" style="display:none">
+                        <div class="dh-top">
+                            <div class="dh-name">
+                                <span id="dhSchema" class="dh-schema-badge"></span>
+                                <span id="dhFullName" class="dh-full-name"></span>
+                            </div>
+                            <div class="dh-meta" id="dhMeta"></div>
+                        </div>
+                        <div class="dh-stats" id="dhStats"></div>
+                        <div class="dh-badges" id="dhBadges"></div>
+                        <div class="dh-totals" id="dhTotals" style="display:none"></div>
+                        <div class="dh-view-toggle" id="dhViewToggle" style="display:none">
+                            <button class="dh-vt-btn active" data-vt="static" onclick="PA.setAnalysisView('static')">Static Analysis</button>
+                            <button class="dh-vt-btn" data-vt="claude" onclick="PA.setAnalysisView('claude')">Claude AI</button>
+                        </div>
+                        <div class="dh-info" id="dhInfo" style="display:none"></div>
+                        <div class="dh-nav" id="dhNav" style="display:none"></div>
+                    </div>
+
+                    <!-- Tabs -->
+                    <div class="right-tabs">
+                        <button class="rtab active" data-view="callTrace" onclick="PA.switchRightTab('callTrace')" title="Interactive call tree — click row to see details, double-click to drill down, click name to view source">Explore</button>
+                        <button class="rtab" data-view="trace" onclick="PA.switchRightTab('trace')" title="Flat sequential trace — all calls in execution order with depth bars">Trace</button>
+                        <button class="rtab" data-view="refs" onclick="PA.switchRightTab('refs')" title="Who calls this procedure? Reverse dependency lookup">References</button>
+                        <button class="rtab" data-view="tableOps" onclick="PA.switchRightTab('tableOps')" title="All database tables accessed in this flow with operation types and triggers">Table Operations</button>
+                        <button class="rtab" data-view="joins" onclick="PA.switchRightTab('joins')" title="JOIN relationships between tables — join types, ON predicates, procedures">Joins</button>
+                        <button class="rtab" data-view="cursors" onclick="PA.switchRightTab('cursors')" title="Cursor declarations and usage — explicit, REF, FOR LOOP cursors">Cursors</button>
+                        <button class="rtab" data-view="predicates" onclick="PA.switchRightTab('predicates')" title="WHERE clause predicates — filter conditions per table with column details">Predicates</button>
+                        <button class="rtab" data-view="source" onclick="PA.switchRightTab('source')" title="PL/SQL source code viewer — shows focused proc view with package variables">Source</button>
+                        <button class="rtab" data-view="claude" onclick="PA.switchRightTab('claude')" title="Claude AI verification — validates static analysis with AI review">Claude AI</button>
+                        <button class="rtab" data-view="summary" onclick="PA.switchRightTab('summary')" title="Summary dashboard — aggregated analysis with export, transactions, schema slicing">Summary</button>
+                    </div>
+
+                    <div class="right-content">
+                        <!-- Explore View (interactive drill-down call trace) -->
+                        <div class="right-view active" id="viewCallTrace">
+                            <div class="ct-toolbar">
+                                <div class="breadcrumb" id="breadcrumb">
+                                    <span class="bc-item bc-root" onclick="PA.callTrace.goRoot()">Root</span>
+                                </div>
+                                <div class="ct-actions">
+                                    <input type="text" id="exploreSearch" class="form-input" placeholder="Search proc/package..." oninput="PA.callTrace.search(this.value)" style="width:180px;font-size:11px;padding:2px 6px">
+                                    <button class="btn btn-sm" onclick="PA.callTrace.expandAll()" title="Expand all nested call tree branches">Expand All</button>
+                                    <button class="btn btn-sm" onclick="PA.callTrace.collapseAll()" title="Collapse all branches to show only top-level calls">Collapse All</button>
+                                </div>
+                            </div>
+                            <div class="ct-container" id="ctContainer">
+                                <div class="empty-msg">Select a procedure from the left panel</div>
+                            </div>
+                        </div>
+
+                        <!-- Trace View (flat Dynatrace-style tree) -->
+                        <div class="right-view" id="viewTrace">
+                            <div class="ct-toolbar">
+                                <div style="font-size:12px;color:var(--text-muted)">Full call trace (flat view)</div>
+                                <div class="ct-actions">
+                                    <input type="text" id="traceSearch" class="form-input" placeholder="Search proc/package..." oninput="PA.trace.search(this.value)" style="width:180px;font-size:11px;padding:2px 6px">
+                                    <button class="btn btn-sm" onclick="PA.trace.expandAll()">Expand All</button>
+                                    <button class="btn btn-sm" onclick="PA.trace.collapseAll()">Collapse All</button>
+                                </div>
+                            </div>
+                            <div class="ct-container" id="traceContainer">
+                                <div class="empty-msg">Select a procedure to see flat trace</div>
+                            </div>
+                        </div>
+
+                        <!-- References View (calls made / called by) -->
+                        <div class="right-view" id="viewRefs">
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <div class="refs-tabs">
+                                        <button class="btn btn-sm refs-tab active" data-ref="calls" onclick="PA.refs.switchTab('calls')">Calls Made</button>
+                                        <button class="btn btn-sm refs-tab" data-ref="callers" onclick="PA.refs.switchTab('callers')">Called By</button>
+                                    </div>
+                                    <input type="text" id="refSearch" class="form-input" placeholder="Search..." oninput="PA.refs.filter()" style="width:180px">
+                                    <select id="refSchemaFilter" class="form-select" onchange="PA.refs.filter()" style="width:140px">
+                                        <option value="">All Schemas</option>
+                                    </select>
+                                    <select id="refTypeFilter" class="form-select" onchange="PA.refs.filter()" style="width:140px">
+                                        <option value="">All Types</option>
+                                        <option value="PROCEDURE">PROCEDURE</option>
+                                        <option value="FUNCTION">FUNCTION</option>
+                                    </select>
+                                    <select id="refScopeFilter" class="form-select" onchange="PA.refs.filter()" style="width:140px">
+                                        <option value="">All Scopes</option>
+                                        <option value="INTERNAL">INTERNAL</option>
+                                        <option value="EXTERNAL">EXTERNAL</option>
+                                    </select>
+                                    <button class="btn btn-sm" onclick="PA.refs.clearFilters()">Clear</button>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="refsTotalCount" class="badge">0 refs</span>
+                                    <span id="refsFilteredCount" class="badge" style="display:none">0 shown</span>
+                                    <span id="refsInternalCount" class="badge" style="background:var(--badge-green-bg);color:var(--badge-green)">0 int</span>
+                                    <span id="refsExternalCount" class="badge" style="background:var(--badge-red-bg);color:var(--badge-red)">0 ext</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="refsContainer">
+                                <div class="empty-msg">Select a procedure to see references</div>
+                            </div>
+                            <div class="pagination-bar" id="refs-pager" style="display:none"></div>
+                        </div>
+
+                        <!-- Table Operations View -->
+                        <div class="right-view" id="viewTableOps">
+                            <div class="context-breadcrumb" id="toBreadcrumb" style="display:none"></div>
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <div class="scope-toggle" id="toScopeToggle" style="display:none">
+                                        <button class="scope-btn active" data-scope="scoped" onclick="PA.tableOps.setScope('scoped')">Direct</button>
+                                        <button class="scope-btn" data-scope="all" onclick="PA.tableOps.setScope('all')">Full Flow</button>
+                                    </div>
+                                    <input type="text" id="toSearch" class="form-input" placeholder="Search tables..." oninput="PA.tableOps.onSearch()" style="width:180px">
+                                    <div class="op-filter-pills" id="toOpPills"></div>
+                                    <select id="toTypeFilter" class="form-select" onchange="PA.tf.filter('to')" style="width:110px">
+                                        <option value="">All Types</option>
+                                        <option value="TABLE">Table</option>
+                                        <option value="VIEW">View</option>
+                                        <option value="MATERIALIZED VIEW">Mat. View</option>
+                                    </select>
+                                    <label class="to-check"><input type="checkbox" id="toExtOnly" onchange="PA.tf.filter('to')"> External</label>
+                                    <label class="to-check"><input type="checkbox" id="toTrigOnly" onchange="PA.tf.filter('to')"> Triggers</label>
+                                    <span class="op-filter-clear" onclick="PA.tableOps.clearFilters()">Clear</span>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="toTotalCount" class="badge">0 tables</span>
+                                    <span id="toFilteredCount" class="badge" style="display:none">0 shown</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="toContainer" style="flex:1;overflow:auto">
+                                <div class="empty-msg">Run analysis to see table operations</div>
+                            </div>
+                            <div class="pagination-bar" id="to-pager" style="display:none"></div>
+                        </div>
+
+                        <!-- Joins View -->
+                        <div class="right-view" id="viewJoins">
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <div class="scope-toggle" id="joinScopeToggle" style="display:none">
+                                        <button class="scope-btn active" data-scope="scoped" onclick="PA.joins.setScope('scoped')">Direct</button>
+                                        <button class="scope-btn" data-scope="all" onclick="PA.joins.setScope('all')">Full Flow</button>
+                                    </div>
+                                    <input type="text" id="joinSearch" class="form-input" placeholder="Search joins..." oninput="PA.joins.onSearch()" style="width:180px">
+                                    <div class="op-filter-pills" id="joinTypePills"></div>
+                                    <span class="op-filter-clear" onclick="PA.joins.clearFilters()">Clear</span>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="joinTotalCount" class="badge">0 joins</span>
+                                    <span id="joinFilteredCount" class="badge" style="display:none">0 shown</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="joinContainer" style="flex:1;overflow:auto">
+                                <div class="empty-msg">Run analysis to see join operations</div>
+                            </div>
+                            <div class="pagination-bar" id="join-pager" style="display:none"></div>
+                        </div>
+
+                        <!-- Cursors View -->
+                        <div class="right-view" id="viewCursors">
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <div class="scope-toggle" id="curScopeToggle" style="display:none">
+                                        <button class="scope-btn active" data-scope="scoped" onclick="PA.cursors.setScope('scoped')">Direct</button>
+                                        <button class="scope-btn" data-scope="all" onclick="PA.cursors.setScope('all')">Full Flow</button>
+                                    </div>
+                                    <input type="text" id="curSearch" class="form-input" placeholder="Search cursors..." oninput="PA.cursors.onSearch()" style="width:180px">
+                                    <div class="op-filter-pills" id="curTypePills"></div>
+                                    <select id="curOpFilter" class="form-select" onchange="PA.cursors.applyFilters()" style="width:120px">
+                                        <option value="">All Ops</option>
+                                        <option value="DECLARE">DECLARE</option>
+                                        <option value="OPEN">OPEN</option>
+                                        <option value="FETCH">FETCH</option>
+                                        <option value="CLOSE">CLOSE</option>
+                                        <option value="FOR_LOOP">FOR_LOOP</option>
+                                    </select>
+                                    <span class="op-filter-clear" onclick="PA.cursors.clearFilters()">Clear</span>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="curTotalCount" class="badge">0 cursors</span>
+                                    <span id="curFilteredCount" class="badge" style="display:none">0 shown</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="curContainer" style="flex:1;overflow:auto">
+                                <div class="empty-msg">Run analysis to see cursor operations</div>
+                            </div>
+                            <div class="pagination-bar" id="cur-pager" style="display:none"></div>
+                        </div>
+
+                        <!-- Predicates View -->
+                        <div class="right-view" id="viewPredicates">
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <div class="scope-toggle" id="predScopeToggle" style="display:none">
+                                        <button class="scope-btn active" data-scope="scoped" onclick="PA.predicates.setScope('scoped')">Direct</button>
+                                        <button class="scope-btn" data-scope="all" onclick="PA.predicates.setScope('all')">Full Flow</button>
+                                    </div>
+                                    <input type="text" id="predSearch" class="form-input" placeholder="Search tables/columns..." oninput="PA.predicates.onSearch()" style="width:180px">
+                                    <div class="op-filter-pills" id="predOpPills"></div>
+                                    <select id="predOpFilter" class="form-select" onchange="PA.predicates.applyFilters()" style="width:120px">
+                                        <option value="">All Ops</option>
+                                        <option value="SELECT">SELECT</option>
+                                        <option value="INSERT">INSERT</option>
+                                        <option value="UPDATE">UPDATE</option>
+                                        <option value="DELETE">DELETE</option>
+                                        <option value="MERGE">MERGE</option>
+                                    </select>
+                                    <span class="op-filter-clear" onclick="PA.predicates.clearFilters()">Clear</span>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="predTotalCount" class="badge">0 tables</span>
+                                    <span id="predFilteredCount" class="badge" style="display:none">0 shown</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="predContainer" style="flex:1;overflow:auto">
+                                <div class="empty-msg">Run analysis to see WHERE clause predicates</div>
+                            </div>
+                            <div class="pagination-bar" id="pred-pager" style="display:none"></div>
+                        </div>
+
+                        <!-- Source View -->
+                        <div class="right-view" id="viewSource">
+                            <div class="src-header">
+                                <span id="srcPath" class="src-path">No file open</span>
+                            </div>
+                            <div class="src-container" id="srcContainer">
+                                <div class="empty-msg">Click a procedure or line number to view source</div>
+                            </div>
+                        </div>
+
+                        <!-- Claude AI Verification View -->
+                        <div class="right-view" id="viewClaude">
+                            <div class="context-breadcrumb" id="claudeBreadcrumb" style="display:none"></div>
+                            <div class="claude-toolbar">
+                                <div class="claude-actions">
+                                    <button class="btn btn-sm" id="claudeStatusBtn" onclick="PA.claude.checkStatus()" title="Check if Claude CLI is available, reconnect to running verification, and load latest results">Check Status</button>
+                                    <button class="btn btn-sm" onclick="PA.claude.loadResult()" title="Refresh — reload latest Claude verification results from server">Refresh</button>
+                                    <button class="btn btn-sm btn-primary" id="claudeStartBtn" onclick="PA.claude.startVerification(false)" title="Start a fresh Claude AI verification — sends table operations in chunks to Claude for review">Start Verification</button>
+                                    <button class="btn btn-sm" id="claudeResumeBtn" onclick="PA.claude.startVerification(true)" style="display:none" title="Resume a previously stopped verification from the last checkpoint">Resume</button>
+                                    <button class="btn btn-sm btn-danger" id="claudeKillBtn" onclick="PA.claude.killAll()" style="display:none" title="Stop all running Claude verification sessions immediately">Stop</button>
+                                    <button class="btn btn-sm" id="claudeSessionsBtn" onclick="PA.claude.showSessions()" title="View all Claude CLI sessions (running, completed, failed)">Sessions</button>
+                                    <button class="btn btn-sm" id="claudeChunksBtn" onclick="PA.claude.showChunkBrowser()" title="Browse individual chunk inputs and outputs (prompt logs)">Chunks</button>
+                                </div>
+                                <div class="claude-summary" id="claudeSummary">
+                                    <span class="badge">Not started</span>
+                                </div>
+                            </div>
+                            <!-- Filter row: view toggle + operation pills + search + pagination -->
+                            <div class="claude-toolbar-row2" id="claudeFilters" style="display:none">
+                                <div class="view-toggle" title="Switch between Static Analysis view, Claude AI view, or comparison">
+                                    <button class="active" onclick="PA.claude.setView('both')" data-cv="both">Both</button>
+                                    <button onclick="PA.claude.setView('static')" data-cv="static">Static</button>
+                                    <button onclick="PA.claude.setView('claude')" data-cv="claude">Claude</button>
+                                </div>
+                                <input type="text" id="claudeSearch" class="form-input" placeholder="Search table..." oninput="PA.claude.applyFilters()" style="width:160px" title="Filter tables by name or schema">
+                                <div class="op-filter-pills" id="claudeOpPills"></div>
+                                <select id="claudeStatusFilter" class="form-select" onchange="PA.claude.applyFilters()" style="width:120px" title="Filter by verification status">
+                                    <option value="">All Status</option>
+                                    <option value="CONFIRMED">Confirmed</option>
+                                    <option value="EXPANDED">Expanded</option>
+                                    <option value="MODIFIED">Modified</option>
+                                    <option value="PARTIAL">Partial</option>
+                                    <option value="UNVERIFIED">Unverified</option>
+                                </select>
+                                <span class="op-filter-clear" onclick="PA.claude.clearFilters()">Clear All</span>
+                                <div style="flex:1"></div>
+                                <span id="claudeFilteredCount" class="badge" style="display:none"></span>
+                            </div>
+                            <div class="claude-progress" id="claudeProgress" style="display:none">
+                                <div class="progress-bar"><div class="progress-fill" id="claudeProgressFill"></div></div>
+                                <span class="progress-text" id="claudeProgressText">Starting...</span>
+                            </div>
+                            <div class="claude-content" id="claudeContainer">
+                                <div class="empty-msg">Run Claude AI verification to compare static analysis with AI-powered code review.<br>Claude verifies table operations in chunks and confirms, removes, or adds findings.</div>
+                            </div>
+                        </div>
+                        <div class="right-view" id="viewSummary">
+                            <div id="summary-container" style="padding:16px;overflow-y:auto;height:100%">
+                                <div class="empty-msg">Click <b>Summary</b> tab to generate an aggregated analysis report with export, transactions, schema slicing, and more.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+        <!-- Code Modal — jar-analyzer style decompile module popup -->
+        <div class="cm-overlay" id="codeModal" style="display:none">
+            <div class="cm-panel">
+                <!-- Header: back/fwd + breadcrumb + find + close -->
+                <div class="cm-header">
+                    <div class="cm-nav-btns">
+                        <button class="btn btn-sm" id="codeModalBack" onclick="PA.codeModal.back()" disabled title="Back">&#9664;</button>
+                        <button class="btn btn-sm" id="codeModalFwd" onclick="PA.codeModal.forward()" disabled title="Forward">&#9654;</button>
+                    </div>
+                    <div class="cm-breadcrumb" id="codeModalTitle"></div>
+                    <span class="cm-stack-count" id="cmStackCount"></span>
+                    <div class="cm-header-actions">
+                        <button class="btn btn-sm" onclick="PA.codeModal.copySource()" title="Copy source code to clipboard">Copy</button>
+                        <button class="btn btn-sm" onclick="PA.codeModal.toggleSearch()" title="Search (Ctrl+F)">Find</button>
+                        <button class="btn btn-sm" id="cmFullscreenBtn" onclick="PA.codeModal.toggleFullscreen()" title="Toggle fullscreen / restore">&#x26F6;</button>
+                        <button class="btn btn-sm cm-close-btn" onclick="PA.codeModal.close()" title="Close (Esc)">&times;</button>
+                    </div>
+                </div>
+                <!-- Info bar: type badge, name, scope, lines, schema -->
+                <div class="cm-info-bar" id="cmInfoBar"></div>
+                <!-- View toggle: Static Analysis / Claude AI -->
+                <div class="cm-view-toggle" id="cmViewToggle" style="display:none">
+                    <button class="cm-vt-btn active" data-cmv="static" onclick="PA.codeModal.setView('static')">Static Analysis</button>
+                    <button class="cm-vt-btn" data-cmv="claude" onclick="PA.codeModal.setView('claude')">Claude AI</button>
+                </div>
+                <!-- Search bar (hidden by default) -->
+                <div class="cm-search-bar" id="cmSearchBar" style="display:none">
+                    <input type="text" id="cmSearchInput" class="form-input" placeholder="Find in source..."
+                           oninput="PA.codeModal.search(this.value)" onkeydown="PA.codeModal.searchKeydown(event)">
+                    <span id="cmSearchCount" class="badge">0</span>
+                    <button class="btn btn-sm" onclick="PA.codeModal.searchPrev()" title="Previous (Shift+Enter)">&#9650;</button>
+                    <button class="btn btn-sm" onclick="PA.codeModal.searchNext()" title="Next (Enter)">&#9660;</button>
+                    <button class="btn btn-sm" onclick="PA.codeModal.closeSearch()">&times;</button>
+                </div>
+                <!-- Body: code panel + sidebar -->
+                <div class="cm-body">
+                    <!-- Code panel (left/main) -->
+                    <div class="cm-code-panel">
+                        <!-- Static view: source code -->
+                        <div class="cm-view-pane active" id="cmPaneStatic">
+                            <div class="src-container" id="codeModalSource" style="flex:1;margin:0;border-radius:0;border:none"></div>
+                        </div>
+                        <!-- Claude AI view: verification results for this proc -->
+                        <div class="cm-view-pane" id="cmPaneClaude">
+                            <div id="cmClaudeContent" style="padding:12px;overflow:auto;flex:1">
+                                <div class="empty-msg">No Claude verification data for this procedure</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Right sidebar -->
+                    <div class="cm-sidebar" id="codeModalSidebar">
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title">Parameters <span id="cmParamCount" class="cm-sb-count"></span></div>
+                            <input type="text" class="cm-sb-filter" placeholder="Search params..." oninput="PA.codeModal.filterSection(this)">
+                            <div id="cmParamList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title">Variables <span id="cmVarCount" class="cm-sb-count"></span></div>
+                            <input type="text" class="cm-sb-filter" placeholder="Search vars..." oninput="PA.codeModal.filterSection(this)">
+                            <div id="cmVarList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title">Tables <span id="cmTableCount" class="cm-sb-count"></span></div>
+                            <input type="text" class="cm-sb-filter" placeholder="Search tables..." oninput="PA.codeModal.filterSection(this)">
+                            <div id="cmTableList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title">Calls Made <span id="cmCallsCount" class="cm-sb-count"></span></div>
+                            <input type="text" class="cm-sb-filter" placeholder="Search calls..." oninput="PA.codeModal.filterSection(this)">
+                            <div id="cmCallsList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title">Called By <span id="cmCalledByCount" class="cm-sb-count"></span></div>
+                            <input type="text" class="cm-sb-filter" placeholder="Search callers..." oninput="PA.codeModal.filterSection(this)">
+                            <div id="cmCalledByList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title">Package Symbols <span id="cmSymbolsCount" class="cm-sb-count"></span></div>
+                            <input type="text" class="cm-sb-filter" placeholder="Search symbols..." oninput="PA.codeModal.filterSection(this)">
+                            <div id="cmSymbolsList" class="cm-sb-scroll"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+            </div>
+        </div>
+
+        <!-- DB Browse Modal -->
+        <div class="modal" id="browseModal" style="display:none">
+            <div class="modal-box">
+                <div class="modal-head">
+                    <h3>Browse Objects</h3>
+                    <button class="modal-x" onclick="PA.closeBrowse()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div style="display:flex;gap:8px;margin-bottom:12px">
+                        <select id="browseSchema" class="form-select" onchange="PA.loadBrowseObjects()"></select>
+                        <input type="text" id="browseFilter" class="form-input" placeholder="Filter..." oninput="PA.filterBrowse()">
+                    </div>
+                    <div id="browseList" class="browse-list">
+                        <div class="empty-msg">Select a schema to browse</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Table Info Modal -->
+        <div class="modal" id="tableInfoModal" style="display:none">
+            <div class="modal-box" style="width:85vw;max-width:1100px;height:80vh;max-height:80vh">
+                <div class="modal-head">
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                        <span id="tableInfoTitle" style="font-family:var(--font-mono);font-size:14px;font-weight:700"></span>
+                        <span id="tableInfoSchema" class="badge" style="font-size:10px"></span>
+                    </div>
+                    <button class="modal-x" onclick="PA.tableInfo.close()">&times;</button>
+                </div>
+                <div class="modal-body" style="padding:0;display:flex;flex-direction:column;overflow:hidden">
+                    <div class="ti-tabs" id="tableInfoTabs">
+                        <button class="btn btn-sm active" data-ti="columns" onclick="PA.tableInfo.switchTab('columns')">Columns</button>
+                        <button class="btn btn-sm" data-ti="constraints" onclick="PA.tableInfo.switchTab('constraints')">Constraints</button>
+                        <button class="btn btn-sm" data-ti="indexes" onclick="PA.tableInfo.switchTab('indexes')">Indexes</button>
+                        <button class="btn btn-sm" data-ti="query" onclick="PA.tableInfo.switchTab('query')">SQL Query</button>
+                    </div>
+                    <div class="ti-content" id="tableInfoContent" style="flex:1;overflow:auto;padding:12px 16px">
+                        <div class="empty-msg">Loading table info...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trigger Detail Modal -->
+        <div class="modal" id="triggerModal" style="display:none">
+            <div class="modal-box" style="width:92vw;max-width:1300px;height:85vh;max-height:85vh">
+                <div class="modal-head">
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                        <span style="color:var(--orange);font-weight:700">TRIGGER</span>
+                        <span id="triggerModalName" style="font-family:var(--font-mono);font-size:14px;font-weight:700"></span>
+                        <span id="triggerModalEvent" class="badge" style="font-size:10px"></span>
+                        <span id="triggerModalType" class="badge" style="font-size:10px;background:var(--badge-blue-bg);color:var(--badge-blue)"></span>
+                    </div>
+                    <button class="modal-x" onclick="PA.triggerModal.close()">&times;</button>
+                </div>
+                <div class="modal-body" style="padding:0;display:flex;flex-direction:row;overflow:hidden;height:calc(100% - 48px)">
+                    <!-- Left: Trigger Analysis Panel -->
+                    <div id="triggerAnalysisPanel" style="width:360px;min-width:300px;border-right:1px solid var(--border);overflow-y:auto;padding:0;display:flex;flex-direction:column">
+                        <div id="triggerAnalysisContent" style="padding:12px 16px">
+                            <div class="empty-msg">Loading...</div>
+                        </div>
+                    </div>
+                    <!-- Right: Source Code -->
+                    <div id="triggerSourceCode" style="flex:1;overflow:auto;padding:0">
+                        <div class="empty-msg">Loading trigger source...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Claude Sessions Modal -->
+        <div class="modal" id="claudeSessionsModal" style="display:none">
+            <div class="modal-box" style="width:90vw;max-width:1200px;max-height:80vh">
+                <div class="modal-head">
+                    <h3>Claude Sessions (All Analyses)</h3>
+                    <button class="modal-x" onclick="document.getElementById('claudeSessionsModal').style.display='none'">&times;</button>
+                </div>
+                <div class="modal-body" id="claudeSessionsList">
+                    <div class="empty-msg">Loading sessions...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Claude Chunk Log Modal -->
+        <div class="modal" id="claudeLogModal" style="display:none">
+            <div class="modal-box" style="width:85vw;max-width:1100px;height:80vh;max-height:80vh">
+                <div class="modal-head">
+                    <span id="claudeLogTitle" style="font-family:var(--font-mono);font-size:13px"></span>
+                    <button class="modal-x" onclick="document.getElementById('claudeLogModal').style.display='none'">&times;</button>
+                </div>
+                <div class="modal-body" style="padding:0;display:flex;overflow:hidden">
+                    <div id="claudeLogInput" style="flex:1;overflow:auto;padding:12px;border-right:1px solid var(--border)"></div>
+                    <div id="claudeLogOutput" style="flex:1;overflow:auto;padding:12px"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Config Modal -->
+        <div class="modal" id="configModal" style="display:none">
+            <div class="modal-box" style="width:960px;max-width:95vw;height:80vh;display:flex;flex-direction:column">
+                <div class="modal-head">
+                    <h3>DB Configuration &amp; Environments</h3>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <button class="btn btn-sm btn-primary" onclick="PA.config.showAddProject()">+ Add Project</button>
+                        <button class="modal-x" onclick="PA.config.closeModal()">&times;</button>
+                    </div>
+                </div>
+                <div class="modal-body" style="display:flex;gap:0;padding:0;overflow:hidden">
+                    <div id="cfgProjectList" class="cfg-panel" style="width:220px;border-right:1px solid var(--border);overflow-y:auto">
+                        <div class="cfg-empty">Loading...</div>
+                    </div>
+                    <div id="cfgEnvPanel" class="cfg-panel" style="width:260px;border-right:1px solid var(--border);overflow-y:auto"></div>
+                    <div id="cfgDetailPanel" class="cfg-panel" style="flex:1;overflow-y:auto"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast -->
+        <div class="toast" id="toast"></div>
+    </div>
+
+    <script src="../shared/poll-config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    <script src="js/tableFramework.js"></script>
+    <script src="js/export.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/callGraph.js"></script>
+    <script src="js/tableOps.js?v=20260419c"></script>
+    <script src="js/joins.js?v=20260419c"></script>
+    <script src="js/cursors.js?v=20260419c"></script>
+    <script src="js/predicates.js?v=20260419c"></script>
+    <script src="js/triggerModal.js"></script>
+    <script src="js/sourceView.js"></script>
+    <script src="js/claude.js?v=20260419c"></script>
+    <script src="js/logViewer.js"></script>
+    <script src="js/summary-helpers.js"></script>
+    <script src="js/summary-col-filter.js"></script>
+    <script src="js/summary-analyzer.js"></script>
+    <script src="js/summary-tables.js"></script>
+    <script src="js/summary-trace.js"></script>
+    <script src="js/summary-explorer.js"></script>
+    <script src="js/summary-export-style.js"></script>
+    <script src="js/summary-export-excel.js"></script>
+    <script src="js/summary-export-modal.js"></script>
+    <script src="js/summary-export.js"></script>
+    <script src="js/summary-claude.js?v=20260419c"></script>
+    <script src="js/summary-corrections.js"></script>
+    <script src="js/summary-progress.js"></script>
+    <script src="js/summary-corr-logbrowser.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/summary.js?v=20260419c"></script>
+    <script src="js/app.js?v=20260419c"></script>
+
+    <!-- Log FAB (bottom-left, always visible) -->
+    <link rel="stylesheet" href="../shared/log-fab.css">
+    <script src="../shared/log-fab.js"></script>
+    <script>LogFab.init();</script>
+
+    <!-- Classic Chat -->
+    <link rel="stylesheet" href="../shared/chat.css">
+    <script src="../shared/chat-api.js"></script>
+    <script src="../shared/chat.js"></script>
+    <div id="chatRoot"></div>
+    <script>ChatPanel.init('#chatRoot', 'PLSQL', () => ({ analysisName: PA.analysisData?.name || '' }));</script>
+
+    <!-- New Chatbox + Toggle -->
+    <link rel="stylesheet" href="../shared/chatbox.css">
+    <script src="../shared/chatbox.js"></script>
+    <script src="../shared/chat-toggle.js"></script>
+    <script>SharedChatToggle.init('PLSQL', () => ({ analysisName: PA.analysisData?.name || '' }));</script>
+</body>
+</html>

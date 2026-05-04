@@ -1,0 +1,20 @@
+.join-sql-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 8px; font-size: 9px; font-weight: 600; color: var(--accent);
+    cursor: pointer; white-space: nowrap; margin-left: auto;
+}
+.join-sql-toggle:hover { background: var(--bg-secondary); border-color: var(--accent); }
+
+.join-sql-block {
+    margin: 4px 0 8px 28px; border-radius: 6px;
+    border: 1px solid var(--border); overflow: hidden;
+}
+.join-sql-code {
+    margin: 0; padding: 10px 12px; font-family: var(--font-mono);
+    font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    background: var(--bg-secondary); color: var(--text); max-height: 250px; overflow-y: auto;
+}
+.join-sql-kw { color: var(--accent); font-weight: 700; }
+.join-sql-tbl { background: color-mix(in srgb, var(--teal) 15%, transparent); color: var(--teal); font-weight: 700; border-radius: 2px; padding: 0 2px; }
+.join-sql-loading { padding: 8px 12px; font-size: 10px; color: var(--text-muted); }
+.join-sql-none { padding: 8px 12px; font-size: 10px; color: var(--text-muted); font-style: italic; }

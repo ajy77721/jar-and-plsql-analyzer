@@ -1,0 +1,53 @@
+.logviewer-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 10000;
+    display: flex; align-items: flex-end; justify-content: center;
+    padding: 24px;
+}
+.logviewer-panel {
+    background: #1e1e2e;
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.3);
+    width: 100%; max-width: 1200px; height: 60vh;
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.logviewer-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; background: #181825;
+    border-bottom: 1px solid #313244; flex-shrink: 0;
+}
+.logviewer-header .btn {
+    background: #313244; color: #cdd6f4; border: none;
+    padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+}
+.logviewer-header .btn:hover { background: #45475a; }
+.logviewer-title { font-size: 14px; font-weight: 700; color: #cdd6f4; }
+.logviewer-meta { font-size: 11px; color: #6c7086; margin-right: auto; }
+.logviewer-auto-label {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 11px; color: #a6adc8; cursor: pointer;
+}
+.logviewer-auto-label input { accent-color: var(--accent); }
+.logviewer-filter-bar {
+    display: flex; gap: 8px; padding: 6px 16px;
+    background: #181825; border-bottom: 1px solid #313244; flex-shrink: 0;
+}
+.logviewer-filter {
+    flex: 1; padding: 5px 10px;
+    background: #11111b; border: 1px solid #313244;
+    border-radius: 4px; color: #cdd6f4;
+    font-size: 12px; font-family: var(--font-mono); outline: none;
+}
+.logviewer-filter:focus { border-color: var(--accent); }
+.logviewer-level-select {
+    padding: 5px 8px; background: #11111b;
+    border: 1px solid #313244; border-radius: 4px;
+    color: #cdd6f4; font-size: 12px; cursor: pointer;
+}
+.logviewer-content {
+    flex: 1; overflow: auto; padding: 12px 16px; margin: 0;
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+    color: #a6e3a1; white-space: pre-wrap; word-break: break-all;
+    background: #1e1e2e; tab-size: 4;
+}

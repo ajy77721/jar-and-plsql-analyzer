@@ -1,0 +1,180 @@
+{
+  "base_packages": ["com.allianz"],
+
+  "collection_pattern": "[A-Z][A-Z0-9_]{3,59}",
+
+  "module_types": {
+    "Claims": {
+      "prefixes": [
+        "CLM_", "CC_", "CLAIM_",
+        "CLMT_", "CLNM_", "CLHC_",
+        "CLGC_", "CLGE_",
+        "CLPY_", "CLUW_", "CLWF_", "CLXX_"
+      ],
+      "description": "Claims Management (Motor, Non-Motor, Healthcare, Core, Workflow, Status)"
+    },
+    "Accounting": {
+      "prefixes": [
+        "ACC_", "ACCR_", "ACDB_", "ACGC_",
+        "ACGL_", "ACJN_", "ACPY_", "ACRC_", "ACST_"
+      ],
+      "description": "Accounting (Payment, Receipt, GL, Journal, Statement, Accrual, Debit)"
+    },
+    "Underwriting": {
+      "prefixes": [
+        "UWGE_", "UWFI_", "UWPL_", "UWMA_"
+      ],
+      "description": "Underwriting (General, Fire, Personal Lines, Marine)"
+    },
+    "Policy": {
+      "prefixes": [
+        "OCP_", "PDC_"
+      ],
+      "description": "Policy Management & Product Configuration"
+    },
+    "CounterParty": {
+      "prefixes": [
+        "CP_", "CPGE_"
+      ],
+      "description": "Customer / Counter Party / Partners"
+    },
+    "Reinsurance": {
+      "prefixes": [
+        "RIAG_", "RIGE_"
+      ],
+      "description": "Reinsurance (Agent, General)"
+    },
+    "Common": {
+      "prefixes": [
+        "CMAC_", "CMCL_", "CMGE_", "CMGC_",
+        "CMDM_", "CMUW_", "CMMP_", "CUR_", "CFG_"
+      ],
+      "description": "Common Config (Accounting, Claims, General, UW, Currency, Configurator)"
+    },
+    "SystemAdmin": {
+      "prefixes": [
+        "SAPM_", "SAPS_", "SASC_", "SABJ_"
+      ],
+      "description": "System Administration (Parameters, Processing, Security, Batch Jobs)"
+    },
+    "Distribution": {
+      "prefixes": [
+        "DMAG_", "DMT_"
+      ],
+      "description": "Distribution / Agency Management"
+    },
+    "EInvoice": {
+      "prefixes": [
+        "IRBM_"
+      ],
+      "description": "E-Invoice (IRBM)"
+    },
+    "Infrastructure": {
+      "prefixes": [
+        "INF_"
+      ],
+      "description": "Infrastructure / Locking"
+    },
+    "Treaty": {
+      "prefixes": [
+        "TREATY_"
+      ],
+      "description": "Treaty / Reinsurance Logging"
+    }
+  },
+
+  "view_detection": {
+    "contains": ["_V_", "_VI_"],
+    "starts_with": ["SB_"],
+    "note": "SB_ = Snapshot Buffer (read-only underwriting views used by claims)"
+  },
+
+  "snapshot_buffer_domain_map": {
+    "SB_UWFI_": "Underwriting",
+    "SB_UWGE_": "Underwriting",
+    "SB_UWMA_": "Underwriting",
+    "SB_UWPL_": "Underwriting"
+  },
+
+  "operation_types": {
+    "READ":      ["find", "get", "read", "query", "search", "fetch", "load", "retrieve", "distinct", "stream", "scroll", "watch", "changeStream", "findById", "findOne", "findAll", "findAllById", "list", "select", "resolve", "lookup", "cursor", "toList", "iterate"],
+    "WRITE":     ["save", "insert", "persist", "create", "add", "store", "bulkWrite", "insertMany", "insertAll", "saveAll", "addInsert", "execute", "insertOne", "createCollection", "createIndex", "renameCollection", "ensureIndex", "putDocument", "writeDocument"],
+    "UPDATE":    ["update", "modify", "set", "patch", "edit", "change", "replace", "upsert", "updateMany", "updateFirst", "updateMulti", "findAndModify", "findAndReplace", "addUpdate", "replaceOne", "merge", "updateOne", "findOneAndUpdate", "findOneAndReplace", "increment", "mutate"],
+    "DELETE":    ["delete", "remove", "clear", "purge", "drop", "deleteMany", "deleteAll", "removeAll", "addDelete", "findAndRemove", "findAllAndRemove", "deleteOne", "findOneAndDelete", "dropCollection", "dropIndex"],
+    "AGGREGATE": ["aggregate", "aggregation", "graphLookup", "pipeline", "mapReduce", "group", "bucket", "facet", "unwind", "bucketAuto", "unionWith", "out"],
+    "COUNT":     ["count", "exists", "countDocuments", "estimatedDocumentCount"]
+  },
+
+  "jar_name_ignore_segments": [
+    "extension", "core", "lib", "common", "shared", "service", "module", "app"
+  ],
+
+  "endpoint_classification": {
+    "BATCH": {
+      "keywords": ["batch", "job", "schedul", "cron", "async", "bulk", "process", "trigger", "task"],
+      "description": "Batch / scheduled / async processing endpoints"
+    }
+  },
+
+  "http_client_classes": [
+    "org.springframework.web.client.RestTemplate",
+    "org.springframework.web.reactive.function.client.WebClient",
+    "org.springframework.cloud.openfeign",
+    "feign.Client",
+    "org.apache.http.client.HttpClient",
+    "java.net.http.HttpClient"
+  ],
+
+  "repository_suffixes": ["Repository", "Repo", "Dao", "DAO"],
+
+  "query_annotations": ["Query", "Aggregation"],
+
+  "size_thresholds": { "S": 5, "M": 20, "L": 50 },
+
+  "complexity_rules": {
+    "_description": "Weighted scoring for collection migration complexity. Score = sum(factor * weight). Classification: Low <= low_max, Medium <= medium_max, else High.",
+    "operation_groups": {
+      "read":  ["READ", "COUNT", "AGGREGATE"],
+      "write": ["WRITE", "UPDATE", "DELETE"]
+    },
+    "factors": [
+      { "id": "endpoints",      "label": "Endpoint count",         "description": "Number of REST endpoints accessing this collection",              "weight": 1.0,  "calc": "endpoints.size" },
+      { "id": "read_ops",       "label": "Read operation types",   "description": "Distinct read operations: READ, COUNT, AGGREGATE",                "weight": 0.5,  "calc": "readOps.size" },
+      { "id": "write_ops",      "label": "Write operation types",  "description": "Distinct write operations: WRITE, UPDATE, DELETE — higher risk",  "weight": 1.5,  "calc": "writeOps.size" },
+      { "id": "aggregate_ops",  "label": "Aggregation pipeline",   "description": "Has AGGREGATE operation — complex query logic to migrate",        "weight": 2.0,  "calc": "operations.has(AGGREGATE) ? 1 : 0" },
+      { "id": "cross_domain",   "label": "Cross-domain access",    "description": "Accessed by endpoints from multiple business domains — shared ownership risk", "weight": 3.0, "calc": "max(0, domainSet.size - 1)" },
+      { "id": "pipeline_usage", "label": "Pipeline detection",     "description": "Detected via PIPELINE_RUNTIME, AGGREGATION_API, or TEMPLATE_AGGREGATE",       "weight": 2.0, "calc": "hasPipelineDetection ? 1 : 0" },
+      { "id": "usage_count",    "label": "Total usage references", "description": "How many times referenced across all endpoint call trees",       "weight": 0.3,  "calc": "usageCount" }
+    ],
+    "thresholds": {
+      "low_max":    4,
+      "medium_max": 10
+    },
+    "claude_instructions": "When analyzing endpoints, assess each collection's migration complexity using these weighted factors. Collections with aggregation pipelines, cross-domain access, or heavy write operations are significantly harder to migrate. Flag collections scoring > 10 as High complexity requiring dedicated migration planning."
+  },
+
+  "performance_thresholds": [
+    { "label": "No Impact",               "maxDbOps": 0  },
+    { "label": "Low Impact",              "maxDbOps": 5  },
+    { "label": "Medium Impact (100-200ms)", "maxDbOps": 20 },
+    { "label": "High Impact (200ms+)",     "maxDbOps": 999999 }
+  ],
+
+  "implicit_collections": {
+    "SaveOperationValidatorImpl.validateSave": [
+      { "collection": "USER_CONSTRAINTS", "operation": "READ", "source": "VALIDATOR_CHAIN" }
+    ],
+    "DeleteOperationValidatorImpl.validateDelete": [
+      { "collection": "USER_CONSTRAINTS", "operation": "READ", "source": "VALIDATOR_CHAIN" }
+    ],
+    "SequenceService.getSequenceId": [
+      { "collection": "SEQUENCES", "operation": "UPDATE", "source": "SEQUENCE_SERVICE" }
+    ],
+    "SequenceService.getNextBatchCounter": [
+      { "collection": "SEQUENCES", "operation": "UPDATE", "source": "SEQUENCE_SERVICE" }
+    ],
+    "SequenceService.getNextSequenceValue": [
+      { "collection": "SEQUENCES", "operation": "UPDATE", "source": "SEQUENCE_SERVICE" }
+    ]
+  }
+}

@@ -1,0 +1,48 @@
+.js-subtabs, .dt-subtabs {
+    display: flex; gap: 0; padding: 0 12px; border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary); flex-shrink: 0;
+}
+.js-subtab, .dt-subtab {
+    padding: 6px 16px; font-size: 11px; font-weight: 600; cursor: pointer;
+    border: none; background: none; color: var(--text-muted);
+    border-bottom: 2px solid transparent; transition: all 0.15s;
+    font-family: var(--font-mono);
+}
+.js-subtab:hover, .dt-subtab:hover { color: var(--text); }
+.js-subtab.active, .dt-subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.js-subview, .dt-subview { display: none; flex-direction: column; flex: 1; overflow: hidden; min-height: 0; }
+.js-subview.active, .dt-subview.active { display: flex; }
+
+.jq-query-tables {
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.jq-query-tables span { font-weight: 600; color: var(--teal); font-size: 10px; font-family: var(--font-mono); }
+.jq-join-badges { display: flex; flex-wrap: wrap; gap: 3px; }
+
+.js-summary {
+    display: flex; gap: 12px; padding: 8px 0 12px; flex-wrap: wrap; align-items: center;
+}
+.js-summary-card {
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-card, #fff); display: flex; align-items: center; gap: 8px;
+}
+.js-summary-num { font-size: 20px; font-weight: 800; font-family: var(--font-mono); color: var(--accent); }
+.js-summary-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.js-summary-types { flex-wrap: wrap; }
+
+.js-pred-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.js-pred-item {
+    display: flex; align-items: flex-start; gap: 8px; font-size: 11px;
+    padding: 4px 8px; background: var(--bg-secondary); border-radius: 4px;
+}
+.js-pred-num {
+    flex-shrink: 0; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--accent); color: #fff; font-size: 9px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+}
+.js-pred-item code {
+    font-family: var(--font-mono); font-size: 11px; color: var(--text); word-break: break-all;
+}
+.js-sql-info {
+    display: flex; align-items: center; gap: 6px; padding: 6px 0 8px; flex-wrap: wrap;
+}

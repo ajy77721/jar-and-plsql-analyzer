@@ -1,0 +1,20 @@
+.trace-row {
+    display: flex; align-items: center; padding: 5px 12px;
+    font-size: 12px; border-bottom: 1px solid var(--border);
+    cursor: pointer; gap: 8px; min-height: 30px; transition: background var(--transition);
+}
+.trace-row:hover { background: rgba(99,102,241,0.04); }
+.trace-row.active { background: rgba(99,102,241,0.08); }
+.trace-depth-bar { height: 100%; flex-shrink: 0; }
+.trace-step {
+    width: 30px; min-width: 30px; text-align: right; padding-right: 8px;
+    font-weight: 700; font-size: 11px; color: var(--text-muted); flex-shrink: 0;
+}
+.trace-bar { height: 3px; border-radius: 2px; flex-shrink: 0; }
+.trace-name {
+    font-family: var(--font-mono); font-weight: 600; font-size: 12px;
+    color: var(--text); cursor: pointer; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+}
+.trace-name:hover { color: var(--accent); text-decoration: underline; }
+.trace-info { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }

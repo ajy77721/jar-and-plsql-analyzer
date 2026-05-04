@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!--
+      LevelChangePropagator: installs JUL→SLF4J bridge efficiently.
+      resetJUL=true removes all existing JUL handlers (including the Tomcat DirectJDKLog handler
+      that attempts to use logback via SLF4JBridgeHandler). This prevents the
+      NoClassDefFoundError: ch/qos/logback/classic/spi/ThrowableProxy that occurs when Tomcat's
+      thread-pool threads try to log Tomcat-internal errors after a classloader reload.
+    -->
+    <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+        <resetJUL>true</resetJUL>
+    </contextListener>
+
+    <!-- Console appender (keep default Spring Boot console output) -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Rolling file appender: writes to data/unified-analyzer.log -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>data/unified-analyzer.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>data/unified-analyzer.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>5</maxHistory>
+            <totalSizeCap>50MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Application loggers -->
+    <logger name="com.plsqlanalyzer" level="DEBUG" />
+    <logger name="com.jaranalyzer" level="DEBUG" />
+    <logger name="com.analyzer" level="DEBUG" />
+
+    <!-- Reduce noise from frameworks -->
+    <logger name="org.springframework" level="WARN" />
+    <logger name="org.apache" level="WARN" />
+    <logger name="org.hibernate" level="WARN" />
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="FILE" />
+    </root>
+</configuration>

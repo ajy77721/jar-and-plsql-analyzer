@@ -1,0 +1,20 @@
+.analysis-layout { flex: 1; display: flex; overflow: hidden; }
+
+.right-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+
+.right-tabs { display: flex; gap: 0; padding: 8px 24px 0; background: var(--bg); }
+.rtab {
+    padding: 6px 14px; border: none; background: none;
+    color: var(--text-muted); font-size: 12px; cursor: pointer;
+    border-bottom: 2px solid transparent; font-weight: 600; transition: all 0.2s;
+    text-transform: uppercase; letter-spacing: 0.3px;
+}
+.rtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.rtab:hover { color: var(--text); }
+
+.right-content { flex: 1; overflow: hidden; position: relative; }
+.right-view {
+    display: none; position: absolute; inset: 0;
+    flex-direction: column; overflow: hidden;
+}
+.right-view.active { display: flex; }

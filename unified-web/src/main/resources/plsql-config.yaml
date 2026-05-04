@@ -1,0 +1,42 @@
+source_paths:
+  - "./plsql-sources"
+
+# Oracle DB connection
+db_hostname: "slc13305.srv.allianz"
+db_port: 1521
+db_service_name: "AGICPROD"
+
+# DB users/schemas
+db_users:
+  - username: "OPUS_CORE"
+    password: "OP#USCOREAPR_24042025"
+    description: "OPUS Core schema"
+  - username: "CUSTOMER"
+    password: "CUSTOME#APR_24042025"
+    description: "Customer schema"
+  - username: "CUSTOMER_I"
+    password: "CUSTOMER#IAPR_24042025"
+    description: "Customer Interface schema"
+
+schema_mappings:
+  opus_core:
+    schema: "OPUS_CORE"
+    description: "OPUS Core schema"
+  customer:
+    schema: "CUSTOMER"
+    description: "Customer schema"
+  customer_i:
+    schema: "CUSTOMER_I"
+    description: "Customer Interface schema"
+
+file_extensions:
+  - ".sql"
+  - ".pks"
+  - ".pkb"
+  - ".prc"
+  - ".fnc"
+  - ".trg"
+
+exclude_patterns:
+  - "**/test/**"
+  - "**/backup/**"

@@ -1,0 +1,58 @@
+.trigger-popup {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 1100; min-width: 320px; max-width: 480px; max-height: 400px; overflow-y: auto;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+}
+.trigger-def-modal { max-width: 700px; max-height: 80vh; }
+.trigger-popup-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    font-size: 12px; font-weight: 700; color: var(--accent);
+}
+.trigger-item {
+    display: flex; align-items: center; gap: 6px; padding: 6px 14px;
+    font-size: 11px; border-bottom: 1px solid var(--border);
+}
+.trigger-item:last-child { border-bottom: none; }
+.trigger-name {
+    color: var(--accent); font-weight: 600; cursor: pointer;
+    font-family: var(--font-mono);
+}
+.trigger-name:hover { text-decoration: underline; }
+.trigger-timing {
+    font-size: 9px; font-weight: 700; color: var(--badge-blue);
+    background: var(--badge-blue-bg); padding: 1px 5px; border-radius: 3px;
+}
+.trigger-event {
+    font-size: 9px; font-weight: 700; color: var(--badge-orange);
+    background: var(--badge-orange-bg); padding: 1px 5px; border-radius: 3px;
+}
+.trigger-meta { font-size: 9px; color: var(--text-muted); }
+.trigger-meta-bar {
+    padding: 8px 12px; display: flex; gap: 6px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--border);
+}
+.trigger-section {
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+.trigger-section:last-child { border-bottom: none; }
+.trigger-section-title {
+    font-size: 10px; font-weight: 700; color: var(--text-secondary);
+    text-transform: uppercase; margin-bottom: 4px;
+}
+.trigger-table-ref {
+    font-size: 11px; font-family: var(--font-mono); color: var(--text);
+    margin-right: 12px;
+}
+.trigger-source {
+    background: #1e1e2e; color: var(--sidebar-text); padding: 8px;
+    border-radius: 4px; font-size: 11px; line-height: 1.5;
+    max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+}
+.trigger-src-btn {
+    font-size: 11px; cursor: pointer; color: var(--text-muted);
+    padding: 1px 4px; border-radius: 3px; margin-left: auto;
+    border: 1px solid var(--border); line-height: 1;
+}
+.trigger-src-btn:hover { color: var(--accent); border-color: var(--accent); }

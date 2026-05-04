@@ -1,0 +1,725 @@
+/**
+ * Code Structure tab — lazy-rendered tree.
+ * Only package+class headers are rendered initially.
+ * Class contents (fields/methods) render on expand.
+ * Method invocations render on expand.
+ * Keeps DOM small even with 8000+ classes.
+ */
+window.JA = window.JA || {};
+
+JA.codeTree = {
+
+    _classes: [],       // full class data (stored for lazy render)
+    _history: [],
+    _historyIndex: -1,
+    _viewMode: 'package', // 'package' | 'project' | 'visual'
+
+    _loaded: false,
+
+    /* ---- public API ---- */
+
+    setLazy() {
+        this._classes = [];
+        this._loaded = false;
+        const container = document.getElementById('class-tree');
+        if (container) container.innerHTML = '<p style="padding:20px;color:var(--text-muted,#6b7280)">Switch to Code Structure tab to load classes</p>';
+    },
+
+    async loadAndRender() {
+        if (this._loaded) return;
+        const container = document.getElementById('class-tree');
+        if (container) container.innerHTML = '<p style="padding:20px;color:var(--text-muted,#6b7280)">Loading code structure...</p>';
+        try {
+            const jarId = JA.app.currentJarId;
+            const version = JA.app._currentVersion || undefined;
+            const classTree = await JA.api.getClassTree(jarId, version);
+            this.render(classTree);
+            this._loaded = true;
+        } catch (e) {
+            console.error('Failed to load class tree:', e);
+            if (container) container.innerHTML = '<p style="padding:20px;color:#ef4444">Failed to load code structure: ' + (e.message || e) + '</p>';
+        }
+    },
+
+    render(classes) {
+        this._classes = classes;
+        this._loaded = true;
+        this._history = [];
+        this._historyIndex = -1;
+        this._renderCurrentView();
+        this._updateNavState();
+        if (JA.codeTreePanel) JA.codeTreePanel.clear();
+        if (JA.codeTreeViews) JA.codeTreeViews.initJarSourceFilter(classes);
+    },
+
+    setViewMode(mode) {
+        this._viewMode = mode;
+        document.querySelectorAll('.view-mode-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.mode === mode);
+        });
+        const treeButtons = document.getElementById('tree-view-actions');
+        if (treeButtons) treeButtons.style.display = mode === 'visual' ? 'none' : '';
+        // If jar source filter is active, use filtered classes
+        if (JA.codeTreeViews && JA.codeTreeViews._activeJarSources !== null) {
+            JA.codeTreeViews._applyJarSourceFilter();
+        } else {
+            this._renderCurrentView();
+        }
+    },
+
+    _renderCurrentView() {
+        const container = document.getElementById('class-tree');
+        if (!container || !this._classes.length) return;
+
+        if (this._viewMode === 'project') {
+            JA.codeTreeViews.renderProjectView(this._classes, container);
+        } else if (this._viewMode === 'visual') {
+            JA.codeTreeViews.renderVisualView(this._classes, container);
+        } else {
+            this._renderPackageView(container);
+        }
+    },
+
+    _renderPackageView(container) {
+        const { main, deps } = this._groupBySourceJar(this._classes);
+        let html = '';
+
+        // Main app classes
+        if (main.length) {
+            const packages = this._groupByPackage(main);
+            const sorted = Object.keys(packages).sort();
+            for (const pkg of sorted) {
+                const pkgClasses = packages[pkg].sort((a, b) => a.simpleName.localeCompare(b.simpleName));
+                html += this._renderPackage(pkg, pkgClasses);
+            }
+        }
+
+        // Dependency JARs
+        const jarNames = Object.keys(deps).sort();
+        if (jarNames.length) {
+            html += '<div class="jar-separator">Internal Dependencies (' + jarNames.length + ' JARs)</div>';
+            for (const jarName of jarNames) {
+                const jarClasses = deps[jarName];
+                const project = JA.summary._jarToProject ? JA.summary._jarToProject(jarName) : jarName;
+                const domain = JA.summary._jarToDomain ? JA.summary._jarToDomain(jarName) : '';
+                const packages = this._groupByPackage(jarClasses);
+                const sorted = Object.keys(packages).sort();
+                let inner = '';
+                for (const pkg of sorted) {
+                    const pkgClasses = packages[pkg].sort((a, b) => a.simpleName.localeCompare(b.simpleName));
+                    inner += this._renderPackage(pkg, pkgClasses);
+                }
+                html += `<div class="tree-node jar-group" data-jar="${JA.utils.escapeHtml(jarName)}">
+                    <div class="tree-toggle jar-group-toggle" onclick="JA.codeTree.togglePkg(this)">
+                        <span class="arrow">&#9654;</span>
+                        <span class="jar-group-icon">&#128230;</span>
+                        <strong class="jar-group-name">${JA.utils.escapeHtml(project)}</strong>
+                        ${domain ? '<span class="sum-domain-tag" style="font-size:9px">' + JA.utils.escapeHtml(domain) + '</span>' : ''}
+                        <span class="tree-count">${jarClasses.length} classes</span>
+                    </div>
+                    <div class="tree-children collapsed">${inner}</div>
+                </div>`;
+            }
+        }
+
+        container.innerHTML = html || '<p class="empty-state">No classes found</p>';
+    },
+
+    _renderFilteredPackageView(container, classes) {
+        const { main, deps } = this._groupBySourceJar(classes);
+        let html = '';
+        if (main.length) {
+            const packages = this._groupByPackage(main);
+            const sorted = Object.keys(packages).sort();
+            for (const pkg of sorted) {
+                const pkgClasses = packages[pkg].sort((a, b) => a.simpleName.localeCompare(b.simpleName));
+                html += this._renderPackage(pkg, pkgClasses);
+            }
+        }
+        const jarNames = Object.keys(deps).sort();
+        if (jarNames.length) {
+            html += '<div class="jar-separator">Internal Dependencies (' + jarNames.length + ' JARs)</div>';
+            for (const jarName of jarNames) {
+                const jarClasses = deps[jarName];
+                const project = JA.summary._jarToProject ? JA.summary._jarToProject(jarName) : jarName;
+                const domain = JA.summary._jarToDomain ? JA.summary._jarToDomain(jarName) : '';
+                const packages = this._groupByPackage(jarClasses);
+                const sorted = Object.keys(packages).sort();
+                let inner = '';
+                for (const pkg of sorted) {
+                    const pkgClasses = packages[pkg].sort((a, b) => a.simpleName.localeCompare(b.simpleName));
+                    inner += this._renderPackage(pkg, pkgClasses);
+                }
+                html += `<div class="tree-node jar-group" data-jar="${JA.utils.escapeHtml(jarName)}">
+                    <div class="tree-toggle jar-group-toggle" onclick="JA.codeTree.togglePkg(this)">
+                        <span class="arrow">&#9654;</span>
+                        <span class="jar-group-icon">&#128230;</span>
+                        <strong class="jar-group-name">${JA.utils.escapeHtml(project)}</strong>
+                        ${domain ? '<span class="sum-domain-tag" style="font-size:9px">' + JA.utils.escapeHtml(domain) + '</span>' : ''}
+                        <span class="tree-count">${jarClasses.length} classes</span>
+                    </div>
+                    <div class="tree-children collapsed">${inner}</div>
+                </div>`;
+            }
+        }
+        container.innerHTML = html || '<p class="empty-state">No classes match the selected sources</p>';
+    },
+
+    _groupBySourceJar(classes) {
+        const main = [];
+        const deps = {};
+        for (const cls of classes) {
+            if (!cls.sourceJar) {
+                main.push(cls);
+            } else {
+                (deps[cls.sourceJar] = deps[cls.sourceJar] || []).push(cls);
+            }
+        }
+        return { main, deps };
+    },
+
+    /* ---- lazy expand ---- */
+
+    togglePkg(el) {
+        const children = el.nextElementSibling;
+        if (!children) return;
+        el.classList.toggle('expanded');
+        children.classList.toggle('collapsed');
+    },
+
+    toggleClass(el, classIndex) {
+        const children = el.nextElementSibling;
+        if (!children) return;
+
+        // Lazy render: if children are empty, render fields+methods now
+        if (!children.dataset.rendered) {
+            const cls = this._classes[classIndex];
+            if (cls) {
+                children.innerHTML = this._renderClassBody(cls, classIndex);
+                children.dataset.rendered = '1';
+            }
+        }
+
+        el.classList.toggle('expanded');
+        children.classList.toggle('collapsed');
+
+        // Show code in inline panel when expanding
+        if (el.classList.contains('expanded') && JA.codeTreePanel) {
+            const cls = this._classes[classIndex];
+            if (cls) JA.codeTreePanel.show(cls.fullyQualifiedName || cls.simpleName);
+        }
+    },
+
+    toggleMethod(el, classIndex, methodIndex) {
+        const children = el.nextElementSibling;
+        if (!children) return;
+
+        // Lazy render invocations
+        if (!children.dataset.rendered) {
+            const cls = this._classes[classIndex];
+            if (cls) {
+                const method = cls.methods[methodIndex];
+                if (method) {
+                    children.innerHTML = this._renderInvocations(method);
+                    children.dataset.rendered = '1';
+                }
+            }
+        }
+
+        el.classList.toggle('expanded');
+        children.classList.toggle('collapsed');
+    },
+
+    expandAll() {
+        // Only expand already-rendered nodes
+        document.querySelectorAll('.class-tree .tree-toggle').forEach(t => t.classList.add('expanded'));
+        document.querySelectorAll('.class-tree .tree-children').forEach(c => c.classList.remove('collapsed'));
+    },
+
+    collapseAll() {
+        document.querySelectorAll('.class-tree .tree-toggle').forEach(t => t.classList.remove('expanded'));
+        document.querySelectorAll('.class-tree .tree-children').forEach(c => c.classList.add('collapsed'));
+    },
+
+    filter(query) {
+        if (this._viewMode === 'project') {
+            JA.codeTreeViews.filterProjectView(query);
+            return;
+        }
+        if (this._viewMode === 'visual') {
+            JA.codeTreeViews.filterVisualView(query);
+            return;
+        }
+
+        const q = (query || '').toLowerCase().trim();
+        const tree = document.querySelector('.class-tree');
+        if (!tree) return;
+
+        // Reset visibility
+        if (!q) {
+            tree.querySelectorAll('.tree-node').forEach(n => n.style.display = '');
+            tree.querySelectorAll('.jar-separator').forEach(n => n.style.display = '');
+            return;
+        }
+
+        // Filter class nodes matching query
+        const classNodes = tree.querySelectorAll('.tree-node[data-class-name]');
+        const visiblePkgs = new Set();
+        const visibleJarGroups = new Set();
+
+        classNodes.forEach(cls => {
+            const text = cls.getAttribute('data-search') || '';
+            if (text.includes(q)) {
+                cls.style.display = '';
+                // Expand parent package
+                let parent = cls.parentElement;
+                while (parent && parent !== tree) {
+                    if (parent.classList.contains('tree-children')) {
+                        parent.classList.remove('collapsed');
+                        const t = parent.previousElementSibling;
+                        if (t && t.classList.contains('tree-toggle')) t.classList.add('expanded');
+                    }
+                    if (parent.classList.contains('tree-node') && !parent.hasAttribute('data-class-name')) {
+                        visiblePkgs.add(parent);
+                        if (parent.classList.contains('jar-group')) visibleJarGroups.add(parent);
+                    }
+                    parent = parent.parentElement;
+                }
+            } else {
+                cls.style.display = 'none';
+            }
+        });
+
+        // Hide packages / jar groups with no matches
+        tree.querySelectorAll(':scope > .tree-node, :scope > .tree-node .tree-node:not([data-class-name])').forEach(node => {
+            if (node.hasAttribute('data-class-name')) return;
+            node.style.display = visiblePkgs.has(node) ? '' : 'none';
+        });
+
+        // Show jar separator only if any jar groups visible
+        tree.querySelectorAll('.jar-separator').forEach(sep => {
+            sep.style.display = visibleJarGroups.size > 0 ? '' : 'none';
+        });
+    },
+
+    /* ---- navigation ---- */
+
+    navigateTo(className, methodName, el) {
+        if (this._historyIndex < this._history.length - 1) {
+            this._history = this._history.slice(0, this._historyIndex + 1);
+        }
+        this._history.push({ className, methodName, element: el });
+        this._historyIndex = this._history.length - 1;
+        this._highlightAndScroll(el);
+        this._updateNavState();
+        if (JA.codeTreePanel) JA.codeTreePanel.show(className, methodName);
+    },
+
+    findAndHighlight(className, methodName) {
+        setTimeout(() => {
+            const tree = document.getElementById('class-tree');
+            if (!tree) return;
+
+            // First, find the class node and expand it (triggers lazy render)
+            const classNodes = tree.querySelectorAll('.tree-node[data-class-name]');
+            let classNode = null;
+            for (const node of classNodes) {
+                if (node.getAttribute('data-class-name') === className) {
+                    classNode = node;
+                    break;
+                }
+            }
+
+            if (classNode) {
+                // Expand the class to trigger lazy rendering of methods
+                const toggle = classNode.querySelector(':scope > .tree-toggle');
+                const children = classNode.querySelector(':scope > .tree-children');
+                if (toggle && children && !children.dataset.rendered) {
+                    const idx = parseInt(classNode.getAttribute('data-class-index'), 10);
+                    this.toggleClass(toggle, idx);
+                } else if (toggle && children) {
+                    toggle.classList.add('expanded');
+                    children.classList.remove('collapsed');
+                }
+
+                // Expand parent package
+                let parent = classNode.parentElement;
+                while (parent) {
+                    if (parent.classList && parent.classList.contains('tree-children')) {
+                        parent.classList.remove('collapsed');
+                        const t = parent.previousElementSibling;
+                        if (t && t.classList.contains('tree-toggle')) t.classList.add('expanded');
+                    }
+                    parent = parent.parentElement;
+                }
+
+                // Now find the method inside the expanded class
+                setTimeout(() => {
+                    const methods = classNode.querySelectorAll('.tree-method');
+                    let found = null;
+                    for (const m of methods) {
+                        if (m.getAttribute('data-method') === methodName) { found = m; break; }
+                    }
+                    if (!found && methods.length > 0) found = methods[0];
+
+                    if (found) {
+                        const clickEl = found.querySelector('.tree-method-click');
+                        this.navigateTo(className, methodName, clickEl || found);
+                        JA.toast.info('Jumped to ' + className + '.' + methodName, 2000);
+                    } else {
+                        // Scroll to class at least
+                        classNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        JA.toast.info('Jumped to class ' + className, 2000);
+                    }
+                }, 50);
+            } else {
+                JA.toast.warn('Class not found: ' + className, 3000);
+            }
+        }, 150);
+    },
+
+    jumpToInvocation(ownerClass, methodName, event) {
+        JA.nav.goTo(ownerClass, methodName, 'structure', event);
+    },
+
+    goToEndpointFlow(httpMethod, path) {
+        switchTab('endpoints');
+        JA.toast.info('Switching to Endpoint Flow...', 1500);
+        setTimeout(() => {
+            const cards = document.querySelectorAll('.endpoint-card');
+            for (const card of cards) {
+                const methodSpan = card.querySelector('.endpoint-method');
+                const pathSpan = card.querySelector('.endpoint-path');
+                if (methodSpan && pathSpan) {
+                    if (methodSpan.textContent.trim() === httpMethod && pathSpan.textContent.trim() === path) {
+                        card.click();
+                        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        JA.toast.success('Showing flow for ' + httpMethod + ' ' + path, 2000);
+                        return;
+                    }
+                }
+            }
+            JA.toast.warn('Endpoint not found', 3000);
+        }, 200);
+    },
+
+    goBack() {
+        if (this._historyIndex <= 0) return;
+        this._historyIndex--;
+        const entry = this._history[this._historyIndex];
+        this._highlightAndScroll(entry.element);
+        this._updateNavState();
+        if (JA.codeTreePanel) JA.codeTreePanel.show(entry.className, entry.methodName);
+    },
+
+    goForward() {
+        if (this._historyIndex >= this._history.length - 1) return;
+        this._historyIndex++;
+        const entry = this._history[this._historyIndex];
+        this._highlightAndScroll(entry.element);
+        this._updateNavState();
+        if (JA.codeTreePanel) JA.codeTreePanel.show(entry.className, entry.methodName);
+    },
+
+    goToHistoryEntry(index) {
+        if (index < 0 || index >= this._history.length) return;
+        this._historyIndex = index;
+        const entry = this._history[this._historyIndex];
+        this._highlightAndScroll(entry.element);
+        this._updateNavState();
+        this.toggleHistory();
+        if (JA.codeTreePanel) JA.codeTreePanel.show(entry.className, entry.methodName);
+    },
+
+    toggleHistory() {
+        const panel = document.getElementById('nav-history-panel');
+        if (!panel) return;
+        if (panel.style.display === 'none') {
+            this._renderHistoryPanel();
+            panel.style.display = '';
+        } else {
+            panel.style.display = 'none';
+        }
+    },
+
+    _highlightAndScroll(el) {
+        if (!el) return;
+        document.querySelectorAll('.tree-node.nav-highlight').forEach(n => n.classList.remove('nav-highlight'));
+        const node = el.closest('.tree-node');
+        if (!node) return;
+
+        let parent = node.parentElement;
+        while (parent) {
+            if (parent.classList && parent.classList.contains('tree-children')) {
+                parent.classList.remove('collapsed');
+                const t = parent.previousElementSibling;
+                if (t && t.classList.contains('tree-toggle')) t.classList.add('expanded');
+            }
+            parent = parent.parentElement;
+        }
+
+        node.classList.add('nav-highlight');
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    },
+
+    _updateNavState() {
+        const backBtn = document.getElementById('nav-back');
+        const fwdBtn = document.getElementById('nav-forward');
+        const crumb = document.getElementById('nav-breadcrumb');
+        const histBtn = document.getElementById('nav-history-toggle');
+
+        if (backBtn) backBtn.disabled = this._historyIndex <= 0;
+        if (fwdBtn) fwdBtn.disabled = this._historyIndex >= this._history.length - 1;
+
+        if (crumb) {
+            if (this._historyIndex >= 0) {
+                const entry = this._history[this._historyIndex];
+                crumb.innerHTML = `<span class="crumb-current">${JA.utils.escapeHtml(entry.className + '.' + entry.methodName)}</span>`;
+            } else {
+                crumb.innerHTML = '';
+            }
+        }
+
+        if (histBtn) {
+            histBtn.textContent = this._history.length > 0 ? `History (${this._history.length})` : 'History';
+        }
+    },
+
+    _renderHistoryPanel() {
+        const panel = document.getElementById('nav-history-panel');
+        if (!panel) return;
+
+        if (this._history.length === 0) {
+            panel.innerHTML = '<div class="history-empty">No navigation history yet</div>';
+            return;
+        }
+
+        let html = '<div class="history-list">';
+        for (let i = this._history.length - 1; i >= 0; i--) {
+            const entry = this._history[i];
+            const active = i === this._historyIndex ? ' history-active' : '';
+            html += `<div class="history-item${active}" onclick="JA.codeTree.goToHistoryEntry(${i})">
+                <span class="history-idx">${i + 1}</span>
+                <span class="history-label">${JA.utils.escapeHtml(entry.className + '.' + entry.methodName)}</span>
+            </div>`;
+        }
+        html += '</div>';
+        panel.innerHTML = html;
+    },
+
+    /* ---- render helpers ---- */
+
+    _groupByPackage(classes) {
+        const map = {};
+        for (const cls of classes) {
+            const pkg = cls.packageName || '(default)';
+            (map[pkg] = map[pkg] || []).push(cls);
+        }
+        return map;
+    },
+
+    /** Render package header + collapsed class headers (no method/field details yet) */
+    _renderPackage(pkg, classes) {
+        const esc = JA.utils.escapeHtml;
+        let classHeaders = '';
+        for (const cls of classes) {
+            classHeaders += this._renderClassHeader(cls);
+        }
+
+        return `
+            <div class="tree-node" data-search="${pkg.toLowerCase()}">
+                <div class="tree-toggle expanded" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span class="pkg-icon">&#128230;</span>
+                    <strong class="pkg-name">${esc(pkg)}</strong>
+                    <span class="tree-count">${classes.length}</span>
+                </div>
+                <div class="tree-children">
+                    ${classHeaders}
+                </div>
+            </div>`;
+    },
+
+    /** Render just the class toggle header — body is empty until user expands */
+    _renderClassHeader(cls) {
+        const esc = JA.utils.escapeHtml;
+        const stereotype = cls.stereotype || 'OTHER';
+        const badgeCls = JA.utils.stereotypeBadgeClass(stereotype);
+
+        const typeBadges = [];
+        if (cls.isInterface) typeBadges.push('<span class="badge badge-interface">IF</span>');
+        else if (cls.isAbstract) typeBadges.push('<span class="badge badge-abstract">ABS</span>');
+        if (cls.isEnum) typeBadges.push('<span class="badge badge-enum">ENUM</span>');
+        typeBadges.push(`<span class="badge ${badgeCls}">${stereotype.replace('REST_', '')}</span>`);
+
+        const annotations = cls.annotations || [];
+        const stereoAnns = annotations
+            .filter(a => ['RestController','Controller','Service','Repository','Component','Configuration','Entity'].includes(a.name))
+            .map(a => `<span class="method-ann">@${a.name}</span>`).join(' ');
+
+        const searchKey = [
+            cls.fullyQualifiedName,
+            cls.simpleName,
+            annotations.map(a => a.name).join(' '),
+            (cls.methods || []).map(m => m.name).join(' ')
+        ].join(' ').toLowerCase();
+
+        const classIcon = cls.isInterface ? '&#9671;' : cls.isEnum ? '&#9670;' : '&#9632;';
+        const memberCount = (cls.fields || []).length + (cls.methods || []).length;
+        const classIndex = this._classes.indexOf(cls);
+
+        return `
+            <div class="tree-node" data-search="${searchKey}" data-class-name="${esc(cls.simpleName)}" data-class-index="${classIndex}">
+                <div class="tree-toggle" onclick="JA.codeTree.toggleClass(this, ${classIndex})">
+                    <span class="arrow">&#9654;</span>
+                    <span class="class-icon" style="color:${JA.utils.stereotypeColor(stereotype)}">${classIcon}</span>
+                    ${stereoAnns}
+                    <strong class="class-name">${esc(cls.simpleName)}</strong>
+                    ${typeBadges.join('')}
+                    <span class="tree-count">${memberCount}</span>
+                </div>
+                <div class="tree-children collapsed"></div>
+            </div>`;
+    },
+
+    /** Render class body (fields + methods) — called lazily on expand */
+    _renderClassBody(cls, classIndex) {
+        const esc = JA.utils.escapeHtml;
+        const fields = cls.fields || [];
+        const methods = cls.methods || [];
+        let html = '';
+
+        // Implementations section for interfaces / abstract classes (IntelliJ Ctrl+Alt+B style)
+        if (cls.isInterface || cls.isAbstract) {
+            if (JA.nav && !JA.nav._implMap) JA.nav.init();
+            const fqn = cls.fullyQualifiedName || '';
+            const impls = (JA.nav && JA.nav._implMap)
+                ? (JA.nav._implMap[fqn] || JA.nav._implMap[cls.simpleName] || [])
+                : [];
+            if (impls.length > 0) {
+                html += '<div class="tree-section-label tree-impls-label">Implementations (' + impls.length + ')</div>';
+                for (const impl of impls) {
+                    const color = JA.utils.stereotypeColor(impl.stereotype);
+                    const stereo = (impl.stereotype || '').replace('REST_', '');
+                    const safeName = (impl.simpleName || '').replace(/'/g, "\\'");
+                    html += `<div class="tree-node tree-impl-item">
+                        <div class="tree-leaf" onclick="JA.codeTree.findAndHighlight('${safeName}','')" style="cursor:pointer">
+                            <span class="leaf-icon" style="color:${color}">&#9658;</span>
+                            <span class="impl-name" style="color:${color};font-weight:600">${esc(impl.simpleName || '?')}</span>
+                            ${stereo ? `<span class="badge badge-xs" style="color:${color};border-color:${color};opacity:0.8">${esc(stereo)}</span>` : ''}
+                            <span class="cg-src-btn code-view-btn" onclick="event.stopPropagation();JA.summary.showClassCode('${(impl.fullyQualifiedName||impl.simpleName||'').replace(/'/g,"\\'")}','')" title="View decompiled code">Code</span>
+                        </div>
+                    </div>`;
+                }
+            }
+        }
+
+        if (fields.length > 0) {
+            html += '<div class="tree-section-label">Fields</div>';
+            for (const f of fields) {
+                const anns = (f.annotations || []).map(a => `<span class="method-ann">@${a.name}</span>`).join(' ');
+                html += `<div class="tree-node tree-field">
+                    <div class="tree-leaf">
+                        <span class="leaf-icon field-icon">F</span>
+                        ${anns}
+                        <span class="field-type">${esc(f.type)}</span>
+                        <span class="field-name">${esc(f.name)}</span>
+                    </div>
+                </div>`;
+            }
+        }
+
+        if (methods.length > 0) {
+            html += '<div class="tree-section-label">Methods</div>';
+            for (let mi = 0; mi < methods.length; mi++) {
+                html += this._renderMethodHeader(methods[mi], cls, classIndex, mi);
+            }
+        }
+
+        return html;
+    },
+
+    /** Render method header — invocations are empty until user expands */
+    _renderMethodHeader(method, cls, classIndex, methodIndex) {
+        const esc = JA.utils.escapeHtml;
+        const anns = (method.annotations || []).map(a => {
+            let text = '@' + a.name;
+            const attrs = a.attributes || {};
+            const keys = Object.keys(attrs);
+            if (keys.length > 0) {
+                const vals = keys.map(k => k + '=' + JSON.stringify(attrs[k])).join(', ');
+                text += '(' + vals + ')';
+            }
+            return `<span class="method-ann">${esc(text)}</span>`;
+        }).join(' ');
+
+        const params = (method.parameters || []).map(p => {
+            const pAnns = (p.annotations || []).map(a => '@' + a.name + ' ').join('');
+            return pAnns + p.type + ' ' + p.name;
+        }).join(', ');
+
+        const displayName = method.name === '<init>' ? 'constructor' : method.name;
+        const className = cls ? cls.simpleName : '';
+
+        const httpBadge = method.httpMethod
+            ? `<span class="endpoint-method method-${method.httpMethod}" style="font-size:9px;padding:1px 5px">${method.httpMethod}</span>`
+            : '';
+
+        const fqn = cls ? (cls.fullyQualifiedName || cls.simpleName) : '';
+        const safeFqn = fqn.replace(/'/g, "\\'");
+        const safeDisplay = displayName.replace(/'/g, "\\'");
+        const codeBtn = `<span class="cg-src-btn code-view-btn" onclick="event.stopPropagation();JA.codeTreePanel.show('${esc(safeFqn)}','${esc(safeDisplay)}')" title="View decompiled code">Code</span>`;
+
+        const invocations = (method.invocations || []).filter(inv =>
+            inv.methodName !== '<init>' && inv.methodName !== '<clinit>'
+        );
+        const hasInvocations = invocations.length > 0;
+
+        return `
+            <div class="tree-node tree-method" data-method="${esc(displayName)}" data-class="${esc(className)}">
+                <div class="${hasInvocations ? 'tree-toggle' : 'tree-leaf'} tree-method-click"
+                     onclick="${hasInvocations ? 'JA.codeTree.toggleMethod(this,' + classIndex + ',' + methodIndex + ');' : ''}JA.codeTree.navigateTo('${esc(className)}','${esc(displayName)}',this)">
+                    ${hasInvocations ? '<span class="arrow">&#9654;</span>' : ''}
+                    <span class="leaf-icon method-icon">M</span>
+                    <span class="method-sig">
+                        ${anns} ${httpBadge}
+                        <span class="method-return">${esc(method.returnType)}</span>
+                        <span class="method-name">${esc(displayName)}</span>(<span class="method-params">${esc(params)}</span>)
+                    </span>
+                    ${hasInvocations ? '<span class="tree-count">' + invocations.length + ' calls</span>' : ''}
+                    ${codeBtn}
+                </div>
+                ${hasInvocations ? '<div class="tree-children collapsed"></div>' : ''}
+            </div>`;
+    },
+
+    /** Render invocations block — called lazily on expand */
+    _renderInvocations(method) {
+        const esc = JA.utils.escapeHtml;
+        const invocations = (method.invocations || []).filter(inv =>
+            inv.methodName !== '<init>' && inv.methodName !== '<clinit>'
+        );
+        if (invocations.length === 0) return '';
+
+        let lineNum = 1;
+        const lines = invocations.map(inv => {
+            const ownerFqn = inv.ownerClass || '';
+            const ownerShort = ownerFqn.split('.').pop();
+            const methName = inv.methodName || '';
+            const retType = inv.returnType && inv.returnType !== 'void'
+                ? ` <span class="inv-return">: ${esc(inv.returnType)}</span>` : '';
+            const num = lineNum++;
+            const navIdx = JA.nav.ref(ownerFqn, methName);
+            return `<div class="invocation-line inv-clickable" onclick="JA.nav.click(${navIdx},event)" title="Click to navigate to ${ownerShort}.${methName}">
+                <span class="inv-linenum">${num}</span>
+                <span class="inv-arrow">&#8594;</span>
+                <span class="inv-owner">${esc(ownerShort)}</span><span class="inv-dot">.</span><span class="inv-method">${esc(methName)}</span><span class="inv-parens">()</span>${retType}
+            </div>`;
+        });
+
+        return `<div class="invocations-block">
+            <div class="inv-header">Method Body — ${invocations.length} calls</div>
+            ${lines.join('')}
+        </div>`;
+    }
+};
