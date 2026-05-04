@@ -80,14 +80,20 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
 
     @Override
     public void streamCallTree(JsonParser parser, JsonGenerator gen, int targetIdx) throws IOException {
-        while (parser.nextToken() != null) {
-            if (parser.currentToken() == JsonToken.FIELD_NAME
-                    && "endpoints".equals(parser.currentName())) {
-                parser.nextToken();
-                break;
-            }
+        // Seek to top-level "endpoints" array only — scanning all tokens naively would
+        // match nested fields also named "endpoints" (e.g. inside localVariables maps).
+        if (parser.nextToken() != JsonToken.START_OBJECT) { gen.writeNull(); return; }
+        boolean found = false;
+        while (parser.nextToken() == JsonToken.FIELD_NAME) {
+            String name = parser.currentName();
+            parser.nextToken(); // advance to value
+            if ("endpoints".equals(name)) { found = true; break; }
+            // skip value of any other top-level field (e.g. the large "classes" array)
+            if (parser.currentToken() == JsonToken.START_ARRAY
+                    || parser.currentToken() == JsonToken.START_OBJECT)
+                parser.skipChildren();
         }
-        if (parser.currentToken() != JsonToken.START_ARRAY) { gen.writeNull(); return; }
+        if (!found || parser.currentToken() != JsonToken.START_ARRAY) { gen.writeNull(); return; }
         int current = 0;
         while (parser.nextToken() != null) {
             if (parser.currentToken() == JsonToken.END_ARRAY) { gen.writeNull(); return; }
