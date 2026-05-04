@@ -1,6 +1,6 @@
-# JAR Analyzer -- Complete User Manual
+# JAR / WAR Analyzer -- Complete User Manual
 
-This document is the authoritative reference for every piece of UI functionality in the JAR Analyzer tool. It covers the sidebar, top bar, JAR header controls, all three main tabs (Code Structure, Endpoint Flows, Summary), export capabilities, and the AI chat system.
+This document is the authoritative reference for every piece of UI functionality in the JAR Analyzer tool. It covers JAR and WAR file support, the sidebar, top bar, JAR header controls, all three main tabs (Code Structure, Endpoint Flows, Summary), export capabilities, and the AI chat system.
 
 ---
 
@@ -11,31 +11,34 @@ This document is the authoritative reference for every piece of UI functionality
    - [Upload Section](#12-upload-section)
    - [Claude Progress Indicator](#13-claude-progress-indicator)
 2. [Top Bar](#2-top-bar)
-3. [JAR Header (When a JAR Is Selected)](#3-jar-header-when-a-jar-is-selected)
-4. [Tab 1: Code Structure](#4-tab-1-code-structure)
-   - [Package View](#41-package-view)
-   - [Project View](#42-project-view)
-   - [Visual Overview](#43-visual-overview)
-   - [Class Detail (Expanded)](#44-class-detail-expanded)
-   - [Code Structure Toolbar](#45-code-structure-toolbar)
-   - [Code Panel (Right Side)](#46-code-panel-right-side)
-5. [Tab 2: Endpoint Flows](#5-tab-2-endpoint-flows)
-   - [Left Pane -- Endpoint List](#51-left-pane----endpoint-list)
-   - [Right Pane -- Endpoint Detail](#52-right-pane----endpoint-detail)
-6. [Tab 3: Summary](#6-tab-3-summary)
-   - [3.1 Endpoint Report](#61-endpoint-report)
-   - [3.2 Collection Analysis](#62-collection-analysis)
-   - [3.3 External Dependencies](#63-external-dependencies)
-   - [3.4 Distributed Transactions](#64-distributed-transactions)
-   - [3.5 Batch Jobs](#65-batch-jobs)
-   - [3.6 Scheduled Jobs](#66-scheduled-jobs)
-   - [3.7 Aggregation Flows](#67-aggregation-flows)
-   - [3.8 Dynamic Flows](#68-dynamic-flows)
-   - [3.9 Verticalisation](#69-verticalisation)
-   - [3.10 Claude Insights](#610-claude-insights)
-   - [3.11 Claude Corrections](#611-claude-corrections)
-7. [Export](#7-export)
-8. [Chat](#8-chat)
+3. [JAR / WAR Header (When a File Is Selected)](#3-jar--war-header-when-a-file-is-selected)
+4. [WAR File Support](#4-war-file-support)
+5. [Tab 1: Code Structure](#5-tab-1-code-structure)
+   - [Package View](#51-package-view)
+   - [Project View](#52-project-view)
+   - [Visual Overview](#53-visual-overview)
+   - [Class Detail (Expanded)](#54-class-detail-expanded)
+   - [Code Structure Toolbar](#55-code-structure-toolbar)
+   - [Code Panel (Right Side)](#56-code-panel-right-side)
+6. [Tab 2: Endpoint Flows](#6-tab-2-endpoint-flows)
+   - [Left Pane -- Endpoint List](#61-left-pane----endpoint-list)
+   - [Right Pane -- Endpoint Detail](#62-right-pane----endpoint-detail)
+7. [Tab 3: Summary](#7-tab-3-summary)
+   - [7.1 Endpoint Report](#71-endpoint-report)
+   - [7.2 Collection Analysis](#72-collection-analysis)
+   - [7.3 External Dependencies](#73-external-dependencies)
+   - [7.4 Distributed Transactions](#74-distributed-transactions)
+   - [7.5 Batch Jobs](#75-batch-jobs)
+   - [7.6 Scheduled Jobs](#76-scheduled-jobs)
+   - [7.7 Aggregation Flows](#77-aggregation-flows)
+   - [7.8 Dynamic Flows](#78-dynamic-flows)
+   - [7.9 Verticalisation](#79-verticalisation)
+   - [7.10 Claude Insights](#710-claude-insights)
+   - [7.11 Claude Corrections](#711-claude-corrections)
+   - [7.12 Correction Log Browser](#712-correction-log-browser)
+   - [7.13 MongoDB Catalog Verification](#713-mongodb-catalog-verification)
+8. [Export](#8-export)
+9. [Chat](#9-chat)
 
 ---
 
@@ -133,11 +136,80 @@ A label indicating which data view is currently active:
 
 ---
 
-## 4. Tab 1: Code Structure
+## 4. WAR File Support
 
-The Code Structure tab provides a navigable view of all classes, fields, methods, and invocations found in the JAR. It has three distinct view modes selectable via sub-tabs at the top.
+The analyzer fully supports `.war` (Web Application Archive) files in addition to `.jar` files. All features — call trees, dispatch resolution, Claude enrichment, Excel export, chat — work identically for WAR files.
 
-### 4.1 Package View
+### What is a WAR?
+
+A WAR file is the standard packaging format for Java web applications deployed to servlet containers (Tomcat, Jetty, JBoss, etc.). Its internal structure differs from a JAR:
+
+```
+myapp.war
+  WEB-INF/
+    classes/          ← compiled application classes (the main code)
+    lib/              ← bundled dependency JARs (Spring, Hibernate, etc.)
+    web.xml           ← optional deployment descriptor
+  META-INF/
+  index.jsp / static assets / etc.
+```
+
+### How to Upload a WAR
+
+Upload a WAR exactly the same way as a JAR — use the **Upload Button** in the sidebar and select a `.war` file. The analyzer auto-detects the `.war` extension and routes it through `WarParserService` instead of `JarParserService`.
+
+### How WAR Analysis Works
+
+The WAR parser performs the following steps automatically:
+
+| Step | What Happens |
+|---|---|
+| **1. Extract application classes** | All `.class` files under `WEB-INF/classes/` are parsed via ASM to extract `ClassInfo`, `MethodInfo`, `FieldInfo`, and invocation data. |
+| **2. Detect base package** | The analyzer scans all class packages and identifies the dominant two-segment prefix (e.g., `com.example`) as the application's base package. |
+| **3. Filter bundled JARs** | Each JAR in `WEB-INF/lib/` is checked: if it contains classes matching the base package, it is treated as an application-owned module and parsed. Pure third-party libraries (Spring, Hibernate, etc.) are excluded from the call graph. |
+| **4. Merge class maps** | Application classes from `WEB-INF/classes/` and application-origin bundled JARs are merged into a single class map. |
+| **5. Standard pipeline** | From this point the analysis is identical to JAR analysis: call graph construction, endpoint detection, Spring DI dispatch resolution, Claude enrichment (if enabled). |
+
+### WAR vs JAR — What's the Same
+
+- All Summary sub-tabs (Endpoint Report, Collection Analysis, Dynamic Flows, etc.)
+- All dispatch types (QUALIFIED, HEURISTIC, AMBIGUOUS, LIST\<T\>, RECURSIVE, etc.)
+- All three call-trace views (Flat Trace, Node Navigator, Interactive Explorer)
+- Code Structure tab (Package View, Project View, Visual Overview)
+- Dispatch-aware navigation links in the decompile code view
+- Claude enrichment, corrections, and chat
+- Excel and JSON export
+
+### WAR vs JAR — Key Differences
+
+| Aspect | JAR | WAR |
+|---|---|---|
+| Application classes location | Root of archive | `WEB-INF/classes/` |
+| Bundled libraries | Root JARs in classpath | `WEB-INF/lib/*.jar` |
+| Library filtering | All JARs parsed (configurable) | Only app-origin JARs parsed |
+| Display name | JAR filename | WAR filename |
+
+### WAR Data Storage
+
+WAR analysis data is stored under `data/jar/{normalizedWarKey}/` using the same layout as JAR data:
+
+```
+data/jar/myapp-1.0.0-SNAPSHOT/
+  stored.jar            ← the uploaded .war file (stored as .jar extension internally)
+  analysis.json         ← analysis result
+  analysis_corrected.json
+  corrections/
+  claude/
+  chat/
+```
+
+---
+
+## 5. Tab 1: Code Structure
+
+The Code Structure tab provides a navigable view of all classes, fields, methods, and invocations found in the JAR or WAR. It has three distinct view modes selectable via sub-tabs at the top.
+
+### 5.1 Package View
 
 This is the **default view mode**. Classes are grouped by their Java package.
 
@@ -146,7 +218,7 @@ This is the **default view mode**. Classes are grouped by their Java package.
 - Each package group is collapsible. Click a package name to expand or collapse its class list.
 - Each class entry shows its fully qualified name and annotations (e.g., `@RestController`, `@Service`).
 
-### 4.2 Project View
+### 5.2 Project View
 
 An IntelliJ-style folder hierarchy that mirrors the expected source project structure.
 
@@ -154,7 +226,7 @@ An IntelliJ-style folder hierarchy that mirrors the expected source project stru
 - **Single-child path collapsing**: When a directory has only one subdirectory, the path is collapsed into a single node (e.g., `com/example/domain` instead of three separate levels). This reduces visual clutter.
 - Clicking a `.java` leaf node selects that class and opens it in the code panel.
 
-### 4.3 Visual Overview
+### 5.3 Visual Overview
 
 A card-based grid layout that groups classes by Spring stereotype annotation.
 
@@ -167,7 +239,7 @@ A card-based grid layout that groups classes by Spring stereotype annotation.
 
 Each card displays the class name and a brief summary (annotation, package). Clicking a card selects the class.
 
-### 4.4 Class Detail (Expanded)
+### 5.4 Class Detail (Expanded)
 
 When a class is expanded (in Package or Project view), the following sections are displayed:
 
@@ -199,7 +271,7 @@ Method invocations are loaded on demand (lazy) to keep the initial render fast.
 - Each invocation shows the target class and method name.
 - Invocations are the building blocks of the call chains shown in the Endpoint Flows tab.
 
-### 4.5 Code Structure Toolbar
+### 5.5 Code Structure Toolbar
 
 The toolbar sits above the tree/grid area and provides the following controls:
 
@@ -213,7 +285,7 @@ The toolbar sits above the tree/grid area and provides the following controls:
 | **History** | Opens a dropdown showing the full navigation history. Click any entry to jump directly to that class. |
 | **JAR Source Filter Bar** | Filters the tree to show only classes from specific source JARs (relevant when the analyzed JAR bundles multiple dependency JARs). Select one or more source JARs to narrow the view. |
 
-### 4.6 Code Panel (Right Side)
+### 5.6 Code Panel (Right Side)
 
 The right side of the Code Structure tab displays a read-only code viewer with interactive dispatch navigation.
 
@@ -240,11 +312,11 @@ A search bar at the top of the code panel supports case-sensitive and case-insen
 
 ---
 
-## 5. Tab 2: Endpoint Flows
+## 6. Tab 2: Endpoint Flows
 
 The Endpoint Flows tab provides a detailed view of every detected HTTP endpoint and its downstream call chain.
 
-### 5.1 Left Pane -- Endpoint List
+### 6.1 Left Pane -- Endpoint List
 
 The left pane shows all endpoints grouped by their controller class.
 
@@ -278,7 +350,7 @@ Each endpoint entry displays:
 
 Click an endpoint to load its detail in the right pane.
 
-### 5.2 Right Pane -- Endpoint Detail
+### 6.2 Right Pane -- Endpoint Detail
 
 When an endpoint is selected, the right pane displays a comprehensive breakdown of its execution flow.
 
@@ -378,11 +450,11 @@ A breadcrumb-driven drill-down navigator. Start at the endpoint root, then click
 
 ---
 
-## 6. Tab 3: Summary
+## 7. Tab 3: Summary
 
 The Summary tab contains **11 sub-tabs**, each providing a different analytical perspective on the JAR's contents. Click a sub-tab name to switch views.
 
-### 6.1 Endpoint Report
+### 7.1 Endpoint Report
 
 **Sub-tab label:** Endpoint Report (default sub-tab when Summary is opened)
 
@@ -442,7 +514,7 @@ Two levels of filtering are available:
 - Results are paginated at **25 endpoints per page**.
 - Page navigation controls appear at the bottom of the card list (Previous / Next / page numbers).
 
-### 6.2 Collection Analysis
+### 7.2 Collection Analysis
 
 A tabular view of all MongoDB collections and views detected across the JAR.
 
@@ -467,7 +539,7 @@ A tabular view of all MongoDB collections and views detected across the JAR.
 
 Toggle between these two layouts using the view switch control above the table.
 
-### 6.3 External Dependencies
+### 7.3 External Dependencies
 
 A table listing all external library and module dependencies detected in the endpoint call chains.
 
@@ -485,7 +557,7 @@ A table listing all external library and module dependencies detected in the end
 
 Click the expand arrow on any module row to see a detailed list of all methods called within that module, along with the callers for each method.
 
-### 6.4 Distributed Transactions
+### 7.4 Distributed Transactions
 
 A table identifying endpoints that participate in or require distributed transaction handling.
 
@@ -497,7 +569,7 @@ A table identifying endpoints that participate in or require distributed transac
 | **Domain** | The business domain of the endpoint. |
 | **Transaction Requirement** | The assessed transaction need: `REQUIRED` (the endpoint modifies multiple data sources and requires distributed transaction coordination), `ADVISORY` (the endpoint touches multiple sources but may not strictly require distributed transactions), `NONE` (no distributed transaction concern detected). |
 
-### 6.5 Batch Jobs
+### 7.5 Batch Jobs
 
 A table of detected batch processing jobs (e.g., Spring Batch jobs).
 
@@ -512,7 +584,7 @@ A table of detected batch processing jobs (e.g., Spring Batch jobs).
 | **Methods** | The number of methods involved in the batch job's execution chain. |
 | **Size** | Categorical size: `S` (Small), `M` (Medium), `L` (Large), `XL` (Extra Large). |
 
-### 6.6 Scheduled Jobs
+### 7.6 Scheduled Jobs
 
 A table of methods annotated with scheduling annotations (`@Scheduled`, etc.).
 
@@ -531,7 +603,7 @@ A table of methods annotated with scheduling annotations (`@Scheduled`, etc.).
 
 Scheduled jobs are grouped by their **execution pattern** (e.g., all cron-based jobs together, all fixedRate jobs together, all fixedDelay jobs together) for easier scanning.
 
-### 6.7 Aggregation Flows
+### 7.7 Aggregation Flows
 
 A table of MongoDB aggregation pipelines detected in the codebase.
 
@@ -561,7 +633,7 @@ Click the expand arrow on any row to see the **full pipeline structure** -- ever
 | **Pipeline Stage** | Filter pipelines that include specific stage types (e.g., show only pipelines using `$lookup`). |
 | **Complexity** | Filter by complexity level. |
 
-### 6.8 Dynamic Flows
+### 7.8 Dynamic Flows
 
 A table of method calls resolved through dynamic dispatch (polymorphism, interfaces, abstract classes).
 
@@ -577,7 +649,7 @@ A table of method calls resolved through dynamic dispatch (polymorphism, interfa
 | **Collections Touched** | MongoDB collections that may be accessed depending on which implementation is invoked. |
 | **Risk Level** | An assessed risk level for this dynamic dispatch point. Higher risk indicates more uncertainty about runtime behavior. |
 
-### 6.9 Verticalisation
+### 7.9 Verticalisation
 
 The Verticalisation sub-tab analyzes cross-domain coupling to support domain-driven design and microservice extraction. It is divided into two sections.
 
@@ -609,7 +681,7 @@ Identifies MongoDB collections that are accessed by multiple domains.
 | **Endpoints** | The HTTP endpoints that access this collection across domain boundaries. |
 | **Recommendation** | The suggested approach for resolving the data coupling (e.g., replicate data, create an API, introduce an event). |
 
-### 6.10 Claude Insights
+### 7.10 Claude Insights
 
 Available only after a Claude enrichment scan has completed. Displays AI-generated business analysis for each endpoint.
 
@@ -624,7 +696,7 @@ Available only after a Claude enrichment scan has completed. Displays AI-generat
 | **Key Insights** | Notable observations about the endpoint's implementation, patterns, or anti-patterns. |
 | **Recommendations** | Suggested improvements, refactoring opportunities, or migration strategies. |
 
-### 6.11 Claude Corrections
+### 7.11 Claude Corrections
 
 Available only after a Claude enrichment scan has completed. Shows a per-endpoint summary of what Claude changed compared to the static analysis.
 
@@ -638,7 +710,7 @@ Available only after a Claude enrichment scan has completed. Shows a per-endpoin
 | **Verified Count** | Number of items from the static analysis that Claude confirmed as correct. |
 | **Verified %** | The percentage of static analysis items that Claude verified as accurate. A higher percentage indicates the static analysis was largely correct for this endpoint. |
 
-### 6.12 Correction Log Browser
+### 7.12 Correction Log Browser
 
 Available after a Claude correction scan has run. Provides a file-level view of every log file produced by the Claude correction pipeline.
 
@@ -648,7 +720,7 @@ Available after a Claude correction scan has run. Provides a file-level view of 
 
 ---
 
-### 6.13 MongoDB Catalog Verification
+### 7.13 MongoDB Catalog Verification
 
 When connected to a live MongoDB instance, the analyzer can verify whether detected collection names actually exist in the database.
 
@@ -677,7 +749,7 @@ After a successful catalog fetch, the **Verification** column in the Collection 
 
 ---
 
-## 7. Export
+## 8. Export
 
 The Export feature allows you to download the analysis results for offline use or integration with other tools.
 
@@ -708,7 +780,7 @@ The export includes the following data sections (each becomes a separate sheet i
 
 ---
 
-## 8. Chat
+## 9. Chat
 
 The Chat feature provides an AI-powered conversational interface for asking questions about the analyzed JAR.
 
