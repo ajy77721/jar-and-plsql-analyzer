@@ -74,6 +74,11 @@ JA.endpointList = {
         }
 
         container.innerHTML = html;
+        const inp = container.querySelector('.endpoint-search');
+        if (inp && query !== undefined) {
+            inp.focus();
+            inp.setSelectionRange(inp.value.length, inp.value.length);
+        }
     },
 
     async select(el) {
