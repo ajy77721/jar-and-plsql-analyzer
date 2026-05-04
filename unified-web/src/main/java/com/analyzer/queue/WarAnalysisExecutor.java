@@ -20,6 +20,7 @@ public class WarAnalysisExecutor {
     private static final Logger log = LoggerFactory.getLogger(WarAnalysisExecutor.class);
 
     private final WarParserService warParserService;
+    private final JarParserService jarParserService;
     private final CallGraphService callGraphService;
     private final PersistenceService warPersistenceService;
     private final ProgressService progressService;
@@ -30,6 +31,7 @@ public class WarAnalysisExecutor {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public WarAnalysisExecutor(WarParserService warParserService,
+                               JarParserService jarParserService,
                                CallGraphService callGraphService,
                                @Qualifier("warPersistenceService") PersistenceService warPersistenceService,
                                ProgressService progressService,
@@ -38,6 +40,7 @@ public class WarAnalysisExecutor {
                                MongoCatalogService mongoCatalogService,
                                DomainConfigLoader domainConfigLoader) {
         this.warParserService = warParserService;
+        this.jarParserService = jarParserService;
         this.callGraphService = callGraphService;
         this.warPersistenceService = warPersistenceService;
         this.progressService = progressService;
@@ -184,6 +187,28 @@ public class WarAnalysisExecutor {
                 warPersistenceService.storeResourceFiles(warName, resourceFiles);
             } catch (Exception e) {
                 log.warn("Resource file extraction failed (non-fatal): {}", e.getMessage());
+            }
+
+            try {
+                Path warForBundled = storedWar != null ? storedWar : tempWar;
+                List<com.jaranalyzer.service.JarParserService.BundledJarInfo> bundledJars =
+                        jarParserService.extractBundledJarInfo(warForBundled.toFile());
+                warPersistenceService.storeBundledJarInfo(warName, bundledJars);
+            } catch (Exception e) {
+                log.warn("Bundled JAR info extraction failed (non-fatal): {}", e.getMessage());
+            }
+
+            try {
+                Path warForDeps = storedWar != null ? storedWar : tempWar;
+                List<com.jaranalyzer.model.ClassInfo> appClasses = new ArrayList<>();
+                warParserService.streamClasses(classesFile, cls -> {
+                    if (cls.getSourceJar() == null) appClasses.add(cls);
+                });
+                Map<String, java.util.Set<String>> depMap =
+                        jarParserService.buildJarDependencyMap(warForDeps.toFile(), appClasses);
+                warPersistenceService.storeJarDepsMap(warName, depMap);
+            } catch (Exception e) {
+                log.warn("JAR dependency map build failed (non-fatal): {}", e.getMessage());
             }
 
             job.resultName = warName;

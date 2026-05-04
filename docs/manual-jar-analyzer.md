@@ -21,6 +21,8 @@ This document is the authoritative reference for every piece of UI functionality
    - [Code Structure Toolbar](#55-code-structure-toolbar)
    - [Code Panel (Right Side)](#56-code-panel-right-side)
    - [Resource Files](#57-resource-files)
+   - [Bundled Libraries](#58-bundled-libraries)
+   - [JAR Dependencies](#59-jar-dependencies)
 6. [Tab 2: Endpoint Flows](#6-tab-2-endpoint-flows)
    - [Left Pane -- Endpoint List](#61-left-pane----endpoint-list)
    - [Right Pane -- Endpoint Detail](#62-right-pane----endpoint-detail)
@@ -328,7 +330,7 @@ A search bar at the top of the code panel supports case-sensitive and case-insen
 
 ### 5.7 Resource Files
 
-A **Resource Files** section appears at the bottom of the Code Structure left panel, below the class tree. It lists every resource file extracted from the JAR or WAR during analysis.
+A **Resource Files** section appears in the Code Structure left panel, below the class tree. It lists every resource file extracted from the JAR or WAR during analysis. This section is present for both JAR and WAR uploads.
 
 #### What Files Are Shown
 
@@ -341,9 +343,14 @@ The following file types are extracted and listed (maximum 50 files, up to 200 K
 | `.json` | 📊 | JSON configuration or data files |
 | `.xml` | 📝 | XML descriptors and Spring context files |
 | `.sql` | 🗄️ | SQL schema and migration scripts |
-| `.conf`, `.txt` | 📃 | Generic configuration and plain-text files |
+| `.conf`, `.txt`, JavaScript, HTML, and other non-binary resources | 📃 | Generic configuration and plain-text files |
 
-Binary files, `.class` files, and Maven metadata files (under `META-INF/maven/`) are skipped. For WAR files, only resources from `WEB-INF/classes/` are extracted; resources bundled inside `WEB-INF/lib/` nested JARs are not included.
+Binary files and `.class` files are always skipped. Maven metadata files (under `META-INF/maven/`) are excluded. The extraction rules differ slightly by archive type:
+
+- **JAR files** — resources are extracted from the root of the archive and from any recognized resource path. Files under `META-INF/maven/` are excluded.
+- **WAR files** — only resources found under `WEB-INF/classes/` are extracted. Resources bundled inside the nested JARs in `WEB-INF/lib/` are not included here; those files are accessible through the Bundled Libraries section (see [5.8](#58-bundled-libraries)).
+
+Files are grouped by type in the panel, with the appropriate icon displayed next to each file name.
 
 #### Viewing a Resource File
 
@@ -363,6 +370,65 @@ They are accessible via the REST endpoints:
 |---|---|---|
 | GET | `/api/jar/jars/{id}/resources` | List all extracted resource files |
 | GET | `/api/jar/jars/{id}/resources/{filename:.+}` | Fetch the content of a specific resource file |
+
+### 5.8 Bundled Libraries
+
+A **Bundled Libraries** section appears in the Code Structure left panel, below the Resource Files section. It lists every JAR bundled inside the analyzed archive. This section is present for both JAR and WAR uploads.
+
+#### What Is Shown
+
+The analyzer scans the following locations depending on the archive type:
+
+| Archive Type | Bundled JARs Location |
+|---|---|
+| Spring Boot fat JAR | `BOOT-INF/lib/` |
+| WAR | `WEB-INF/lib/` |
+
+Up to **100 bundled JARs** are listed. Each entry is a collapsible node. Expanding a node reveals:
+
+- **MANIFEST.MF** — if the bundled JAR contains a manifest file, it is listed as the first item and can be clicked to view its content in the right panel.
+- **Resource files** — up to 10 resource files found inside that bundled JAR (same type filter as section 5.7) are listed below the manifest. Click any file to view its content on demand.
+
+#### Viewing Bundled Library Files
+
+Clicking any item (manifest or resource file) inside a bundled library node loads its content into the right code panel, the same way as for top-level resource files.
+
+#### REST Endpoint
+
+The bundled library list is served by:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jar/jars/{id}/bundled-jars` | List all bundled JARs with their manifest and resource file entries |
+
+### 5.9 JAR Dependencies
+
+A **JAR Dependencies** section appears in the Code Structure left panel, below the Bundled Libraries section. It identifies which bundled JARs the application's own code actually calls into at runtime. This section is present for both JAR and WAR uploads.
+
+#### How It Works
+
+During analysis, the engine builds a **class-to-JAR index** mapping every class found inside the bundled JARs to its containing JAR file. It then cross-references this index against the invocation data collected from the application's own classes. Only JARs where at least one application class makes a method call into a class from that JAR appear in this section.
+
+#### What Is Shown
+
+The section header displays the total count of libraries actually referenced: **"🔗 JAR Dependencies (N libs used)"**.
+
+Each entry shows:
+
+- The bundled JAR name (e.g., `spring-data-mongodb-3.4.1.jar`)
+- The list of application classes that invoke methods from that JAR
+
+#### Navigating to a Calling Class
+
+Clicking any application class name in the JAR Dependencies list navigates directly to that class in the Code Structure tree, selecting it and loading its decompiled source in the right panel.
+
+#### REST Endpoint
+
+The dependency map is served by:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jar/jars/{id}/jar-dep-map` | Get the map of bundled JAR → application classes that call into it |
 
 ---
 

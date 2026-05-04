@@ -1052,4 +1052,14 @@ public class AnalyzerController {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to read resource: " + e.getMessage());
         }
     }
+
+    @GetMapping("/{id}/bundled-jars")
+    public List<com.jaranalyzer.service.JarParserService.BundledJarInfo> getBundledJars(@PathVariable String id) {
+        return persistenceService.loadBundledJarInfo(id);
+    }
+
+    @GetMapping("/{id}/jar-dep-map")
+    public Map<String, java.util.Set<String>> getJarDepMap(@PathVariable String id) {
+        return persistenceService.loadJarDepsMap(id);
+    }
 }

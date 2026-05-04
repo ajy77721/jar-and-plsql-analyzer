@@ -204,7 +204,11 @@ After launch, the following endpoints should respond:
 
 - **Connections modal** — the **Connections** button on any analyzed JAR/WAR opens a styled modal popup (not a browser alert) that lists every database connection detected in the archive's config files. Each database type is shown in its own color-coded section: MongoDB (green), Oracle (red), and PostgreSQL (blue). Passwords are masked. The modal shows which config file each entry was extracted from and can be closed via the × button, by clicking outside the panel, or by pressing Escape.
 
-- **Resource Files** — after analysis completes, the Code Structure tab's left panel includes a **Resource Files** section at the bottom. It lists up to 50 resource files (`.properties`, `.yml`, `.yaml`, `.json`, `.xml`, `.sql`, `.conf`, `.txt`) extracted from the JAR or WAR, grouped by type with file-type icons. Clicking any file loads its content in the right panel on demand.
+- **Resource Files** — after analysis completes, the Code Structure tab's left panel includes a **Resource Files** section. It lists up to 50 resource files extracted from the JAR or WAR, grouped by type with file-type icons (📄 `.properties`, 📋 `.yml`/`.yaml`, 📊 `.json`, 📝 `.xml`, 🗄️ `.sql`, 📃 others). For JAR files, resources are extracted from the root and resource paths; for WAR files, only resources from `WEB-INF/classes/` are included. Clicking any file loads its content in the right panel on demand.
+
+- **Bundled Libraries** — the Code Structure tab's left panel includes a **Bundled Libraries** section listing every JAR bundled inside the analyzed archive (`BOOT-INF/lib/` for Spring Boot fat JARs, `WEB-INF/lib/` for WARs). Each bundled JAR is a collapsible node that exposes its `MANIFEST.MF` (if present) and up to 10 resource files. Up to 100 bundled JARs are listed. Available for both JAR and WAR analysis.
+
+- **JAR Dependencies** — the Code Structure tab's left panel includes a **JAR Dependencies** section showing which bundled JARs the application's own code actually calls into. Dependencies are identified by cross-referencing class invocations against a class-to-JAR index built from the bundled library set. Each entry shows the bundled JAR name alongside the application classes that call into it. Clicking an application class name navigates directly to that class in the tree. The section header shows the count of libraries actually used (e.g., "🔗 JAR Dependencies (12 libs used)"). Available for both JAR and WAR analysis.
 
 ---
 

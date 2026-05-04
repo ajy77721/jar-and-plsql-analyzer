@@ -212,12 +212,12 @@ built on top of the parser output.
 | `MongoCatalogService` | Fetches MongoDB collection metadata and verifies collection existence; also detects MongoDB, Oracle, and PostgreSQL connection details from bundled config files |
 | `ExcelExportService` | Multi-sheet XLSX export using Apache POI |
 | `ExcelStyleHelper` | Reusable cell styling (colors, borders, fonts) for Excel output |
-| `PersistenceService` | Reads/writes `analysis.json` and version files; exposes `storeResourceFiles()`, `listResourceFiles()`, and `loadResourceFile()` for resource file management |
+| `PersistenceService` | Reads/writes `analysis.json` and version files; exposes `storeResourceFiles()`, `listResourceFiles()`, and `loadResourceFile()` for resource file management; exposes `storeBundledJarInfo()`, `loadBundledJarInfo()`, `storeJarDepsMap()`, and `loadJarDepsMap()` for bundled-library and dependency-map persistence |
 | `ProgressService` | Tracks analysis progress percentages for SSE streaming |
 | `SubtreeCache` | Caches built subtrees to avoid redundant re-traversal across endpoints |
 | `SourceEnrichmentService` | Correlates decompiled bytecode with original source code |
 | `EndpointOutputWriter` | Writes per-endpoint breakdown JSON files |
-| `JarDataPaths` | Resolves all file paths for a given JAR key; includes `resourcesDir()` for the extracted resource files directory |
+| `JarDataPaths` | Resolves all file paths for a given JAR key; includes `resourcesDir()` for the extracted resource files directory, `bundledJarsFile()` for `bundled-jars.json`, and `jarDepMapFile()` for `jar-dep-map.json` |
 | `WarDataPaths` | Resolves all file paths for a given WAR key |
 | `JarNameUtil` | Normalizes JAR/WAR names to filesystem-safe keys |
 | `PromptTemplates` | Loads Claude prompt templates from `config/prompts/` |
@@ -617,6 +617,16 @@ Key difference from JAR: the WAR parser must distinguish application classes (un
 detection to decide which bundled JARs belong to the application vs. third-party
 dependencies, so only relevant classes are included in the call graph.
 
+After the call graph step, `WarParserService` runs the same three supplementary
+extraction steps as `JarParserService` (see section 5.1 for details):
+- `extractResourceFiles()` — reads from `WEB-INF/classes/` only
+- `extractBundledJarInfo()` — reads from `WEB-INF/lib/`; writes `bundled-jars.json`
+- `buildJarDependencyMap()` — cross-references invocations against the bundled-JAR
+  class index; writes `jar-dep-map.json`
+
+Both JAR and WAR executors produce identical storage layouts under
+`data/jar/{normalizedKey}/`.
+
 ### 5.1 JAR Analysis Pipeline
 
 ```
@@ -644,11 +654,31 @@ JarAnalysisExecutor.execute():
   |
   +-- Resource file extraction (in try-catch, non-fatal):
   |     +-- JarParserService.extractResourceFiles() scans the JAR entries:
-  |     |     +-- Includes: .properties, .yml, .yaml, .json, .xml, .sql, .conf, .txt
+  |     |     +-- Includes: .properties, .yml, .yaml, .json, .xml, .sql, .conf, .txt,
+  |     |     |   JavaScript, HTML, and any non-binary resource
   |     |     +-- Excludes: .class files, META-INF/maven/ paths, binary content
   |     |     +-- Limits: max 50 files, max 200 KB per file
   |     +-- PersistenceService.storeResourceFiles() writes each file to
   |           data/jar/{normalizedKey}/resources/{filename}
+  |
+  +-- Bundled JAR info extraction (in try-catch, non-fatal):
+  |     +-- JarParserService.extractBundledJarInfo() scans BOOT-INF/lib/ entries:
+  |     |     +-- For each bundled JAR: reads MANIFEST.MF (if present) and up to
+  |     |     |   10 resource files of the types listed above
+  |     |     +-- Limits: max 100 bundled JARs
+  |     +-- PersistenceService.storeBundledJarInfo() writes result to
+  |           data/jar/{normalizedKey}/bundled-jars.json
+  |
+  +-- JAR dependency map build (in try-catch, non-fatal):
+  |     +-- JarParserService.buildJarDependencyMap():
+  |     |     +-- Pass 1 (index build): for each bundled JAR, maps every class name
+  |     |     |   it contains to that JAR's filename → class→jar index
+  |     |     +-- Pass 2 (cross-reference): for each invocation in the application's
+  |     |     |   own classes, looks up the invoked class in the index; if found,
+  |     |     |   records the calling app class under the bundled JAR entry
+  |     |     +-- Only JARs with at least one application-class reference are emitted
+  |     +-- PersistenceService.storeJarDepsMap() writes result to
+  |           data/jar/{normalizedKey}/jar-dep-map.json
   |
   +-- (Optional) MongoCatalogService fetches MongoDB collection metadata
   |
@@ -656,7 +686,10 @@ JarAnalysisExecutor.execute():
 Browser receives "job-complete" SSE event
 ```
 
-The same extraction logic is applied for WAR files via `WarParserService.extractResourceFiles()`, which reads only from `WEB-INF/classes/` — resource files bundled inside nested JARs under `WEB-INF/lib/` are not extracted.
+The same three supplementary extraction steps (resource files, bundled JAR info, JAR dependency map) are applied for WAR files via the equivalent methods in `WarParserService`. For WAR archives:
+- `extractResourceFiles()` reads only from `WEB-INF/classes/` (nested JARs in `WEB-INF/lib/` are not included here)
+- `extractBundledJarInfo()` reads from `WEB-INF/lib/`
+- `buildJarDependencyMap()` uses the same cross-reference logic against the `WEB-INF/lib/` class index
 
 ### 5.2 PL/SQL Parser Analysis Pipeline
 
@@ -1212,6 +1245,8 @@ availability so the frontend can enable/disable the View Previous button.
 | GET    | `/api/jar/jars/{id}/catalog`                           | Get cached MongoDB catalog          |
 | GET    | `/api/jar/jars/{id}/resources`                         | List extracted resource files       |
 | GET    | `/api/jar/jars/{id}/resources/{filename:.+}`           | Fetch content of a resource file    |
+| GET    | `/api/jar/jars/{id}/bundled-jars`                      | List bundled JARs with manifest and resource file entries |
+| GET    | `/api/jar/jars/{id}/jar-dep-map`                       | Get map of bundled JAR → app classes that call into it |
 
 **Progress & Logs:**
 
@@ -1442,8 +1477,16 @@ data/
       endpoints/                 Per-endpoint breakdown files
       chat/                      Chatbot conversation history
       resources/                 Extracted resource files (.properties, .yml, .yaml,
-                                 .json, .xml, .sql, .conf, .txt) — max 50 files,
-                                 200 KB each; populated during analysis
+                                 .json, .xml, .sql, .conf, .txt, JS, HTML, etc.) —
+                                 max 50 files, 200 KB each; populated during analysis
+      bundled-jars.json          Bundled library metadata: list of JARs found in
+                                 BOOT-INF/lib/ (JAR) or WEB-INF/lib/ (WAR), each with
+                                 MANIFEST.MF content and up to 10 resource file entries;
+                                 max 100 JARs; written by extractBundledJarInfo()
+      jar-dep-map.json           JAR dependency map: bundled JAR filename → list of
+                                 application class names that invoke methods from that
+                                 JAR; only JARs with at least one reference appear;
+                                 written by buildJarDependencyMap()
 
   plsql/                         Legacy PL/SQL Analyzer data
     {analysisName}/              Per-analysis directory

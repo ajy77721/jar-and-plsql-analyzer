@@ -339,6 +339,134 @@ public class JarParserService {
         return resources;
     }
 
+    public static class BundledJarInfo {
+        public String name;
+        public long size;
+        public String manifest;
+        public Map<String, String> resources = new LinkedHashMap<>();
+    }
+
+    private static final int MAX_BUNDLED_JARS = 100;
+    private static final int MAX_NESTED_RESOURCE_FILES = 10;
+    private static final Set<String> NESTED_RESOURCE_EXTENSIONS = Set.of(
+            ".properties", ".yml", ".yaml", ".json", ".xml"
+    );
+
+    public List<BundledJarInfo> extractBundledJarInfo(File jarFile) throws IOException {
+        List<BundledJarInfo> result = new ArrayList<>();
+        try (JarFile jar = new JarFile(jarFile)) {
+            boolean isSpringBoot = jar.getEntry("BOOT-INF/classes/") != null;
+            boolean isWar = !isSpringBoot && jar.getEntry("WEB-INF/classes/") != null;
+            String libPrefix = isWar ? "WEB-INF/lib/" : "BOOT-INF/lib/";
+
+            Enumeration<JarEntry> entries = jar.entries();
+            while (entries.hasMoreElements() && result.size() < MAX_BUNDLED_JARS) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+                if (!name.startsWith(libPrefix) || !name.endsWith(".jar")) continue;
+                String jarName = name.substring(libPrefix.length());
+                if (jarName.isEmpty() || jarName.contains("/")) continue;
+
+                BundledJarInfo info = new BundledJarInfo();
+                info.name = jarName;
+                info.size = entry.getSize() < 0 ? 0 : entry.getSize();
+
+                try (InputStream is = jar.getInputStream(entry)) {
+                    byte[] nestedBytes = is.readAllBytes();
+                    if (info.size == 0) info.size = nestedBytes.length;
+                    try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(nestedBytes))) {
+                        ZipEntry ze;
+                        while ((ze = zis.getNextEntry()) != null) {
+                            String zeName = ze.getName();
+                            if (zeName.equals("META-INF/MANIFEST.MF") && info.manifest == null) {
+                                try {
+                                    byte[] bytes = zis.readAllBytes();
+                                    info.manifest = new String(bytes, StandardCharsets.UTF_8);
+                                } catch (Exception ignored) {}
+                                continue;
+                            }
+                            if (info.resources.size() < MAX_NESTED_RESOURCE_FILES && !ze.isDirectory()) {
+                                String lower = zeName.toLowerCase();
+                                boolean matches = false;
+                                for (String ext : NESTED_RESOURCE_EXTENSIONS) {
+                                    if (lower.endsWith(ext)) { matches = true; break; }
+                                }
+                                if (matches) {
+                                    String fname = zeName.contains("/") ? zeName.substring(zeName.lastIndexOf('/') + 1) : zeName;
+                                    if (!fname.isBlank()) {
+                                        try {
+                                            byte[] bytes = zis.readNBytes(MAX_RESOURCE_BYTES);
+                                            String key = info.resources.containsKey(fname) ? zeName.replace('/', '_') : fname;
+                                            info.resources.put(key, new String(bytes, StandardCharsets.UTF_8));
+                                        } catch (Exception ignored) {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Failed to inspect nested JAR {}: {}", jarName, e.getMessage());
+                }
+
+                result.add(info);
+            }
+        }
+        log.info("Extracted info for {} bundled JARs from {}", result.size(), jarFile.getName());
+        return result;
+    }
+
+    public Map<String, Set<String>> buildJarDependencyMap(File jarFile, List<ClassInfo> appClasses) throws IOException {
+        Map<String, String> classToJar = new HashMap<>();
+        try (JarFile jar = new JarFile(jarFile)) {
+            boolean isSpringBoot = jar.getEntry("BOOT-INF/classes/") != null;
+            boolean isWar = !isSpringBoot && jar.getEntry("WEB-INF/classes/") != null;
+            String libPrefix = isWar ? "WEB-INF/lib/" : "BOOT-INF/lib/";
+
+            Enumeration<JarEntry> entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+                if (!name.startsWith(libPrefix) || !name.endsWith(".jar")) continue;
+                String jarName = name.substring(libPrefix.length());
+                if (jarName.isEmpty() || jarName.contains("/")) continue;
+
+                try (InputStream is = jar.getInputStream(entry)) {
+                    byte[] nestedBytes = is.readAllBytes();
+                    try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(nestedBytes))) {
+                        ZipEntry ze;
+                        while ((ze = zis.getNextEntry()) != null) {
+                            String zeName = ze.getName();
+                            if (!zeName.endsWith(".class") || zeName.endsWith("module-info.class")) continue;
+                            String className = zeName.substring(0, zeName.length() - 6).replace('/', '.');
+                            classToJar.put(className, jarName);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Failed to index nested JAR {} for dep map: {}", jarName, e.getMessage());
+                }
+            }
+        }
+
+        Map<String, Set<String>> depMap = new LinkedHashMap<>();
+        for (ClassInfo cls : appClasses) {
+            if (cls.getSourceJar() != null) continue;
+            String appClassName = cls.getSimpleName();
+            for (var method : cls.getMethods()) {
+                for (var inv : method.getInvocations()) {
+                    String owner = inv.getOwnerClass();
+                    if (owner == null) continue;
+                    String mappedJar = classToJar.get(owner);
+                    if (mappedJar != null) {
+                        depMap.computeIfAbsent(mappedJar, k -> new LinkedHashSet<>()).add(appClassName);
+                    }
+                }
+            }
+        }
+
+        log.info("Built JAR dependency map: {} bundled JARs referenced by app classes", depMap.size());
+        return depMap;
+    }
+
     /**
      * Stream-read classes from JSONL file, processing each with a callback.
      * This avoids loading the whole list into memory.

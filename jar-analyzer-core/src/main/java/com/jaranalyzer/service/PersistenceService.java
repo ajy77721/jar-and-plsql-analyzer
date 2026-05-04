@@ -1,6 +1,7 @@
 package com.jaranalyzer.service;
 
 import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jaranalyzer.model.EndpointInfo;
 import com.jaranalyzer.model.JarAnalysis;
@@ -543,6 +544,59 @@ public class PersistenceService {
         Path file = dir.resolve(filename);
         if (!file.startsWith(dir) || !Files.isRegularFile(file)) return null;
         return Files.readString(file, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /* ---- Bundled JAR info ---- */
+
+    public void storeBundledJarInfo(String jarId, List<JarParserService.BundledJarInfo> jars) {
+        if (jars == null || jars.isEmpty()) return;
+        try {
+            paths.ensureJarRoot(jarId);
+            Path dest = paths.jarRoot(jarId).resolve("bundled-jars.json");
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(dest.toFile(), jars);
+            log.info("Stored bundled-jars.json for {} ({} JARs)", jarId, jars.size());
+        } catch (IOException e) {
+            log.warn("Failed to store bundled-jars.json for {}: {}", jarId, e.getMessage());
+        }
+    }
+
+    public List<JarParserService.BundledJarInfo> loadBundledJarInfo(String jarId) {
+        Path file = paths.jarRoot(jarId).resolve("bundled-jars.json");
+        if (!Files.exists(file)) return Collections.emptyList();
+        try {
+            return objectMapper.readValue(file.toFile(),
+                    new TypeReference<List<JarParserService.BundledJarInfo>>() {});
+        } catch (Exception e) {
+            log.warn("Failed to load bundled-jars.json for {}: {}", jarId, e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /* ---- JAR dependency map ---- */
+
+    public void storeJarDepsMap(String jarId, Map<String, Set<String>> depMap) {
+        if (depMap == null || depMap.isEmpty()) return;
+        try {
+            paths.ensureJarRoot(jarId);
+            Path dest = paths.jarRoot(jarId).resolve("jar-dep-map.json");
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(dest.toFile(), depMap);
+            log.info("Stored jar-dep-map.json for {} ({} entries)", jarId, depMap.size());
+        } catch (IOException e) {
+            log.warn("Failed to store jar-dep-map.json for {}: {}", jarId, e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Set<String>> loadJarDepsMap(String jarId) {
+        Path file = paths.jarRoot(jarId).resolve("jar-dep-map.json");
+        if (!Files.exists(file)) return Collections.emptyMap();
+        try {
+            return objectMapper.readValue(file.toFile(),
+                    new TypeReference<Map<String, Set<String>>>() {});
+        } catch (Exception e) {
+            log.warn("Failed to load jar-dep-map.json for {}: {}", jarId, e.getMessage());
+            return Collections.emptyMap();
+        }
     }
 
     /* ---- Delete ---- */

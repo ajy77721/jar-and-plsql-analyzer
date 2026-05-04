@@ -186,6 +186,28 @@ public class JarAnalysisExecutor {
                 log.warn("Resource file extraction failed (non-fatal): {}", e.getMessage());
             }
 
+            try {
+                Path jarForBundled = storedJar != null ? storedJar : tempJar;
+                List<com.jaranalyzer.service.JarParserService.BundledJarInfo> bundledJars =
+                        parserService.extractBundledJarInfo(jarForBundled.toFile());
+                persistenceService.storeBundledJarInfo(jarName, bundledJars);
+            } catch (Exception e) {
+                log.warn("Bundled JAR info extraction failed (non-fatal): {}", e.getMessage());
+            }
+
+            try {
+                Path jarForDeps = storedJar != null ? storedJar : tempJar;
+                List<com.jaranalyzer.model.ClassInfo> appClasses = new ArrayList<>();
+                parserService.streamClasses(classesFile, cls -> {
+                    if (cls.getSourceJar() == null) appClasses.add(cls);
+                });
+                Map<String, java.util.Set<String>> depMap =
+                        parserService.buildJarDependencyMap(jarForDeps.toFile(), appClasses);
+                persistenceService.storeJarDepsMap(jarName, depMap);
+            } catch (Exception e) {
+                log.warn("JAR dependency map build failed (non-fatal): {}", e.getMessage());
+            }
+
             job.resultName = jarName;
             progress(job, broadcast, "Static analysis complete: " + parseResult.totalClasses()
                     + " classes, " + endpoints.size() + " endpoints");

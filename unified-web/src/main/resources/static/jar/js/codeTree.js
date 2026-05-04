@@ -17,6 +17,11 @@ JA.codeTree = {
     _loaded: false,
     _resources: [],
     _resourcesLoaded: false,
+    _bundledJars: [],
+    _bundledJarsLoaded: false,
+    _jarDepMap: {},
+    _jarDepMapLoaded: false,
+    _bundledContentCache: [],
 
     /* ---- public API ---- */
 
@@ -25,6 +30,11 @@ JA.codeTree = {
         this._loaded = false;
         this._resources = [];
         this._resourcesLoaded = false;
+        this._bundledJars = [];
+        this._bundledJarsLoaded = false;
+        this._jarDepMap = {};
+        this._jarDepMapLoaded = false;
+        this._bundledContentCache = [];
         const container = document.getElementById('class-tree');
         if (container) container.innerHTML = '<p style="padding:20px;color:var(--text-muted,#6b7280)">Switch to Code Structure tab to load classes</p>';
     },
@@ -44,6 +54,8 @@ JA.codeTree = {
             if (container) container.innerHTML = '<p style="padding:20px;color:#ef4444">Failed to load code structure: ' + (e.message || e) + '</p>';
         }
         this._loadResources();
+        this._loadBundledJars();
+        this._loadJarDepMap();
     },
 
     async _loadResources() {
@@ -160,6 +172,8 @@ JA.codeTree = {
         if (JA.codeTreePanel) JA.codeTreePanel.clear();
         if (JA.codeTreeViews) JA.codeTreeViews.initJarSourceFilter(classes);
         if (this._resourcesLoaded) this._appendResourcesSection();
+        if (this._bundledJarsLoaded) this._appendBundledJarsSection();
+        if (this._jarDepMapLoaded) this._appendJarDepMapSection();
     },
 
     setViewMode(mode) {
@@ -175,6 +189,8 @@ JA.codeTree = {
             this._renderCurrentView();
         }
         if (this._resourcesLoaded) this._appendResourcesSection();
+        if (this._bundledJarsLoaded) this._appendBundledJarsSection();
+        if (this._jarDepMapLoaded) this._appendJarDepMapSection();
     },
 
     _renderCurrentView() {
@@ -801,6 +817,180 @@ JA.codeTree = {
                 </div>
                 ${hasInvocations ? '<div class="tree-children collapsed"></div>' : ''}
             </div>`;
+    },
+
+    async _loadBundledJars() {
+        if (this._bundledJarsLoaded) return;
+        const jarId = JA.app.currentJarId;
+        if (!jarId) return;
+        try {
+            const res = await fetch('/api/jar/jars/' + encodeURIComponent(jarId) + '/bundled-jars', { cache: 'no-store' });
+            if (!res.ok) return;
+            this._bundledJars = await res.json();
+            this._bundledJarsLoaded = true;
+            this._appendBundledJarsSection();
+        } catch (e) {
+            console.warn('Failed to load bundled JARs:', e);
+        }
+    },
+
+    async _loadJarDepMap() {
+        if (this._jarDepMapLoaded) return;
+        const jarId = JA.app.currentJarId;
+        if (!jarId) return;
+        try {
+            const res = await fetch('/api/jar/jars/' + encodeURIComponent(jarId) + '/jar-dep-map', { cache: 'no-store' });
+            if (!res.ok) return;
+            this._jarDepMap = await res.json();
+            this._jarDepMapLoaded = true;
+            this._appendJarDepMapSection();
+        } catch (e) {
+            console.warn('Failed to load JAR dep map:', e);
+        }
+    },
+
+    _appendBundledJarsSection() {
+        if (!this._bundledJars || !this._bundledJars.length) return;
+        const container = document.getElementById('class-tree');
+        if (!container) return;
+        const existing = container.querySelector('.bundled-jars-section');
+        if (existing) existing.remove();
+
+        this._bundledContentCache = [];
+
+        const esc = JA.utils.escapeHtml;
+        const extIcon = fname => {
+            const lower = fname.toLowerCase();
+            if (lower.endsWith('.properties')) return '📄';
+            if (lower.endsWith('.yml') || lower.endsWith('.yaml')) return '📋';
+            if (lower.endsWith('.json')) return '📊';
+            if (lower.endsWith('.xml')) return '📝';
+            return '📃';
+        };
+        const formatSize = bytes => {
+            if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return bytes + ' B';
+        };
+        const cacheContent = (jarName, filename, content) => {
+            const idx = this._bundledContentCache.length;
+            this._bundledContentCache.push({ jarName, filename, content });
+            return idx;
+        };
+
+        let jarNodes = '';
+        for (const j of this._bundledJars) {
+            let innerItems = '';
+            if (j.manifest) {
+                const idx = cacheContent(j.name, 'MANIFEST.MF', j.manifest);
+                innerItems += `<div class="tree-node tree-resource-file">
+                    <div class="tree-leaf" style="cursor:pointer" onclick="JA.codeTree._openBundledContentByIdx(${idx})">
+                        <span class="leaf-icon" style="margin-right:4px">📋</span>
+                        <span class="resource-filename">MANIFEST.MF</span>
+                    </div>
+                </div>`;
+            }
+            const resourceKeys = Object.keys(j.resources || {});
+            for (const fname of resourceKeys) {
+                const idx = cacheContent(j.name, fname, j.resources[fname]);
+                innerItems += `<div class="tree-node tree-resource-file">
+                    <div class="tree-leaf" style="cursor:pointer" onclick="JA.codeTree._openBundledContentByIdx(${idx})">
+                        <span class="leaf-icon" style="margin-right:4px">${extIcon(fname)}</span>
+                        <span class="resource-filename">${esc(fname)}</span>
+                    </div>
+                </div>`;
+            }
+            const hasChildren = j.manifest || resourceKeys.length > 0;
+            jarNodes += `<div class="tree-node">
+                <div class="tree-toggle" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span style="margin-right:4px">📦</span>
+                    <strong class="pkg-name">${esc(j.name)}</strong>
+                    <span class="tree-count">${formatSize(j.size)}</span>
+                </div>
+                <div class="tree-children collapsed">${hasChildren ? innerItems : '<span style="padding:4px 8px;color:var(--text-muted,#6b7280);font-size:11px">No resources</span>'}</div>
+            </div>`;
+        }
+
+        const section = document.createElement('div');
+        section.className = 'tree-node bundled-jars-section';
+        section.innerHTML = `<div class="jar-separator" style="margin-top:12px">Bundled Libraries (${this._bundledJars.length} JARs)</div>
+            <div class="tree-node">
+                <div class="tree-toggle expanded" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span class="jar-group-icon">📦</span>
+                    <strong class="jar-group-name">Bundled Libraries</strong>
+                    <span class="tree-count">${this._bundledJars.length}</span>
+                </div>
+                <div class="tree-children">${jarNodes}</div>
+            </div>`;
+        container.appendChild(section);
+    },
+
+    _openBundledContentByIdx(idx) {
+        const entry = this._bundledContentCache[idx];
+        if (!entry) return;
+        const panel = document.getElementById('code-panel');
+        if (!panel) return;
+        const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        panel.innerHTML = `<div class="cm-info-bar">
+            <span class="cm-classname">${esc(entry.jarName)} / ${esc(entry.filename)}</span>
+            <span class="cm-src-badge cm-badge-recon">BUNDLED</span>
+            <button class="btn-sm cm-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('bundled-content-pre').textContent)" title="Copy to clipboard">Copy</button>
+        </div>
+        <div class="cm-content" style="padding:12px;overflow:auto;height:calc(100% - 40px)">
+            <pre id="bundled-content-pre" style="margin:0;white-space:pre-wrap;font-size:12px;font-family:monospace;tab-size:2">${esc(entry.content)}</pre>
+        </div>`;
+    },
+
+    _appendJarDepMapSection() {
+        if (!this._jarDepMap || !Object.keys(this._jarDepMap).length) return;
+        const container = document.getElementById('class-tree');
+        if (!container) return;
+        const existing = container.querySelector('.jar-dep-map-section');
+        if (existing) existing.remove();
+
+        const esc = JA.utils.escapeHtml;
+        const depJars = Object.keys(this._jarDepMap).sort();
+        const totalUsed = depJars.length;
+
+        let jarNodes = '';
+        for (const jarName of depJars) {
+            const appClasses = Array.from(this._jarDepMap[jarName] || []).sort();
+            let classItems = '';
+            for (const cls of appClasses) {
+                const safeCls = cls.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                classItems += `<div class="tree-node tree-resource-file">
+                    <div class="tree-leaf" style="cursor:pointer" onclick="JA.codeTree.findAndHighlight('${safeCls}','')">
+                        <span class="leaf-icon" style="margin-right:4px;color:#6b7280">&#9632;</span>
+                        <span class="resource-filename">${esc(cls)}</span>
+                    </div>
+                </div>`;
+            }
+            jarNodes += `<div class="tree-node">
+                <div class="tree-toggle" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span style="margin-right:4px">📦</span>
+                    <strong class="pkg-name">${esc(jarName)}</strong>
+                    <span class="tree-count">${appClasses.length} classes</span>
+                </div>
+                <div class="tree-children collapsed">${classItems}</div>
+            </div>`;
+        }
+
+        const section = document.createElement('div');
+        section.className = 'tree-node jar-dep-map-section';
+        section.innerHTML = `<div class="jar-separator" style="margin-top:12px">JAR Dependencies (${totalUsed} libs used)</div>
+            <div class="tree-node">
+                <div class="tree-toggle expanded" onclick="JA.codeTree.togglePkg(this)">
+                    <span class="arrow">&#9654;</span>
+                    <span class="jar-group-icon">&#128279;</span>
+                    <strong class="jar-group-name">JAR Dependencies</strong>
+                    <span class="tree-count">${totalUsed} libs used</span>
+                </div>
+                <div class="tree-children">${jarNodes}</div>
+            </div>`;
+        container.appendChild(section);
     },
 
     /** Render invocations block — called lazily on expand */
