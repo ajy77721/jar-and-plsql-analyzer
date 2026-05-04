@@ -179,6 +179,55 @@ built on top of the parser output.
 
 ### 2.4 jar-analyzer-core
 
+#### Complete Service Inventory
+
+| Service | Purpose |
+|---|---|
+| `JarParserService` | End-to-end JAR analysis orchestration |
+| `WarParserService` | WAR file analysis — extracts `WEB-INF/classes/` and `WEB-INF/lib/` |
+| `BytecodeClassParser` | ASM visitor — extracts `ClassInfo`, `MethodInfo`, `FieldInfo`, invocations, annotations |
+| `CallGraphService` | Builds the flat method-level call graph from invocation data |
+| `CallGraphIndex` | Indexed call graph for O(1) lookup by class+method key |
+| `CallTreeBuilder` | Constructs per-endpoint call trees with Spring DI dispatch resolution |
+| `DecompilerService` | CFR wrapper for on-demand source decompilation |
+| `AggregationDetector` | Detects MongoDB aggregation pipeline stages in bytecode |
+| `CollectionResolver` | Resolves MongoDB collection names from repository annotations, string literals, and method patterns |
+| `MongoMethodDetector` | Identifies MongoDB driver method calls (`find`, `aggregate`, `insertOne`, etc.) |
+| `JpaMethodDetector` | Identifies JPA/Hibernate method calls and query patterns |
+| `DomainConfigLoader` | Loads and applies `domain-config.json` rules for domain assignment |
+| `SwarmClusterer` | Groups related endpoints into clusters for coherent Claude analysis |
+| `TreeChunker` | Splits large call trees into Claude-sized chunks respecting char/node/depth limits |
+| `ClaudeAnalysisService` | Master Claude enrichment orchestrator (chunking, verification, merging) |
+| `ClaudeProcessRunner` | Spawns Claude CLI as external subprocess with stdin piping and timeout |
+| `ClaudeResultMerger` | Extracts and merges JSON from Claude response text |
+| `ClaudeCorrectionService` | Applies Claude correction output to analysis data |
+| `CorrectionMerger` | Merges per-endpoint corrections into the full analysis JSON |
+| `CorrectionPersistence` | Reads/writes correction files and manages the three-version lifecycle |
+| `ClaudeSessionManager` | Tracks active Claude sessions; supports kill by session or bulk kill |
+| `ClaudeEnrichmentTracker` | Per-JAR enrichment progress tracking |
+| `ClaudeCallLogger` | Logs every Claude CLI invocation to a structured JSONL log file |
+| `FragmentStore` | Caches individual Claude response fragments to disk |
+| `ChatboxService` | JAR-scoped chatbox conversation handler |
+| `ChatHistoryService` | Classic chat session persistence and management |
+| `MongoCatalogService` | Fetches MongoDB collection metadata and verifies collection existence |
+| `ExcelExportService` | Multi-sheet XLSX export using Apache POI |
+| `ExcelStyleHelper` | Reusable cell styling (colors, borders, fonts) for Excel output |
+| `PersistenceService` | Reads/writes `analysis.json` and version files |
+| `ProgressService` | Tracks analysis progress percentages for SSE streaming |
+| `SubtreeCache` | Caches built subtrees to avoid redundant re-traversal across endpoints |
+| `SourceEnrichmentService` | Correlates decompiled bytecode with original source code |
+| `EndpointOutputWriter` | Writes per-endpoint breakdown JSON files |
+| `JarDataPaths` | Resolves all file paths for a given JAR key |
+| `WarDataPaths` | Resolves all file paths for a given WAR key |
+| `JarNameUtil` | Normalizes JAR/WAR names to filesystem-safe keys |
+| `PromptTemplates` | Loads Claude prompt templates from `config/prompts/` |
+| `StaticAnalysisProvider` | Data provider that loads static analysis only (no Claude data) |
+| `AnalysisDataProviderFactory` | Factory that selects the appropriate data provider based on version request |
+| `AnalysisNotFoundException` | Exception thrown when requested analysis does not exist on disk |
+| `WarPersistenceService` | WAR-specific persistence (identical structure to JAR persistence) |
+
+
+
 **Purpose:** Java bytecode analysis engine. Extracts structural metadata, REST endpoints,
 call graphs, class hierarchies, and complexity metrics from compiled JAR files. Includes
 the full Claude AI enrichment pipeline for JAR analysis.
@@ -531,6 +580,43 @@ first startup. Templates include:
 
 ## 5. Data Flow Pipeline
 
+### 5.0 WAR Analysis Pipeline
+
+```
+User uploads .war file
+  |
+  v
+AnalyzerController detects .war extension
+  |
+  v
+QueueJob(JAR_UPLOAD) submitted (shared job type)
+  |
+  v
+JarAnalysisExecutor detects WAR → delegates to WarParserService.analyze():
+  |
+  +-- Extract WEB-INF/classes/ entries → parse application classes via BytecodeClassParser
+  |
+  +-- Extract WEB-INF/lib/*.jar entries:
+  |     +-- detectBasePackage() checks which bundled JARs contain application classes
+  |     +-- containsBasePackageClasses() filters out framework/library JARs
+  |     +-- Application-origin bundled JARs are parsed; pure library JARs are skipped
+  |
+  +-- Build unified ClassInfo list (application + relevant bundled classes)
+  |
+  +-- Feed into standard CallGraphService / CallTreeBuilder pipeline
+  |     (identical to JAR analysis from this point)
+  |
+  +-- Write analysis.json to data/jar/{normalizedKey}/
+  |
+  v
+Browser receives "job-complete" SSE event
+```
+
+Key difference from JAR: the WAR parser must distinguish application classes (under
+`WEB-INF/classes/`) from library JARs (under `WEB-INF/lib/`). It uses base-package
+detection to decide which bundled JARs belong to the application vs. third-party
+dependencies, so only relevant classes are included in the call graph.
+
 ### 5.1 JAR Analysis Pipeline
 
 ```
@@ -851,6 +937,151 @@ to Claude:
   - Claude-enriched
   - Previous Claude version
   - Revert to static
+
+---
+
+## 7a. Spring DI Dispatch Resolution
+
+### Overview
+
+When the call tree builder encounters a method call on a Spring-injected field, it
+determines a **dispatch type** describing how confidently the target implementation
+was identified. This drives the colored badges shown in the UI and the navigation
+links in the decompile code view.
+
+### Dispatch Types
+
+| Dispatch Type | Meaning | UI Color |
+|---|---|---|
+| `DIRECT` | Single implementation or concrete class call — no ambiguity | (no badge) |
+| `QUALIFIED` | Resolved via `@Qualifier`, `@Named`, or custom qualifier annotation | Green |
+| `HEURISTIC` | Resolved via field-name substring match against implementation class names | Indigo |
+| `AMBIGUOUS_IMPL` | Multiple implementations exist; none of the narrowing strategies succeeded | Orange |
+| `LIST_INJECT` | Field is `List<Interface>` — all implementations are injected and run | Cyan |
+| `RECURSIVE` | Method calls itself (directly or indirectly); traversal stops here | Red |
+| `INTERFACE_FALLBACK` | Interface found but no concrete implementation exists in the analyzed classes | Red |
+| `PRIMARY` | Resolved using Spring's `@Primary` bean | Purple |
+| `DEFAULT_METHOD` | Java 8+ default method on an interface (no concrete override) | Grey |
+
+### Resolution Algorithm (CallTreeBuilder)
+
+For each injected field whose type is an interface or abstract class, the builder:
+
+1. **Collects all implementations** from `interfaceImplMap` (built during class parsing).
+
+2. **Single-impl shortcut**: If exactly one implementation exists → `DIRECT`.
+
+3. **Strategy 1 — `@Qualifier` / `@Named`**: If the field has a `@Qualifier` or `@Named`
+   annotation whose value matches exactly one implementation (by bean name, simple name,
+   or FQN suffix) → `QUALIFIED`.
+
+4. **Strategy 2 — Custom qualifier annotation**: If the field has any non-standard
+   annotation (not in the Spring/Jakarta standard set) with an `attributes.value` that
+   is a substring of exactly one implementation's simple name → `QUALIFIED`.
+   Example: `@AnalysisType("trend")` on a field matches `TrendAnalysisStrategy`.
+
+5. **Strategy 3 — Field name heuristic**: Split the field name at camelCase boundaries
+   (e.g., `trendAnalysisStrategy` → `["trend", "analysis", "strategy"]`). If any
+   segment (longer than 3 chars) matches exactly one implementation's simple name as
+   a substring → `HEURISTIC`.
+
+6. **`@Primary` fallback**: If one implementation is annotated `@Primary` → `PRIMARY`.
+
+7. **`List<Interface>` detection**: If the field type is `List<T>` where `T` is an
+   interface → all implementations → `LIST_INJECT`.
+
+8. **Exhausted strategies**: → `AMBIGUOUS_IMPL`.
+
+### Recursive Back-Edge Detection
+
+When `CallTreeBuilder` encounters a call to a method already present in the current
+call stack (via `visitedSet`):
+- Sets `callType = "RECURSIVE"` and `recursive = true` on the child node.
+- Sets `dispatchType = "RECURSIVE"` on the child node.
+- Does NOT recurse further (prevents infinite loops).
+- The `isRecursive()` guard in the builder prevents subsequent `setDispatchType()`
+  calls from overwriting the `RECURSIVE` label.
+- `rewriteCrossModuleRecursive` also skips nodes with `callType = "RECURSIVE"` to
+  preserve the back-edge marker.
+
+### Frontend Field-Dispatch Narrowing (summary-codeview.js)
+
+The decompile code view independently re-runs the narrowing logic client-side to
+render navigation links:
+
+1. For each injected field of interface/abstract type, builds a `fieldDispatch` map
+   using the same three strategies (Qualifier, custom annotation, field-name heuristic).
+2. Uses `receiverFieldName` from bytecode invocation metadata to match a given line's
+   method call to its specific field.
+3. If the field resolved to one implementation → renders a colored clickable link.
+4. If AMBIGUOUS → renders a picker span; clicking it opens an implementation chooser.
+5. Only adds a method name to `fieldAwareMethods` (which removes it from the generic
+   navTargets map) when the invocation's owner class is an interface or abstract class.
+   This preserves navigation for concrete class methods (e.g.,
+   `orchestrator.runAllStrategiesOnMetric()`) even when they have a `receiverFieldName`.
+
+---
+
+## 7b. Chatbox and Chat History Architecture
+
+### Overview
+
+Two chat systems are available:
+
+| System | Bean | Storage | Scope |
+|---|---|---|---|
+| **Floating Chatbox** | `ChatboxController` + `ChatboxService` | `data/jar/{key}/chat/` | Per-JAR |
+| **Classic Chat Panel** | `ChatController` + `ChatService` | `data/claude-chatbot/{sessionId}/` | Cross-JAR session |
+
+### Floating Chatbox
+
+- Each JAR has its own conversation thread. Switching JARs switches context.
+- `ChatboxService` maintains in-memory conversation state, serialized to disk on each
+  message for persistence across restarts.
+- The AI has access to the full analysis JSON for the selected JAR via context injection.
+- History stored at: `data/jar/{normalizedKey}/chat/history.json`
+- REST API: `POST /api/jars/{id}/chat`, `GET /api/jars/{id}/chat/history`,
+  `DELETE /api/jars/{id}/chat/history`
+
+### Classic Chat Sessions
+
+- `ChatHistoryService` manages session lifecycle (create, list, delete, get).
+- Each session is a directory under `data/claude-chatbot/{sessionId}/`.
+- Sessions support multi-turn conversation with full context retention.
+- A session can be exported as a structured report via `GET /api/chat/sessions/{id}/report`.
+- `ChatService` handles message routing and Claude process invocation.
+
+---
+
+## 7c. Correction Versioning
+
+The JAR analyzer maintains up to three versions of analysis data per JAR:
+
+| File | Description |
+|---|---|
+| `analysis.json` | Raw static analysis (always the original, never overwritten by Claude) |
+| `analysis_corrected.json` | Latest Claude-enriched version (overwritten on each new correction run) |
+| `analysis_corrected_prev.json` | The prior Claude version (one round back) |
+
+### Version Loading Flow
+
+```
+User clicks "View Corrected" → loads analysis_corrected.json
+User clicks "View Static"    → loads analysis.json
+User clicks "View Previous"  → loads analysis_corrected_prev.json
+User clicks "Revert"         → deletes _corrected.json, returns to static
+```
+
+### Correction Merge Process
+
+`CorrectionMerger` applies Claude's output on top of the static analysis:
+1. Reads static `analysis.json` as the base.
+2. Applies each correction from `corrections/{endpointName}_correction.json`.
+3. Writes the merged result to `analysis_corrected.json`.
+4. Before writing, moves the current `_corrected.json` to `_corrected_prev.json`.
+
+`CorrectionPersistence` manages reading/writing these files and exposes version
+availability so the frontend can enable/disable the View Previous button.
 
 ---
 
@@ -1376,23 +1607,48 @@ unified-web/src/main/resources/static/
     user-manual.css              User manual styles
 ```
 
-### 10.3 JS Module Pattern
+### 10.3 JS Module Pattern and State Management
 
-Each JS file follows the IIFE module pattern to avoid global namespace pollution:
+The JAR Analyzer frontend uses a **shared namespace pattern** (`window.JA`) rather
+than IIFEs. All modules extend a single global object using `Object.assign`:
 
 ```javascript
-(function() {
-    'use strict';
-    // Private state and functions
-    const state = { ... };
-    function init() { ... }
+window.JA = window.JA || {};
+JA.summary = JA.summary || {};
 
-    // Expose public API on window
-    window.ModuleName = { init, ... };
-})();
+Object.assign(JA.summary, {
+    _traceState: null,          // private state (underscore prefix = internal)
+    showCallTrace(idx) { ... }, // public method
+    _renderCallTrace() { ... }  // internal method
+});
 ```
 
-Files are loaded via `<script>` tags in the HTML pages. Order matters -- shared
+**Key namespaces:**
+
+| Namespace | File(s) | Responsibility |
+|---|---|---|
+| `JA.app` | `app.js` | Global app state: `currentJarId`, `currentAnalysis`, tab switching |
+| `JA.api` | `api.js` | All REST calls: `getCallTree()`, `getSummary()`, `decompile()` |
+| `JA.nav` | `nav.js` | Class navigation history, `_implMap` (interface → implementations), `_classIdx` |
+| `JA.summary` | `summary.js` + `summary-*.js` | All Summary tab logic (11 sub-tabs, trace views, export, dispatch) |
+| `JA.codeTree` | `codeTree.js` + `codeTreePanel.js` | Code Structure tab tree and right panel |
+| `JA.callGraph` | `callGraph.js` | Endpoint Flows tab and call chain table |
+| `JA.endpointList` | `endpointList.js` | Left pane of Endpoint Flows |
+| `JA.toast` | `utils.js` | Toast notification helper |
+| `JA.utils` | `utils.js` | `escapeHtml()`, formatting helpers |
+
+**Module load order** (as declared in `index.html`):
+`utils.js` → `api.js` → `nav.js` → `app.js` → sidebar/dashboard → codeTree* →
+callGraph → endpointList → summary.js → summary-helpers → summary-tables →
+summary-explorer → summary-trace → summary-codeview → (other summary-* files)
+
+**State flow:**
+1. User selects JAR → `JA.app.loadJar(jarId)` fetches analysis → sets `JA.app.currentAnalysis`
+2. `JA.nav.init()` builds `_implMap` and `_classIdx` from the analysis class list
+3. Each tab module reads from `JA.app.currentAnalysis` when rendering
+4. `JA.summary._epReports` holds the per-endpoint report array used by all Summary sub-tabs
+
+Files are loaded via `<script>` tags in the HTML pages. Order matters — shared
 utilities load first, then domain-specific modules.
 
 ### 10.4 SSE Integration
@@ -1426,6 +1682,46 @@ For production, these should be changed to enable browser caching.
 ---
 
 ## 11. Security Considerations
+
+### 10.6 Frontend JS File Reference (JAR Analyzer)
+
+| File | Purpose |
+|---|---|
+| `api.js` | All REST calls wrapped in `JA.api.*` methods |
+| `app.js` | Entry point — JAR selection, tab switching, upload control |
+| `callGraph.js` | Endpoint Flows tab — operation flow table with dispatch badges |
+| `chat-toggle.js` | Switches between New (chatbox) and Classic chat modes |
+| `chatbox.js` | Floating AI chatbox FAB and popover |
+| `codeTree.js` | Code Structure tab — package/project/visual tree views |
+| `codeTreePanel.js` | Right code panel container in Code Structure tab |
+| `codeTreeViews.js` | View mode renderers (hierarchical, card grid) for code tree |
+| `dash-panel.js` | Statistics panels on the dashboard |
+| `dashboard.js` | Empty-state dashboard shown before any JAR is selected |
+| `endpointList.js` | Left pane of Endpoint Flows — grouped endpoint listing |
+| `logviewer.js` | Application log tail viewer (FAB, bottom-left) |
+| `nav.js` | Class navigation history stack; builds `_implMap` and `_classIdx` |
+| `sessions.js` | Claude session overlay (list, view history) |
+| `sidebar.js` | Persistent left sidebar — JAR list, upload, Claude progress |
+| `summary-aggregation.js` | Aggregation Flows sub-tab |
+| `summary-claude.js` | Claude Insights columns in the endpoint summary |
+| `summary-codeview.js` | Decompiled code modal with dispatch-aware navigation links |
+| `summary-col-filter.js` | Advanced filter panel (range sliders, multi-select pills) |
+| `summary-corrections.js` | Claude Corrections sub-tab |
+| `summary-corr-logbrowser.js` | Correction log file browser |
+| `summary-dynamic.js` | Dynamic Flows sub-tab |
+| `summary-explorer.js` | Interactive drill-down call trace (breadcrumb navigator) |
+| `summary-export*.js` | Export dialog, XLSX generation, styling |
+| `summary-helpers.js` | Shared metric calculations, formatting, domain utilities |
+| `summary-popups.js` | Modal/popup overlays |
+| `summary-scheduled.js` | Scheduled Jobs sub-tab |
+| `summary-tables.js` | Collection Analysis sub-tab |
+| `summary-trace.js` | Flat trace overlay and node-by-node navigator |
+| `summary-vert-popup.js` | Verticalisation popup detail |
+| `summary-vertical.js` | Verticalisation sub-tab (bean crossing, data crossing) |
+| `summary.js` | Summary tab orchestrator — state, render entry point, sub-tab routing |
+| `utils.js` | `escapeHtml()`, `JA.toast`, formatting utilities |
+
+---
 
 ### 11.1 No Authentication
 

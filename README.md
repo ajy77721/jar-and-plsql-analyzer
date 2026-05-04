@@ -37,7 +37,7 @@ launching with tuned JVM flags (`-Xms512m -Xmx4g -XX:+UseG1GC`).
 | URL | Description |
 |-----|-------------|
 | http://localhost:8083/ | Home page -- launcher for both tools |
-| http://localhost:8083/jar/ | JAR Analyzer -- upload JARs, browse call trees, export Excel |
+| http://localhost:8083/jar/ | JAR Analyzer -- upload JARs or WARs, browse call trees, export Excel |
 | http://localhost:8083/parser/ | PL/SQL Parser -- run flow analysis, browse parsed procedures |
 
 ## Modules
@@ -87,10 +87,17 @@ When Claude CLI is available on PATH, the platform enables:
 
 - AI enrichment for JAR analysis (natural-language descriptions, correction suggestions)
 - AI verification for PL/SQL analysis results
-- Interactive chatbot conversations scoped to analysis context
+- Interactive chatbot conversations scoped to each JAR/WAR analysis context
 - Chunked prompt generation for large call trees
 
 Static analysis works fully without Claude CLI installed.
+
+## WAR File Support
+
+The analyzer supports `.war` files in addition to `.jar` files. WAR files are analyzed
+using `WarParserService` which extracts application classes from `WEB-INF/classes/` and
+bundled libraries from `WEB-INF/lib/`. All analysis features (call trees, dispatch
+resolution, Claude enrichment, export) work identically for WAR and JAR files.
 
 ## Build
 

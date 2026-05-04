@@ -63,7 +63,7 @@ The upload section sits below the JAR list and provides controls for adding new 
 
 | Control | Description |
 |---|---|
-| **Upload Button** | Opens a file input dialog. Accepts `.jar` files up to **2 GB** in size. After selecting a file, analysis begins automatically based on the selected mode. |
+| **Upload Button** | Opens a file input dialog. Accepts `.jar` and `.war` files up to **2 GB** in size. After selecting a file, analysis begins automatically based on the selected mode. WAR files are automatically detected and processed with `WarParserService`, which extracts application classes from `WEB-INF/classes/` and bundled libraries from `WEB-INF/lib/`. |
 | **Analysis Mode Toggle** | A two-option toggle switch: **Static** and **Claude**. In **Static** mode, only static bytecode analysis is performed (decompilation, class inspection, endpoint detection). In **Claude** mode, static analysis is performed first, followed by AI-powered enrichment that adds business context, corrections, and insights. |
 | **Source Project Path** | A text input field that appears **only when Claude mode is selected**. Enter the absolute filesystem path to the original source project. This helps Claude correlate decompiled bytecode with the original source code for higher-quality analysis. |
 
@@ -215,11 +215,28 @@ The toolbar sits above the tree/grid area and provides the following controls:
 
 ### 4.6 Code Panel (Right Side)
 
-The right side of the Code Structure tab displays a read-only code viewer.
+The right side of the Code Structure tab displays a read-only code viewer with interactive dispatch navigation.
 
 - When a **class** is selected, the full decompiled Java source code for that class is displayed.
 - When a **method** is selected, the code panel scrolls to and highlights the relevant method within the class source.
 - Syntax highlighting is applied for Java keywords, types, strings, annotations, and comments.
+
+#### Dispatch-Aware Navigation Links
+
+Method calls on Spring-injected fields are rendered as interactive links based on how the call was resolved:
+
+| Link Style | When Shown | Click Action |
+|---|---|---|
+| **Green underline** (QUALIFIED) | Field resolved via `@Qualifier`, `@Named`, or custom qualifier annotation to exactly one implementation | Navigates directly to that implementation class and method |
+| **Indigo underline** (HEURISTIC) | Field resolved by field-name heuristic to one implementation | Navigates directly to that implementation |
+| **Orange underline** (AMBIGUOUS) | Multiple implementations exist and could not be narrowed | Opens an implementation picker — select which class to navigate to |
+| **Standard blue link** | Concrete class method (non-interface call) | Navigates directly to the target class and method |
+
+Hovering over any dispatch link shows a tooltip with the resolution type and matched class name (e.g., `✓ QUALIFIED: TrendAnalysisStrategy.analyze()`).
+
+#### Search
+
+A search bar at the top of the code panel supports case-sensitive and case-insensitive text search within the displayed source. Use navigation arrows to jump between matches.
 
 ---
 
@@ -308,13 +325,17 @@ A detailed step-by-step table of every method call in the endpoint's execution c
 
 ##### Dispatch Badge Values
 
-| Badge | Meaning |
-|---|---|
-| **QUALIFIED** | The call target was resolved with full certainty from explicit type information. |
-| **DYNAMIC** | The call target was resolved through dynamic dispatch (e.g., interface polymorphism, runtime binding). Multiple implementations may exist. |
-| **HEURISTIC** | The call target was resolved using heuristic matching (e.g., naming conventions, single-implementation inference). |
-| **IFACE ONLY** | Only the interface declaration was found; no concrete implementation was located in the analyzed JAR. |
-| **@PRIMARY** | The call target was resolved using Spring's `@Primary` annotation to select among multiple candidates. |
+| Badge | Color | Meaning |
+|---|---|---|
+| **QUALIFIED** | Green | The call target was resolved with full certainty via `@Qualifier` or `@Named` annotation on the injected field. The exact bean name matched one implementation. |
+| **HEURISTIC** | Indigo | Resolved via field-name heuristic — the injected field name contained a substring matching exactly one implementation class name (e.g. field `trendStrategy` matched `TrendAnalysisStrategy`). |
+| **AMBIGUOUS** | Orange | Multiple implementations exist and none of the narrowing strategies (Qualifier, custom annotation, field name) could select one. The UI shows an implementation picker. |
+| **LIST\<T\>** | Cyan | The field is injected as `List<Interface>`, meaning all implementations are run at runtime. All are shown as children; each can be individually traced. |
+| **DYNAMIC** | Amber | Resolved through general dynamic dispatch. Multiple implementations may be invoked at runtime. |
+| **↺ RECURSIVE** | Red | The method call creates a back-edge in the call graph (direct or indirect self-call). Traversal stops here to prevent infinite recursion. |
+| **IFACE ONLY** | Red | Only the interface declaration was found; no concrete implementation was located in the analyzed JAR. |
+| **@PRIMARY** | Purple | Resolved using Spring's `@Primary` annotation to select among multiple candidates. |
+| **DEFAULT method** | Grey | The method is a Java 8+ default method on an interface — no concrete class overrides it; the interface body provides the implementation. |
 
 #### Breadcrumb Navigation
 
@@ -323,6 +344,37 @@ A detailed step-by-step table of every method call in the endpoint's execution c
 | **Back** | Returns to the previous endpoint detail viewed. |
 | **Next** | Advances to the next endpoint in the navigation history. |
 | **Root** | Jumps back to the root endpoint (the first one viewed in the current navigation chain). |
+
+#### Call Trace Views
+
+Three overlays are available for in-depth call tree exploration. Buttons for each appear in the endpoint detail header.
+
+**Flat Trace (Dynatrace-style)**
+
+Opens a hierarchical flat tree showing every method call in the endpoint's execution path, indented by call depth. Each row shows:
+- Spring stereotype badge (CTRL, SVC, REPO, CMP)
+- Class and method name (clickable — opens Code view)
+- Return type and parameters
+- Module badge for cross-module calls
+- Dispatch badge (QUALIFIED, ↺ RECURSIVE, AMBIGUOUS, etc.)
+- Collection badges for database accesses
+- Descendant collection count for intermediate nodes
+
+**Node Navigator**
+
+Steps through every node in the call tree one at a time (like a debugger). Controls:
+- **Back / Next** buttons to walk forward and backward through all nodes
+- Breadcrumb trail showing the path to the current node
+- Per-node detail card: stereotype, depth, child count, return type, annotations, SQL statements, and decompiled source code (loaded on demand from the backend)
+
+**Interactive Explorer (Drill-Down)**
+
+A breadcrumb-driven drill-down navigator. Start at the endpoint root, then click any child method to drill into it. Features:
+- **Dispatch legend** shown once above the children list — summarises all dispatch types present
+- Per-child dispatch badge and `via InterfaceName` tag for interface calls
+- **Implementation picker** for AMBIGUOUS and LIST\<T\> children — click a specific implementation button to drill into that branch
+- Full detail card for the current node: stats (total nodes in scope, collections, direct calls, external calls), annotations, SQL statements, all collections in scope
+- Recursive nodes marked with `↺` in breadcrumbs; clicking one shows the back-edge detail and cycle path
 
 ---
 
@@ -586,6 +638,43 @@ Available only after a Claude enrichment scan has completed. Shows a per-endpoin
 | **Verified Count** | Number of items from the static analysis that Claude confirmed as correct. |
 | **Verified %** | The percentage of static analysis items that Claude verified as accurate. A higher percentage indicates the static analysis was largely correct for this endpoint. |
 
+### 6.12 Correction Log Browser
+
+Available after a Claude correction scan has run. Provides a file-level view of every log file produced by the Claude correction pipeline.
+
+- Lists all log files by endpoint name.
+- Click any entry to view the raw log content (JSON fragments, Claude output, merge decisions).
+- Useful for debugging unexpected corrections or understanding why a specific endpoint changed.
+
+---
+
+### 6.13 MongoDB Catalog Verification
+
+When connected to a live MongoDB instance, the analyzer can verify whether detected collection names actually exist in the database.
+
+#### How to Trigger
+
+Click **Fetch Catalog** in the JAR header. This calls `POST /api/jar/jars/{id}/fetch-catalog` which uses `MongoCatalogService` to connect to MongoDB and retrieve collection metadata.
+
+#### Configuration
+
+MongoDB connection details are not stored in `plsql-config.yaml`. Instead, the driver uses the connection string provided at the time of the catalog fetch request. Timeouts are controlled by:
+
+| Property | Default | Description |
+|---|---|---|
+| `mongo.timeout.connect` | `30s` | Connection timeout |
+| `mongo.timeout.server-selection` | `30s` | Server selection timeout |
+
+#### Verification Status in Collection Analysis
+
+After a successful catalog fetch, the **Verification** column in the Collection Analysis sub-tab updates:
+
+| Status | Meaning |
+|---|---|
+| **IN_DB** | Collection name was found in the live MongoDB database |
+| **NOT_IN_DB** | Collection name was NOT found — likely a naming mismatch or the collection is environment-specific |
+| **NEED_REVIEW** | Catalog data was not available; cannot auto-verify |
+
 ---
 
 ## 7. Export
@@ -642,6 +731,21 @@ The Chat feature provides an AI-powered conversational interface for asking ques
 
 - Use the **Chat toggle** in the **top bar** to switch between **New** (floating chatbox) and **Classic** (session-based panel) modes.
 - Your preference persists across page reloads.
+
+### Chat Context and Scope
+
+The floating chatbox is **scoped to the currently selected JAR**. All messages and the AI's answers are tied to that JAR's analysis data. Switching to a different JAR opens a fresh conversation context for that JAR.
+
+- Chat history is **persisted to disk** at `data/jar/{jarKey}/chat/`. Conversations survive application restarts.
+- The AI draws on the full analysis data for the selected JAR: endpoints, call trees, collections, domains, and Claude enrichment results if available.
+- Chat history can be cleared via `DELETE /api/jars/{id}/chat/history`.
+
+### Classic Chat Session Management
+
+In Classic mode, sessions are managed via the **Sessions** button in the top bar or via `GET /api/chat/sessions`. Each session:
+- Has a unique ID and persists until explicitly deleted.
+- Supports multi-turn conversations with full context retention.
+- Can be converted to a downloadable **report** via `GET /api/chat/sessions/{id}/report`.
 
 ---
 
