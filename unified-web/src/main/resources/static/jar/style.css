@@ -1850,7 +1850,7 @@ body {
 /* Implementation Picker Popup */
 .impl-picker {
     position: fixed;
-    z-index: 10000;
+    z-index: 10002;
     background: var(--card-bg);
     border: 1px solid var(--border);
     border-radius: 10px;
