@@ -154,8 +154,8 @@ JA.codeTree = {
                 <span class="cm-src-badge cm-badge-recon">RESOURCE</span>
                 <button class="btn-sm cm-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('res-content-pre').textContent)" title="Copy to clipboard">Copy</button>
             </div>
-            <div class="cm-content" style="padding:12px;overflow:auto;height:calc(100% - 40px)">
-                <pre id="res-content-pre" style="margin:0;white-space:pre-wrap;font-size:12px;font-family:monospace;tab-size:2">${esc(text)}</pre>
+            <div class="cm-content" style="padding:12px;overflow:auto;height:calc(100% - 40px);background:#1e1e2e">
+                <pre id="res-content-pre" style="margin:0;white-space:pre-wrap;font-size:12px;font-family:monospace;tab-size:2;color:#cdd6f4">${esc(text)}</pre>
             </div>`;
         } catch (e) {
             panel.innerHTML = '<div style="padding:20px;color:#ef4444">Failed to load resource: ' + (e.message || e) + '</div>';
@@ -938,8 +938,8 @@ JA.codeTree = {
             <span class="cm-src-badge cm-badge-recon">BUNDLED</span>
             <button class="btn-sm cm-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('bundled-content-pre').textContent)" title="Copy to clipboard">Copy</button>
         </div>
-        <div class="cm-content" style="padding:12px;overflow:auto;height:calc(100% - 40px)">
-            <pre id="bundled-content-pre" style="margin:0;white-space:pre-wrap;font-size:12px;font-family:monospace;tab-size:2">${esc(entry.content)}</pre>
+        <div class="cm-content" style="padding:12px;overflow:auto;height:calc(100% - 40px);background:#1e1e2e">
+            <pre id="bundled-content-pre" style="margin:0;white-space:pre-wrap;font-size:12px;font-family:monospace;tab-size:2;color:#cdd6f4">${esc(entry.content)}</pre>
         </div>`;
     },
 
