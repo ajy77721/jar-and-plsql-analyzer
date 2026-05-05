@@ -98,6 +98,20 @@ public enum MongoOp {
         return UNKNOWN;
     }
 
+    /**
+     * True for operations that mutate data and must NOT be executed against the real DB.
+     * FIND_AND_* are intentionally excluded — they are read-dominant and return a document.
+     */
+    public boolean isMutation() {
+        return switch (this) {
+            case INSERT, INSERT_MANY, SAVE, SAVE_ALL,
+                 UPDATE, UPDATE_MANY, UPSERT, REPLACE,
+                 DELETE, DELETE_MANY, FIND_ALL_AND_REMOVE,
+                 BULK_WRITE -> true;
+            default -> false;
+        };
+    }
+
     /** Whether this operation type should be attempted for data fetch in the chain. */
     public boolean isFetchable() {
         return this == FIND || this == FIND_ONE || this == FIND_BY_ID

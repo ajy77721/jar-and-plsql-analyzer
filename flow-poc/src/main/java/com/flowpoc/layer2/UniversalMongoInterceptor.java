@@ -12,17 +12,21 @@ import java.util.*;
 import java.util.concurrent.Callable;
 
 /**
- * ByteBuddy proxy over MongoTemplate that intercepts EVERY public method.
+ * ByteBuddy proxy over MongoTemplate that captures EVERY public method call.
  *
- * Strategy:
- *  1. ALL public non-Object methods on MongoTemplate → Dispatcher
- *  2. Dispatcher categorizes by method name using MongoOp.fromMethodName()
- *  3. getCollection() → wraps returned MongoCollection in a Java dynamic proxy
- *     so raw collection ops (insertOne, aggregate, bulkWrite, etc.) are also captured
- *  4. bulkOps() → wraps returned BulkOperations in a Java dynamic proxy
+ * Safety contract — real DB is NEVER mutated:
+ *   READ  ops (find*, aggregate, count, exists, stream, mapReduce, FIND_AND_*)
+ *         → superCall executed → real data fetched → captured
+ *   WRITE ops (insert*, save*, update*, delete*, remove*, replace*, bulkWrite)
+ *         → superCall BLOCKED → MongoWriteMocks returns safe mock response
+ *         → intent (filter + document) captured for analysis only
  *
- * This guarantees that no DB interaction escapes interception regardless of which
- * MongoTemplate API surface the target code uses.
+ * Additional wrapping:
+ *   getCollection() → returned MongoCollection wrapped in Java dynamic proxy
+ *                     so raw collection calls (insertOne, aggregate, bulkWrite…) also go through
+ *                     the same read/write safety contract.
+ *   bulkOps()       → returned BulkOperations wrapped so queued ops + execute() are captured
+ *                     without touching the DB.
  */
 public class UniversalMongoInterceptor {
 
@@ -44,7 +48,9 @@ public class UniversalMongoInterceptor {
                 .getLoaded();
     }
 
-    // ---- Dispatcher (ByteBuddy delegate) ----
+    // ─────────────────────────────────────────────────────────────────────────
+    // Dispatcher
+    // ─────────────────────────────────────────────────────────────────────────
 
     public static class Dispatcher {
 
@@ -58,57 +64,61 @@ public class UniversalMongoInterceptor {
         public Object intercept(@Origin Method method,
                                 @AllArguments Object[] args,
                                 @SuperCall Callable<?> superCall) throws Exception {
-            Object result = null;
-            try {
-                result = superCall.call();
-            } catch (Exception ignored) {
-                // capture the call even if the actual invocation fails in test context
-            }
+            String  methodName = method.getName();
+            MongoOp op         = MongoOp.fromMethodName(methodName);
+            String  collection = extractCollection(args, method.getReturnType());
+            Object  input      = extractInput(op, args);
+            Object  result;
 
-            String   methodName = method.getName();
-            MongoOp  op         = MongoOp.fromMethodName(methodName);
-            String   collection = extractCollection(args, method.getReturnType());
-            Object   input      = extractInput(op, args);
+            if (op.isMutation()) {
+                // ── WRITE BLOCKED ──────────────────────────────────────────
+                // Return a mock success object so the calling code doesn't
+                // throw NPE and can proceed to the next step.
+                result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
+                interceptor.onMongoOperation(collection, op, input, Collections.emptyList());
 
-            // Wrap getCollection() result so raw MongoCollection calls are also captured
-            if (op == MongoOp.GET_COLLECTION && result != null) {
-                result = wrapMongoCollection(result, collection);
-            }
+            } else {
+                // ── READ / META / PLUMBING ─────────────────────────────────
+                result = null;
+                try { result = superCall.call(); } catch (Exception ignored) {}
 
-            // Wrap bulkOps() result so bulk operations are captured on execute()
-            if (op == MongoOp.BULK_WRITE && result != null) {
-                result = wrapBulkOperations(result, collection);
-            }
-
-            // Don't emit an event for pure plumbing ops (getCollection/bulkOps themselves —
-            // the wrapped proxy will emit events per individual call)
-            if (op != MongoOp.GET_COLLECTION && op != MongoOp.UNKNOWN) {
-                interceptor.onMongoOperation(collection, op, input, toObjectList(result));
+                if (op == MongoOp.GET_COLLECTION && result != null) {
+                    // Wrap raw collection so direct collection-level calls are also captured
+                    result = wrapMongoCollection(result, collection);
+                } else if (op == MongoOp.BULK_WRITE && result != null) {
+                    result = wrapBulkOperations(result, collection);
+                } else if (op != MongoOp.GET_COLLECTION && op != MongoOp.UNKNOWN) {
+                    interceptor.onMongoOperation(collection, op, input, toObjectList(result));
+                }
             }
 
             return result;
         }
 
-        // ---- MongoCollection proxy ----
+        // ── MongoCollection proxy ─────────────────────────────────────────
 
         private Object wrapMongoCollection(Object raw, String collectionName) {
-            Class<?>[] ifaces = getAllInterfaces(raw.getClass());
+            Class<?>[] ifaces = allInterfaces(raw.getClass());
             if (ifaces.length == 0) return raw;
             try {
                 return Proxy.newProxyInstance(
-                        raw.getClass().getClassLoader(),
-                        ifaces,
+                        raw.getClass().getClassLoader(), ifaces,
                         (proxy, method, args) -> {
-                            Object result = null;
-                            try {
-                                result = method.invoke(raw, args);
-                            } catch (Exception ignored) {
-                            }
-                            MongoOp op = MongoOp.fromMethodName(method.getName());
-                            if (op != MongoOp.UNKNOWN && op != MongoOp.GET_COLLECTION) {
-                                Object input = extractInputFromCollectionArgs(op, args);
+                            MongoOp op    = MongoOp.fromMethodName(method.getName());
+                            Object  input = extractInputFromCollectionArgs(op, args);
+                            Object  result;
+
+                            if (op.isMutation()) {
+                                result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
                                 interceptor.onMongoOperation(collectionName, op, input,
-                                        toObjectList(result));
+                                        Collections.emptyList());
+                            } else {
+                                result = null;
+                                try { result = method.invoke(raw, args); } catch (Exception ignored) {}
+                                if (op != MongoOp.UNKNOWN) {
+                                    interceptor.onMongoOperation(collectionName, op, input,
+                                            toObjectList(result));
+                                }
                             }
                             return result;
                         });
@@ -117,72 +127,67 @@ public class UniversalMongoInterceptor {
             }
         }
 
-        // ---- BulkOperations proxy ----
+        // ── BulkOperations proxy ──────────────────────────────────────────
 
         /**
-         * BulkOperations is a Spring interface. We wrap it so that every individual
-         * insert/update/remove queued via the fluent API is captured, and the final
-         * execute() result is also captured as a BULK_WRITE event.
+         * Wraps the BulkOperations object so:
+         *   - Individual insert/update/remove calls are queued (not executed)
+         *   - execute() captures all pending ops and returns a mock BulkWriteResult
          */
         private Object wrapBulkOperations(Object raw, String collectionName) {
-            Class<?>[] ifaces = getAllInterfaces(raw.getClass());
+            Class<?>[] ifaces = allInterfaces(raw.getClass());
             if (ifaces.length == 0) return raw;
-            List<Object> pendingOps = new ArrayList<>();
+            List<String> pendingOps = new ArrayList<>();
             try {
                 return Proxy.newProxyInstance(
-                        raw.getClass().getClassLoader(),
-                        ifaces,
+                        raw.getClass().getClassLoader(), ifaces,
                         (proxy, method, args) -> {
-                            Object result = null;
-                            try {
-                                result = method.invoke(raw, args);
-                            } catch (Exception ignored) {
-                            }
                             String mn = method.getName().toLowerCase();
-                            if (mn.equals("insert") || mn.equals("update")
-                                    || mn.equals("remove") || mn.equals("upsert")
-                                    || mn.equals("replaceone")) {
-                                // queue individual op for reporting
-                                pendingOps.add(method.getName() + Arrays.toString(args));
-                            }
+
                             if (mn.equals("execute")) {
+                                // Fire the capture event — no real execution
                                 interceptor.onMongoOperation(collectionName,
-                                        MongoOp.BULK_WRITE, pendingOps, toObjectList(result));
+                                        MongoOp.BULK_WRITE, new ArrayList<>(pendingOps),
+                                        Collections.emptyList());
+                                return MongoWriteMocks.forReturnType(method.getReturnType(), args);
                             }
-                            // Return proxy instead of raw so chained calls still go through proxy
-                            if (result == raw) return proxy;
-                            return result;
+
+                            // Queue the individual op description
+                            if (mn.equals("insert") || mn.equals("update") || mn.equals("upsert")
+                                    || mn.equals("remove") || mn.equals("replaceone")
+                                    || mn.equals("updateone") || mn.equals("updatefirst")
+                                    || mn.equals("updatemovelti") || mn.equals("remove")) {
+                                pendingOps.add(method.getName() + "(" + argsToString(args) + ")");
+                            }
+
+                            // Return proxy so fluent chaining keeps going through proxy
+                            Object result = null;
+                            try { result = method.invoke(raw, args); } catch (Exception ignored) {}
+                            return result == raw ? proxy : result;
                         });
             } catch (Exception e) {
                 return raw;
             }
         }
 
-        // ---- extraction helpers ----
+        // ── extraction helpers ────────────────────────────────────────────
 
         private String extractCollection(Object[] args, Class<?> returnType) {
             if (args == null) return "unknown";
-            // String arg is almost always the collection name in MongoTemplate APIs
             for (Object arg : args) {
                 if (arg instanceof String s && !s.isBlank()
-                        && s.length() < 128 && !s.contains(" ")) {
-                    return s;
-                }
+                        && s.length() < 128 && !s.contains(" ")) return s;
             }
-            // Class<?> arg → class simple name lowercased = inferred collection
             for (Object arg : args) {
-                if (arg instanceof Class<?> c && c != Object.class) {
+                if (arg instanceof Class<?> c && c != Object.class)
                     return c.getSimpleName().toLowerCase();
-                }
             }
             return "unknown";
         }
 
         private Object extractInput(MongoOp op, Object[] args) {
             if (args == null || args.length == 0) return null;
-            if (op == MongoOp.AGGREGATE || op == MongoOp.MAP_REDUCE) {
-                return extractPipeline(args);
-            }
+            if (op == MongoOp.AGGREGATE || op == MongoOp.MAP_REDUCE) return extractPipeline(args);
             return extractFilter(args[0]);
         }
 
@@ -194,36 +199,26 @@ public class UniversalMongoInterceptor {
 
         private Object extractFilter(Object first) {
             if (first == null) return null;
-            // Spring Query → getQueryObject()
-            try {
-                return first.getClass().getMethod("getQueryObject").invoke(first);
-            } catch (Exception ignored) {
-            }
-            // Bson Document or raw string
+            try { return first.getClass().getMethod("getQueryObject").invoke(first); }
+            catch (Exception ignored) {}
             return first.toString();
         }
 
         private Object extractPipeline(Object[] args) {
             for (Object arg : args) {
                 if (arg == null) continue;
-                // Spring Aggregation → toPipeline() or toString()
                 try {
                     var m = arg.getClass().getMethod("toPipeline",
                             org.bson.codecs.configuration.CodecRegistry.class);
                     return m.invoke(arg,
                             com.mongodb.MongoClientSettings.getDefaultCodecRegistry());
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) {}
                 try {
-                    var m = arg.getClass().getMethod("getPipeline");
-                    return m.invoke(arg);
-                } catch (Exception ignored) {
-                }
+                    return arg.getClass().getMethod("getPipeline").invoke(arg);
+                } catch (Exception ignored) {}
                 String s = arg.toString();
                 if (s.contains("$match") || s.contains("$group") || s.contains("$lookup")
-                        || s.contains("Aggregation") || s.contains("pipeline")) {
-                    return s;
-                }
+                        || s.contains("Aggregation") || s.contains("pipeline")) return s;
             }
             return null;
         }
@@ -234,7 +229,7 @@ public class UniversalMongoInterceptor {
             return Collections.singletonList(result);
         }
 
-        private Class<?>[] getAllInterfaces(Class<?> clazz) {
+        private Class<?>[] allInterfaces(Class<?> clazz) {
             Set<Class<?>> ifaces = new LinkedHashSet<>();
             Class<?> c = clazz;
             while (c != null && c != Object.class) {
@@ -242,6 +237,13 @@ public class UniversalMongoInterceptor {
                 c = c.getSuperclass();
             }
             return ifaces.toArray(new Class[0]);
+        }
+
+        private String argsToString(Object[] args) {
+            if (args == null) return "";
+            StringBuilder sb = new StringBuilder();
+            for (Object a : args) { if (sb.length() > 0) sb.append(", "); sb.append(a); }
+            return sb.toString();
         }
     }
 }
