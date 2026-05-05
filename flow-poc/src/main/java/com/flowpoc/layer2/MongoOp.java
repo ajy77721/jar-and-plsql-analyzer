@@ -118,4 +118,18 @@ public enum MongoOp {
                 || this == FIND_DISTINCT || this == AGGREGATE || this == MAP_REDUCE
                 || this == COUNT;
     }
+
+    /**
+     * True for write ops whose first argument is a FILTER (not a document to insert).
+     * Used to decide whether pre-seeding the shadow store makes sense:
+     *   UPDATE / DELETE / UPSERT → have a filter → pre-seed to find matching real docs
+     *   INSERT / SAVE / REPLACE  → first arg is the new document → no pre-seed
+     */
+    public boolean isFilterWrite() {
+        return switch (this) {
+            case UPDATE, UPDATE_MANY, UPSERT,
+                 DELETE, DELETE_MANY, FIND_ALL_AND_REMOVE -> true;
+            default -> false;
+        };
+    }
 }

@@ -85,12 +85,13 @@ public class PocRunner {
 
         // 5. Layer 2: dynamic execution to capture bound queries
         if (config.isLayer2Enabled() && config.getJarFilePath() != null) {
+            // preReadClient may be null when Mongo is not configured — that's fine,
+            // pre-seeding is simply skipped and impact counts stay 0.
+            var preReadClient = config.isEnableMongo() && config.getMongoUri() != null
+                    ? MongoClients.create(config.getMongoUri()) : null;
             try {
                 JarClassLoader jarClassLoader = new JarClassLoader(new File(config.getJarFilePath()));
                 CollectingQueryInterceptor queryInterceptor = new CollectingQueryInterceptor();
-                // Pass real MongoClient so the interceptor can pre-seed shadow before writes
-                var preReadClient = config.isEnableMongo() && config.getMongoUri() != null
-                        ? MongoClients.create(config.getMongoUri()) : null;
                 BeanFactoryLoader bfl = new BeanFactoryLoader(
                         jarClassLoader, Collections.emptyList(), queryInterceptor,
                         preReadClient, config.getMongoDatabase());
@@ -98,8 +99,9 @@ public class PocRunner {
                 for (FlowResult r : results) {
                     executor.execute(r);
                 }
-                if (preReadClient != null) preReadClient.close();
             } catch (Exception ignored) {
+            } finally {
+                if (preReadClient != null) preReadClient.close();
             }
         }
 

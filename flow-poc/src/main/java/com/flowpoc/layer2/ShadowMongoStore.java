@@ -4,7 +4,6 @@ import org.bson.Document;
 
 import java.lang.reflect.Method;
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 /**
@@ -12,13 +11,12 @@ import java.util.stream.Collectors;
  * single flow execution without ever touching the real database.
  *
  * Architecture:
- *   ShadowFilterMatcher    – evaluates full MongoDB filter operators ($gt/$in/$and/$or/…)
- *   ShadowUpdateApplier    – applies all update operators ($set/$inc/$push/$pull/…)
+ *   ShadowFilterMatcher       – evaluates full MongoDB filter operators ($gt/$in/$and/$or/…)
+ *   ShadowUpdateApplier       – applies all update operators ($set/$inc/$push/$pull/…)
  *   ShadowAggregationExecutor – runs full pipeline stages ($match/$group/$sort/$lookup/…)
  *
- * Lifecycle contract:
- *   clear()    – remove captured calls only (between steps — shadow data persists)
- *   clearAll() – wipe everything including shadow docs (between FlowResult executions)
+ * Lifecycle (managed by CollectingQueryInterceptor):
+ *   clear()    – wipes all in-memory documents; called between FlowResult executions
  */
 public class ShadowMongoStore {
 
@@ -89,7 +87,7 @@ public class ShadowMongoStore {
                 .collect(Collectors.toList());
     }
 
-    public boolean hasCollection(String collection) {
+    public synchronized boolean hasCollection(String collection) {
         List<Document> docs = store.get(collection);
         return docs != null && !docs.isEmpty();
     }

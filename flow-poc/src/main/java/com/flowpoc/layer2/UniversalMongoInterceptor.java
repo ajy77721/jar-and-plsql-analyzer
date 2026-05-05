@@ -95,8 +95,10 @@ public class UniversalMongoInterceptor {
 
             if (op.isMutation()) {
                 // ── WRITE BLOCKED — pre-seed shadow, apply locally, record impact ──
-                Document filterDoc = toFilterDoc(input);
-                preSeedIfNeeded(collection, filterDoc);
+                // Only pre-seed for ops that have a real filter (UPDATE/DELETE).
+                // INSERT/SAVE input is the new document, not a filter — skip pre-seed.
+                Document filterDoc = op.isFilterWrite() ? toFilterDoc(input) : null;
+                if (filterDoc != null) preSeedIfNeeded(collection, filterDoc);
 
                 ShadowMongoStore.WriteImpact impact =
                         shadow.applyWriteWithImpact(op, collection, input, args);
@@ -150,12 +152,17 @@ public class UniversalMongoInterceptor {
             } catch (Exception ignored) {}
         }
 
+        @SuppressWarnings("unchecked")
         private Document toFilterDoc(Object input) {
             if (input instanceof Document d) return d;
             if (input instanceof Map<?,?> m) {
                 Document doc = new Document();
                 m.forEach((k, v) -> doc.put(String.valueOf(k), v));
                 return doc;
+            }
+            // Spring Data Query.toString() produces JSON-like text — try to parse it
+            if (input instanceof String s && !s.isBlank()) {
+                try { return Document.parse(s); } catch (Exception ignored) {}
             }
             return null;
         }
@@ -198,8 +205,8 @@ public class UniversalMongoInterceptor {
                             Object  result;
 
                             if (op.isMutation()) {
-                                Document filterDoc = toFilterDoc(input);
-                                preSeedIfNeeded(collectionName, filterDoc);
+                                Document filterDoc = op.isFilterWrite() ? toFilterDoc(input) : null;
+                                if (filterDoc != null) preSeedIfNeeded(collectionName, filterDoc);
                                 ShadowMongoStore.WriteImpact impact =
                                         shadow.applyWriteWithImpact(op, collectionName, input, args);
                                 result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
