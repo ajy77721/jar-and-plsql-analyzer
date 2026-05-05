@@ -843,3 +843,15 @@ data/
 | [`docs/manual-jar-analyzer.md`](docs/manual-jar-analyzer.md) | JAR Analyzer complete user manual |
 | [`docs/manual-parser.md`](docs/manual-parser.md) | PL/SQL Parser Analyzer complete user manual |
 | [`docs/manual-properties.md`](docs/manual-properties.md) | Full `application.properties` reference |
+
+
+<img width="1728" height="968" alt="Screenshot 2026-05-05 at 10 40 39 AM" src="https://github.com/user-attachments/assets/e59433d7-a68c-4db9-993c-a4a3800f82ea" />
+
+
+<img width="1718" height="960" alt="Screenshot 2026-05-05 at 10 40 56 AM" src="https://github.com/user-attachments/assets/467371aa-8bab-4349-bdd3-db32caafe7d9" />
+
+<img width="1722" height="940" alt="Screenshot 2026-05-05 at 10 41 17 AM" src="https://github.com/user-attachments/assets/8323af61-334e-4d0f-9a35-60a3cdbe7794" />
+
+<img width="1718" height="934" alt="Screenshot 2026-05-05 at 10 41 28 AM" src="https://github.com/user-attachments/assets/a815a265-bc31-49d1-910e-b43c1bd1b58a" />
+
+<img width="3434" height="1896" alt="image" src="https://github.com/user-attachments/assets/134826d8-bba4-4612-a467-8807d9efa229" />
