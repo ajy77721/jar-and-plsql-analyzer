@@ -13,7 +13,7 @@ public class CollectingQueryInterceptor implements QueryInterceptor {
             Object filter,
             String sql,
             List<Object> params,
-            List<Map<String, Object>> results
+            List<Object> results
     ) {}
 
     private final List<CapturedCall> captured = new ArrayList<>();
@@ -37,8 +37,9 @@ public class CollectingQueryInterceptor implements QueryInterceptor {
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public void onSqlQuery(String sql, List<Object> params, List<Map<String, Object>> results) {
-        captured.add(new CapturedCall("SQL", null, null, sql, params, results));
+        captured.add(new CapturedCall("SQL", null, null, sql, params, (List<Object>) (List<?>) results));
     }
 
     public List<CapturedCall> getCaptured() {
