@@ -1,6 +1,7 @@
 package com.flowpoc.layer2;
 
 import com.jaranalyzer.model.ClassInfo;
+import com.mongodb.client.MongoClient;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.context.support.GenericApplicationContext;
 
@@ -8,16 +9,29 @@ import java.util.List;
 
 public class BeanFactoryLoader {
 
-    private final JarClassLoader jarClassLoader;
-    private final List<ClassInfo> classInfos;
+    private final JarClassLoader             jarClassLoader;
+    private final List<ClassInfo>            classInfos;
     private final CollectingQueryInterceptor queryInterceptor;
+    private final MongoClient                realClient;
+    private final String                     realDbName;
 
+    /** Minimal constructor — no real-DB pre-seeding for writes. */
     public BeanFactoryLoader(JarClassLoader jarClassLoader,
                              List<ClassInfo> classInfos,
                              CollectingQueryInterceptor queryInterceptor) {
+        this(jarClassLoader, classInfos, queryInterceptor, null, null);
+    }
+
+    /** Full constructor — realClient/realDbName enable fetch-before-mutate pre-seeding. */
+    public BeanFactoryLoader(JarClassLoader jarClassLoader,
+                             List<ClassInfo> classInfos,
+                             CollectingQueryInterceptor queryInterceptor,
+                             MongoClient realClient, String realDbName) {
         this.jarClassLoader   = jarClassLoader;
         this.classInfos       = classInfos;
         this.queryInterceptor = queryInterceptor;
+        this.realClient       = realClient;
+        this.realDbName       = realDbName;
     }
 
     public GenericApplicationContext buildContext() {
@@ -51,7 +65,7 @@ public class BeanFactoryLoader {
                     "org.springframework.data.mongodb.core.MongoTemplate",
                     false, jarClassLoader.getClassLoader());
             UniversalMongoInterceptor interceptorFactory =
-                    new UniversalMongoInterceptor(queryInterceptor);
+                    new UniversalMongoInterceptor(queryInterceptor, realClient, realDbName);
             Class<?> proxyClass = interceptorFactory.buildProxyClass(mongoTemplateClass);
             context.registerBeanDefinition("mongoTemplate",
                     BeanDefinitionBuilder.genericBeanDefinition(proxyClass)

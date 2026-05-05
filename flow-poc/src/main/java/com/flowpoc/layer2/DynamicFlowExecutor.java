@@ -262,8 +262,12 @@ public class DynamicFlowExecutor {
         String inp = call.input() != null ? call.input().toString() : "{}";
         if (call.mongoOp() == MongoOp.AGGREGATE)
             return "[DYNAMIC:AGGREGATE] " + col + " PIPELINE " + inp;
-        if (call.mongoOp().isMutation())
-            return "[DYNAMIC:WRITE-BLOCKED:" + op + "] " + col + " INTENT " + inp;
+        if (call.mongoOp().isMutation()) {
+            String impact = call.hasImpact()
+                    ? " IMPACT=" + call.impactCount() + " docs"
+                    : " IMPACT=unknown (no real DB)";
+            return "[DYNAMIC:WRITE-BLOCKED:" + op + "] " + col + " INTENT " + inp + impact;
+        }
         return "[DYNAMIC:" + op + "] " + col + " INPUT " + inp;
     }
 

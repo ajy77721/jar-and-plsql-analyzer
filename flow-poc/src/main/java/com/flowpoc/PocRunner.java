@@ -88,12 +88,17 @@ public class PocRunner {
             try {
                 JarClassLoader jarClassLoader = new JarClassLoader(new File(config.getJarFilePath()));
                 CollectingQueryInterceptor queryInterceptor = new CollectingQueryInterceptor();
+                // Pass real MongoClient so the interceptor can pre-seed shadow before writes
+                var preReadClient = config.isEnableMongo() && config.getMongoUri() != null
+                        ? MongoClients.create(config.getMongoUri()) : null;
                 BeanFactoryLoader bfl = new BeanFactoryLoader(
-                        jarClassLoader, Collections.emptyList(), queryInterceptor);
+                        jarClassLoader, Collections.emptyList(), queryInterceptor,
+                        preReadClient, config.getMongoDatabase());
                 DynamicFlowExecutor executor = new DynamicFlowExecutor(bfl, queryInterceptor, config);
                 for (FlowResult r : results) {
                     executor.execute(r);
                 }
+                if (preReadClient != null) preReadClient.close();
             } catch (Exception ignored) {
             }
         }

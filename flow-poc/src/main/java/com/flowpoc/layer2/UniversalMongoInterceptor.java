@@ -1,40 +1,55 @@
 package com.flowpoc.layer2;
 
+import com.mongodb.client.MongoClient;
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.implementation.MethodDelegation;
 import net.bytebuddy.implementation.bind.annotation.*;
 import net.bytebuddy.matcher.ElementMatchers;
+import org.bson.Document;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.*;
-import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
  * ByteBuddy proxy over MongoTemplate that captures EVERY public method call.
  *
  * Safety contract — real DB is NEVER mutated:
- *   READ  ops (find*, aggregate, count, exists, stream, mapReduce, FIND_AND_*)
- *         → superCall executed → real data fetched → captured
- *   WRITE ops (insert*, save*, update*, delete*, remove*, replace*, bulkWrite)
- *         → superCall BLOCKED → MongoWriteMocks returns safe mock response
- *         → intent (filter + document) captured for analysis only
+ *   READ  ops → superCall executed → real data fetched → shadow-first (shadow → real DB fallback)
+ *   WRITE ops → superCall BLOCKED → MongoWriteMocks returns safe mock response
+ *               BEFORE blocking: matching real-DB docs are cloned into shadow so
+ *               subsequent reads in the same flow see the post-write state.
+ *               Impact count (matched doc count) is recorded in CapturedCall.
  *
- * Additional wrapping:
- *   getCollection() → returned MongoCollection wrapped in Java dynamic proxy
- *                     so raw collection calls (insertOne, aggregate, bulkWrite…) also go through
- *                     the same read/write safety contract.
- *   bulkOps()       → returned BulkOperations wrapped so queued ops + execute() are captured
- *                     without touching the DB.
+ * Pre-seed (fetch-before-mutate):
+ *   When a write arrives and no shadow docs match the filter, the interceptor
+ *   queries the REAL DB with that filter, seeds the results into shadow, then
+ *   applies the write.  This means:
+ *     • impactCount on the CapturedCall = real docs that would have been touched
+ *     • snapshotBefore = copies of those docs pre-mutation (for test-data gen)
+ *     • shadow holds the post-write state for downstream reads in the same flow
+ *
+ * Real DB access for pre-seeding is optional: pass a non-null MongoClient to
+ * the constructor.  Without it the engine still works — writes buffer in shadow
+ * but impact count stays 0 and pre-seeding is skipped.
  */
 public class UniversalMongoInterceptor {
 
     private final CollectingQueryInterceptor interceptor;
+    private final MongoClient                realClient;
+    private final String                     realDbName;
 
     public UniversalMongoInterceptor(CollectingQueryInterceptor interceptor) {
+        this(interceptor, null, null);
+    }
+
+    public UniversalMongoInterceptor(CollectingQueryInterceptor interceptor,
+                                     MongoClient realClient, String realDbName) {
         this.interceptor = interceptor;
+        this.realClient  = realClient;
+        this.realDbName  = realDbName;
     }
 
     public Class<?> buildProxyClass(Class<?> mongoTemplateClass) {
@@ -42,7 +57,7 @@ public class UniversalMongoInterceptor {
                 .subclass(mongoTemplateClass)
                 .method(ElementMatchers.isPublic()
                         .and(ElementMatchers.not(ElementMatchers.isDeclaredBy(Object.class))))
-                .intercept(MethodDelegation.to(new Dispatcher(interceptor)))
+                .intercept(MethodDelegation.to(new Dispatcher(interceptor, realClient, realDbName)))
                 .make()
                 .load(mongoTemplateClass.getClassLoader(),
                         ClassLoadingStrategy.Default.WRAPPER)
@@ -57,10 +72,15 @@ public class UniversalMongoInterceptor {
 
         private final CollectingQueryInterceptor interceptor;
         private final ShadowMongoStore           shadow;
+        private final MongoClient                realClient;
+        private final String                     realDbName;
 
-        public Dispatcher(CollectingQueryInterceptor interceptor) {
+        public Dispatcher(CollectingQueryInterceptor interceptor,
+                          MongoClient realClient, String realDbName) {
             this.interceptor = interceptor;
             this.shadow      = interceptor.getShadowStore();
+            this.realClient  = realClient;
+            this.realDbName  = realDbName;
         }
 
         @RuntimeType
@@ -74,10 +94,15 @@ public class UniversalMongoInterceptor {
             Object  result;
 
             if (op.isMutation()) {
-                // ── WRITE BLOCKED — stored in shadow, never sent to real DB ──
-                shadow.applyWrite(op, collection, input, args);
+                // ── WRITE BLOCKED — pre-seed shadow, apply locally, record impact ──
+                Document filterDoc = toFilterDoc(input);
+                preSeedIfNeeded(collection, filterDoc);
+
+                ShadowMongoStore.WriteImpact impact =
+                        shadow.applyWriteWithImpact(op, collection, input, args);
+
                 result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
-                interceptor.onMongoOperation(collection, op, input, Collections.emptyList());
+                interceptor.onMongoWrite(collection, op, input, impact);
 
             } else if (op.isFetchable()) {
                 // ── READ — shadow store first, real DB as fallback ────────────
@@ -99,6 +124,40 @@ public class UniversalMongoInterceptor {
             }
 
             return result;
+        }
+
+        // ── Pre-seed: clone real docs into shadow before applying a write ──
+
+        /**
+         * If shadow has no documents matching filterDoc for this collection,
+         * fetch matching docs from the real DB and seed them into shadow.
+         * This ensures:
+         *   1. applyWriteWithImpact() can find and count the affected docs
+         *   2. subsequent reads in the same flow return the post-write state
+         */
+        private void preSeedIfNeeded(String collection, Document filterDoc) {
+            if (realClient == null || realDbName == null) return;
+            try {
+                long shadowMatches = shadow.countMatching(collection, filterDoc);
+                if (shadowMatches == 0) {
+                    var col = realClient.getDatabase(realDbName).getCollection(collection);
+                    var cursor = (filterDoc != null && !filterDoc.isEmpty())
+                            ? col.find(filterDoc) : col.find();
+                    List<Document> docs = new ArrayList<>();
+                    cursor.limit(200).forEach(docs::add);
+                    if (!docs.isEmpty()) shadow.seedCollection(collection, docs);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        private Document toFilterDoc(Object input) {
+            if (input instanceof Document d) return d;
+            if (input instanceof Map<?,?> m) {
+                Document doc = new Document();
+                m.forEach((k, v) -> doc.put(String.valueOf(k), v));
+                return doc;
+            }
+            return null;
         }
 
         // ── Shadow-first read helper ──────────────────────────────────────
@@ -139,11 +198,12 @@ public class UniversalMongoInterceptor {
                             Object  result;
 
                             if (op.isMutation()) {
-                                // Same safety contract: shadow-buffer write, return mock
-                                shadow.applyWrite(op, collectionName, input, args);
+                                Document filterDoc = toFilterDoc(input);
+                                preSeedIfNeeded(collectionName, filterDoc);
+                                ShadowMongoStore.WriteImpact impact =
+                                        shadow.applyWriteWithImpact(op, collectionName, input, args);
                                 result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
-                                interceptor.onMongoOperation(collectionName, op, input,
-                                        Collections.emptyList());
+                                interceptor.onMongoWrite(collectionName, op, input, impact);
                             } else if (op.isFetchable()) {
                                 final Object[] finalArgs = args;
                                 result = shadowFirst(op, collectionName, input,
@@ -167,11 +227,6 @@ public class UniversalMongoInterceptor {
 
         // ── BulkOperations proxy ──────────────────────────────────────────
 
-        /**
-         * Wraps the BulkOperations object so:
-         *   - Individual insert/update/remove calls are queued (not executed)
-         *   - execute() captures all pending ops and returns a mock BulkWriteResult
-         */
         private Object wrapBulkOperations(Object raw, String collectionName) {
             Class<?>[] ifaces = allInterfaces(raw.getClass());
             if (ifaces.length == 0) return raw;
@@ -183,14 +238,12 @@ public class UniversalMongoInterceptor {
                             String mn = method.getName().toLowerCase();
 
                             if (mn.equals("execute")) {
-                                // Fire the capture event — no real execution
                                 interceptor.onMongoOperation(collectionName,
                                         MongoOp.BULK_WRITE, new ArrayList<>(pendingOps),
                                         Collections.emptyList());
                                 return MongoWriteMocks.forReturnType(method.getReturnType(), args);
                             }
 
-                            // Queue the individual op description
                             if (mn.equals("insert") || mn.equals("update") || mn.equals("upsert")
                                     || mn.equals("remove") || mn.equals("replaceone")
                                     || mn.equals("updateone") || mn.equals("updatefirst")
@@ -198,7 +251,6 @@ public class UniversalMongoInterceptor {
                                 pendingOps.add(method.getName() + "(" + argsToString(args) + ")");
                             }
 
-                            // Return proxy so fluent chaining keeps going through proxy
                             Object result = null;
                             try { result = method.invoke(raw, args); } catch (Exception ignored) {}
                             return result == raw ? proxy : result;

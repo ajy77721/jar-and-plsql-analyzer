@@ -94,6 +94,57 @@ public class ShadowMongoStore {
         return docs != null && !docs.isEmpty();
     }
 
+    // ── WriteImpact ───────────────────────────────────────────────────────────
+
+    /**
+     * Describes the real-DB impact of a blocked write operation.
+     *
+     * matchedCount – how many documents in shadow (pre-seeded from real DB) matched the filter
+     * snapshotBefore – copies of those documents BEFORE the write was applied
+     */
+    public record WriteImpact(long matchedCount, List<Document> snapshotBefore) {
+        public static WriteImpact none() { return new WriteImpact(0, Collections.emptyList()); }
+    }
+
+    /**
+     * Seeds real-DB documents into the shadow without overwriting any document
+     * already present (identified by _id).  Called by the interceptor before
+     * applying a write so subsequent reads see the post-write state.
+     */
+    public synchronized void seedCollection(String collection, List<Document> docs) {
+        List<Document> coll = store.computeIfAbsent(collection, k -> new ArrayList<>());
+        for (Document doc : docs) {
+            Object id = doc.get("_id");
+            boolean exists = coll.stream().anyMatch(d -> Objects.equals(d.get("_id"), id));
+            if (!exists) coll.add(new Document(doc));
+        }
+    }
+
+    /** Returns how many shadow documents match filter (0 when collection absent). */
+    public synchronized long countMatching(String collection, Object filter) {
+        List<Document> docs = store.get(collection);
+        if (docs == null) return 0L;
+        return docs.stream().filter(d -> matcher.matches(d, filter)).count();
+    }
+
+    /**
+     * Applies the write to shadow and returns a WriteImpact describing which
+     * documents were touched.  Use this instead of applyWrite() when the caller
+     * needs the impact count (e.g. the interceptor pre-read path).
+     */
+    public synchronized WriteImpact applyWriteWithImpact(MongoOp op, String collection,
+                                                          Object input, Object[] args) {
+        return switch (op) {
+            case UPDATE      -> applyUpdateImpact(collection, input, args, false, false);
+            case UPDATE_MANY -> applyUpdateImpact(collection, input, args, true,  false);
+            case UPSERT      -> applyUpdateImpact(collection, input, args, false, true);
+            case DELETE      -> applyDeleteImpact(collection, input, false);
+            case DELETE_MANY,
+                 FIND_ALL_AND_REMOVE -> applyDeleteImpact(collection, input, true);
+            default -> { applyWrite(op, collection, input, args); yield WriteImpact.none(); }
+        };
+    }
+
     public synchronized void clear() {
         store.clear();
     }
@@ -177,6 +228,47 @@ public class ShadowMongoStore {
                 if (!multi) return;
             }
         }
+    }
+
+    private WriteImpact applyUpdateImpact(String collection, Object filterInput, Object[] args,
+                                          boolean multi, boolean upsert) {
+        Document filter     = toDocument(filterInput);
+        Document updateSpec = args != null && args.length > 1 ? toDocument(args[1]) : null;
+        List<Document> docs = store.getOrDefault(collection, Collections.emptyList());
+        List<Document> snapshots = new ArrayList<>();
+
+        for (Document doc : docs) {
+            if (matcher.matches(doc, filter)) {
+                snapshots.add(new Document(doc));   // snapshot before mutation
+                updater.apply(doc, updateSpec);
+                if (!multi) break;
+            }
+        }
+
+        if (snapshots.isEmpty() && upsert) {
+            Document newDoc = filter != null ? new Document(filter) : new Document();
+            updater.apply(newDoc, updateSpec);
+            storeOne(collection, newDoc);
+        }
+
+        return new WriteImpact(snapshots.size(), snapshots);
+    }
+
+    private WriteImpact applyDeleteImpact(String collection, Object filterInput, boolean multi) {
+        List<Document> docs = store.get(collection);
+        if (docs == null) return WriteImpact.none();
+        Document filter = toDocument(filterInput);
+        List<Document> removed = new ArrayList<>();
+        Iterator<Document> it = docs.iterator();
+        while (it.hasNext()) {
+            Document doc = it.next();
+            if (matcher.matches(doc, filter)) {
+                removed.add(new Document(doc));
+                it.remove();
+                if (!multi) break;
+            }
+        }
+        return new WriteImpact(removed.size(), removed);
     }
 
     @SuppressWarnings("unchecked")
