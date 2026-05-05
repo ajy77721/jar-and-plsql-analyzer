@@ -41,9 +41,12 @@ public class AnalyzerPipeline {
 
         /** Default MongoDB-focused pipeline. */
         public Builder withMongoDefaults() {
-            return add(new MongoMissingIndexAnalyzer())
+            return add(new QueryClassificationAnalyzer())
+                    .add(new HierarchyFlowAnalyzer())
+                    .add(new MongoMissingIndexAnalyzer())
                     .add(new NplusOneAnalyzer())
-                    .add(new BulkOperationAnalyzer());
+                    .add(new BulkOperationAnalyzer())
+                    .add(new AggregationRewriteAnalyzer());
         }
 
         public AnalyzerPipeline build() { return new AnalyzerPipeline(this); }

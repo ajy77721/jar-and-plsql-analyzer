@@ -42,12 +42,13 @@ public class BulkOperationAnalyzer implements OptimizationAnalyzer {
             if (steps.size() < 2) continue;
             FlowStep first = steps.get(0);
             findings.add(new OptimizationFinding(
-                    OptimizationFinding.Category.BULK_WRITE,
+                    OptimizationFinding.Category.BULK_WRITE, OptimizationFinding.Severity.MEDIUM,
                     entry.getKey(), null,
                     steps.size() + " write operations on '" + entry.getKey()
                             + "' in this flow — consolidate into insertMany / bulkWrite",
                     first.getClassName() + "." + first.getMethodName(),
-                    steps.size() + " writes to " + entry.getKey()));
+                    steps.size() + " writes to " + entry.getKey(),
+                    "Replace individual inserts with: mongoTemplate.insertAll(List.of(doc1, doc2, ...)) or bulkOps.insert(...).execute()"));
         }
         return findings;
     }
@@ -72,13 +73,14 @@ public class BulkOperationAnalyzer implements OptimizationAnalyzer {
                 List<ExtractedQuery> queries = de.getValue();
                 if (queries.size() < 2) continue;
                 findings.add(new OptimizationFinding(
-                        OptimizationFinding.Category.BULK_READ,
+                        OptimizationFinding.Category.BULK_READ, OptimizationFinding.Severity.MEDIUM,
                         ce.getKey(), null,
                         queries.size() + " separate FIND operations on '" + ce.getKey()
                                 + "' at depth " + de.getKey()
                                 + " — consider $in query or single aggregation pipeline",
                         ce.getKey(),
-                        queries.size() + " FINDs on " + ce.getKey()));
+                        queries.size() + " FINDs on " + ce.getKey(),
+                        "Replace separate FINDs with: mongoTemplate.find(Query.query(Criteria.where(\"field\").in(val1, val2)), ...)"));
             }
         }
         return findings;
@@ -108,12 +110,13 @@ public class BulkOperationAnalyzer implements OptimizationAnalyzer {
 
             if (bHasIdFilter) {
                 findings.add(new OptimizationFinding(
-                        OptimizationFinding.Category.PREFETCH_CANDIDATE,
+                        OptimizationFinding.Category.PREFETCH_CANDIDATE, OptimizationFinding.Severity.MEDIUM,
                         colA + "+" + colB, null,
                         "'" + colA + "' is fetched then '" + colB + "' is queried by its id — "
                                 + "consider $lookup (single aggregation) or a combined projection",
                         a.getClassName() + " → " + b.getClassName(),
-                        "FIND " + colA + " → FIND " + colB + " by id"));
+                        "FIND " + colA + " → FIND " + colB + " by id",
+                        "db." + colA + ".aggregate([{ $lookup: { from: \"" + colB + "\", localField: \"_id\", foreignField: \"<fk>\", as: \"" + colB + "\" } }])"));
             }
         }
         for (FlowStep child : step.getChildren()) detectPrefetch(child, findings);

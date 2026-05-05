@@ -35,13 +35,14 @@ public class NplusOneAnalyzer implements OptimizationAnalyzer {
             String collection = entry.getKey();
             FlowStep first = steps.get(0);
             findings.add(new OptimizationFinding(
-                    OptimizationFinding.Category.N_PLUS_ONE,
+                    OptimizationFinding.Category.N_PLUS_ONE, OptimizationFinding.Severity.HIGH,
                     collection, null,
                     "Collection '" + collection + "' is queried " + steps.size()
                             + " times across different call depths — possible N+1. "
                             + "Consider $lookup or batch findAllById.",
                     first.getClassName() + "." + first.getMethodName(),
-                    "Repeated FIND on " + collection));
+                    "Repeated FIND on " + collection,
+                    "Replace repeated FIND with: db." + collection + ".aggregate([{ $lookup: { from: \"<child>\", localField: \"_id\", foreignField: \"<fk>\", as: \"items\" } }])"));
         }
         return findings;
     }

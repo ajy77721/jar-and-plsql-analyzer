@@ -10,6 +10,9 @@ public class ExtractedQuery {
 
     public enum QueryType { SELECT, INSERT, UPDATE, DELETE, CALL, UNKNOWN }
 
+    /** Whether this query's result is stable (cacheable) or depends on request context. */
+    public enum DataClass { STATIC, TRANSACTIONAL, UNKNOWN }
+
     private final String rawSql;
     private final QueryType type;
     private final String tableName;          // primary table (best-effort)
@@ -20,6 +23,8 @@ public class ExtractedQuery {
 
     // set when the operation is a MongoDB aggregation pipeline
     private String aggregationPipeline;
+
+    private DataClass dataClass = DataClass.UNKNOWN;
 
     // set during data-fetch phase
     private List<java.util.Map<String, Object>> fetchedSample;
@@ -44,6 +49,9 @@ public class ExtractedQuery {
     public boolean isAggregation()                              { return aggregationPipeline != null; }
     public String  getAggregationPipeline()                     { return aggregationPipeline; }
     public void    setAggregationPipeline(String p)             { this.aggregationPipeline = p; }
+
+    public DataClass getDataClass()           { return dataClass; }
+    public void setDataClass(DataClass dc)    { this.dataClass = dc; }
 
     public List<java.util.Map<String, Object>> getFetchedSample() { return fetchedSample; }
     public void setFetchedSample(List<java.util.Map<String, Object>> s) { this.fetchedSample = s; }

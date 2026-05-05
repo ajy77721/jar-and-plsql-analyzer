@@ -32,10 +32,11 @@ public class MongoMissingIndexAnalyzer implements OptimizationAnalyzer {
                 // No filter at all → full collection scan
                 if (eq.getPredicates().isEmpty()) {
                     findings.add(new OptimizationFinding(
-                            OptimizationFinding.Category.FULL_TABLE_SCAN,
+                            OptimizationFinding.Category.FULL_TABLE_SCAN, OptimizationFinding.Severity.HIGH,
                             table, null,
                             "FIND with no filter — full collection scan on " + table,
-                            location, eq.getRawSql()));
+                            location, eq.getRawSql(),
+                            "Add a filter predicate or paginate with .limit(n)"));
                     continue;
                 }
 
@@ -44,11 +45,12 @@ public class MongoMissingIndexAnalyzer implements OptimizationAnalyzer {
                     if (col == null || AUTO_INDEXED.contains(col.toLowerCase())) continue;
 
                     findings.add(new OptimizationFinding(
-                            OptimizationFinding.Category.MISSING_INDEX,
+                            OptimizationFinding.Category.MISSING_INDEX, OptimizationFinding.Severity.MEDIUM,
                             table, col,
                             "Field '" + col + "' used in FIND predicate — verify index exists on "
                                     + table + "." + col,
-                            location, eq.getRawSql()));
+                            location, eq.getRawSql(),
+                            "db." + table + ".createIndex({ " + col + ": 1 })"));
                 }
             }
         }

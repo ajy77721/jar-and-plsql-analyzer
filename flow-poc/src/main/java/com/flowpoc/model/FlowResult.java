@@ -39,6 +39,15 @@ public class FlowResult {
         return out;
     }
 
+    /** Steps grouped by call-tree depth (0 = controller, 1 = service, 2+ = repository). */
+    public java.util.Map<Integer, java.util.List<FlowStep>> getStepsByDepth() {
+        java.util.Map<Integer, java.util.List<FlowStep>> map = new java.util.TreeMap<>();
+        for (FlowStep s : allSteps()) {
+            map.computeIfAbsent(s.getDepth(), k -> new java.util.ArrayList<>()).add(s);
+        }
+        return map;
+    }
+
     private void collect(FlowStep step, List<FlowStep> out) {
         if (step == null) return;
         out.add(step);
