@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.codeanalyzer</groupId>
+        <artifactId>plsql-jar-analyzer</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>flow-poc</artifactId>
+    <name>Dynamic Flow Executor POC</name>
+    <description>
+        POC: two outcomes —
+        1. Test-data generator: walks static call trees, extracts SQL predicates,
+           fetches representative records from real DB, builds parameterised test datasets.
+        2. Query optimiser: detects missing-index candidates, N+1 patterns, prefetch
+           opportunities, and bulk-read/write consolidation from static flow analysis.
+    </description>
+
+    <dependencies>
+        <!-- Core analysis models (ClassInfo, EndpointInfo, CallTreeNode) -->
+        <dependency>
+            <groupId>com.codeanalyzer</groupId>
+            <artifactId>jar-analyzer-core</artifactId>
+        </dependency>
+
+        <!-- SQL predicate parsing -->
+        <dependency>
+            <groupId>com.github.jsqlparser</groupId>
+            <artifactId>jsqlparser</artifactId>
+            <version>${jsqlparser.version}</version>
+        </dependency>
+
+        <!-- Jackson – read analysis.json -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+
+        <!-- Spring context – Layer 2 bean-factory loading -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+        </dependency>
+
+        <!-- Oracle JDBC (optional – Layer 1 predicate-fetch against real DB) -->
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc11</artifactId>
+            <version>23.3.0.23.09</version>
+            <scope>runtime</scope>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Byte-buddy – Layer 2 proxy/intercept without modifying source -->
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy</artifactId>
+            <version>1.14.17</version>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

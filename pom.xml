@@ -23,6 +23,7 @@
         <module>plsql-analyzer-core</module>
         <module>jar-analyzer-core</module>
         <module>unified-web</module>
+        <module>flow-poc</module>
     </modules>
 
     <properties>
