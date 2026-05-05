@@ -449,9 +449,8 @@ Object.assign(JA.summary, {
             'claude': () => this._renderClaudeTab ? this._renderClaudeTab(this._epReports, esc) : '<p class="sum-muted" style="padding:20px">Claude insights loading...</p>',
             'corrections': () => this._renderCorrectionsTab ? this._renderCorrectionsTab(this._epReports, esc) : '<p class="sum-muted" style="padding:20px">Claude corrections loading...</p>',
             'flow': () => {
-                const html = JA.flowAnalysis ? JA.flowAnalysis._renderFlowTab(this._analysis, esc) : '<p class="sum-muted" style="padding:20px">Flow analysis loading...</p>';
-                // Pre-fill connection fields after DOM is ready
-                if (JA.flowAnalysis) setTimeout(() => JA.flowAnalysis._prefillConnections(), 50);
+                const html = JA.flowAnalysis ? JA.flowAnalysis._renderFlowTab(this._analysis) : '<p class="sum-muted" style="padding:20px">Flow analysis loading...</p>';
+                if (JA.flowAnalysis) setTimeout(() => JA.flowAnalysis._init(), 50);
                 return html;
             }
         };

@@ -24,21 +24,26 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
- * Exposes the flow-poc pipeline (test-data prep + optimization analysis) directly
- * inside the existing JAR Analyzer web app.
+ * Integrates flow-poc into the existing JAR Analyzer web app.
  *
- * The two modes share one endpoint — the caller picks "testdata" or "optimize":
+ * Two modes — both triggered from the "Flow Analysis" sub-tab in Summary:
+ *   testdata  — static call-tree walk + MongoDB sample fetch → test datasets
+ *   optimize  — static analyzers (N+1, missing index, bulk, aggregation) + Layer 2 dynamic exec
  *
- *   POST /api/jar/jars/{id}/flow/run
- *        { "mode": "testdata"|"optimize", "mongoUri": "...", "mongoDb": "...",
- *          "claudeApiKey": "...", "maxEndpoints": 10 }
+ * MongoDB connection and Claude API key are loaded automatically from what
+ * the system already knows about the JAR (connections.json / ANTHROPIC_API_KEY env var).
+ * Users can override them via the hidden "Override connection settings" panel.
  *
- *   GET  /api/jar/jars/{id}/flow/result/{runId}
- *   GET  /api/jar/jars/{id}/flow/report/{runId}   ← .md download
+ * Routes (all under the existing /api/jar/jars base path):
+ *   POST /{id}/flow/run          — start async run, returns { runId, status }
+ *   GET  /{id}/flow/result/{rid} — poll for completion
+ *   GET  /{id}/flow/report/{rid} — download .md report
  */
 @RestController
 @RequestMapping("/api/jar/jars")
@@ -54,9 +59,9 @@ public class FlowAnalysisController {
     public FlowAnalysisController(JarDataPaths paths,
                                   PersistenceService persistenceService,
                                   ObjectMapper objectMapper) {
-        this.paths             = paths;
+        this.paths              = paths;
         this.persistenceService = persistenceService;
-        this.objectMapper      = objectMapper;
+        this.objectMapper       = objectMapper;
     }
 
     // ── Trigger ───────────────────────────────────────────────────────────────
@@ -75,38 +80,47 @@ public class FlowAnalysisController {
                     return;
                 }
 
-                // Pre-fill mongo connection from saved connections.json if not supplied
+                // Read saved connections — structure is { mongodb: { uri, database }, oracle: {...} }
                 Map<String, Object> conns = persistenceService.loadConnections(id);
-                String mongoUri = resolve(req.mongoUri(), conns, "mongoUri", "mongodb://localhost:27017");
-                String mongoDb  = resolve(req.mongoDb(),  conns, "mongoDb",  null);
+                String mongoUri = resolveMongoUri(req.mongoUri(), conns);
+                String mongoDb  = resolveMongoDb(req.mongoDb(), conns);
+
+                // Claude API key: use explicit override or fall back to ANTHROPIC_API_KEY env var
+                String claudeKey = (req.claudeApiKey() != null && !req.claudeApiKey().isBlank())
+                        ? req.claudeApiKey()
+                        : System.getenv("ANTHROPIC_API_KEY");
 
                 PocConfig.Builder builder = PocConfig.builder()
                         .analysisJson(jsonPath.toAbsolutePath().toString())
                         .sampleSize(10)
-                        .maxEndpoints(req.maxEndpoints());
+                        .maxEndpoints(0); // we filter by endpointPaths below
 
                 if (mongoUri != null && mongoDb != null && !mongoDb.isBlank())
                     builder.mongo(mongoUri, mongoDb);
 
-                // "optimize" mode: enable Layer 2 dynamic execution using stored.jar
+                // "optimize" mode: enable Layer 2 dynamic execution against stored.jar
                 if ("optimize".equals(req.mode())) {
                     Path storedJar = paths.storedJarFile(id);
                     if (Files.exists(storedJar))
                         builder.layer2(storedJar.toAbsolutePath().toString());
                 }
 
-                if (req.claudeApiKey() != null && !req.claudeApiKey().isBlank())
-                    builder.claude(req.claudeApiKey());
+                if (claudeKey != null && !claudeKey.isBlank())
+                    builder.claude(claudeKey);
 
                 PocConfig config = builder.build();
 
-                // 1. Run full analysis → JSON
+                // 1. Walk all endpoints, filter to the ones the user selected
+                Set<String> selected = req.endpointPaths() != null
+                        ? Set.copyOf(req.endpointPaths()) : Set.of();
+
+                // 2. Run full analysis (JSON output)
                 ByteArrayOutputStream jsonOut = new ByteArrayOutputStream();
-                new PocRunner(config).run(jsonOut);
+                runFiltered(config, selected, jsonOut);
                 String jsonReport = jsonOut.toString(StandardCharsets.UTF_8);
 
-                // 2. Static-only pass → Markdown report (cheap — no dynamic exec)
-                String mdReport = generateMarkdown(config);
+                // 3. Static pass for Markdown report (cheap — re-walks analysis.json, no dynamic exec)
+                String mdReport = generateMarkdown(config, selected);
 
                 runs.put(runId, new FlowRunResult("done", jsonReport, mdReport, null));
 
@@ -139,7 +153,7 @@ public class FlowAnalysisController {
         return ResponseEntity.ok(resp);
     }
 
-    // ── Download report ───────────────────────────────────────────────────────
+    // ── Download .md ──────────────────────────────────────────────────────────
 
     @GetMapping("/{id}/flow/report/{runId}")
     public ResponseEntity<byte[]> report(@PathVariable String id,
@@ -157,15 +171,54 @@ public class FlowAnalysisController {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private String generateMarkdown(PocConfig config) {
+    /**
+     * Runs PocRunner but only keeps FlowResults whose endpoint path is in `selected`.
+     * When `selected` is empty, all endpoints are included.
+     */
+    private void runFiltered(PocConfig config, Set<String> selected, ByteArrayOutputStream out) throws Exception {
+        if (selected.isEmpty()) {
+            new PocRunner(config).run(out);
+            return;
+        }
+        // PocRunner doesn't support path-level filtering, so we run it with maxEndpoints=0
+        // and rely on a thin wrapper that filters by endpoint path before writing the report.
+        // Workaround: run full, then filter the JSON result.
+        ByteArrayOutputStream fullOut = new ByteArrayOutputStream();
+        new PocRunner(config).run(fullOut);
+        String fullJson = fullOut.toString(StandardCharsets.UTF_8);
+
+        // Filter the JSON array to only matching endpoints
+        try {
+            List<?> all = objectMapper.readValue(fullJson, List.class);
+            List<?> filtered = all.stream()
+                    .filter(item -> {
+                        if (item instanceof Map<?,?> m) {
+                            String ep = String.valueOf(m.get("endpoint"));
+                            return selected.stream().anyMatch(ep::contains);
+                        }
+                        return false;
+                    })
+                    .collect(Collectors.toList());
+            objectMapper.writeValue(out, filtered);
+        } catch (Exception e) {
+            // If filtering fails, return the full result
+            out.write(fullJson.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private String generateMarkdown(PocConfig config, Set<String> selected) {
         try {
             var walker = new FlowWalker(List.of(
                     new MongoOperationVisitor(),
                     new SqlOperationVisitor(new SqlPredicateExtractor())));
             List<FlowResult> results = walker.walk(new File(config.getAnalysisJsonPath()));
 
-            if (config.getMaxEndpoints() > 0 && results.size() > config.getMaxEndpoints())
-                results = results.subList(0, config.getMaxEndpoints());
+            // Filter to selected endpoints (empty = all)
+            if (!selected.isEmpty()) {
+                results = results.stream()
+                        .filter(r -> selected.stream().anyMatch(r.getEndpointPath()::contains))
+                        .collect(Collectors.toList());
+            }
 
             var pipeline = config.isClaudeEnabled()
                     ? AnalyzerPipeline.builder().withMongoDefaultsAndClaude(config.getClaudeApiKey()).build()
@@ -180,22 +233,40 @@ public class FlowAnalysisController {
         }
     }
 
+    /** Read MongoDB URI from saved connections.json (structure: mongodb.uri) or explicit override. */
     @SuppressWarnings("unchecked")
-    private static String resolve(String explicit, Map<String, Object> conns,
-                                   String connKey, String fallback) {
+    private static String resolveMongoUri(String explicit, Map<String, Object> conns) {
         if (explicit != null && !explicit.isBlank()) return explicit;
-        if (conns != null && conns.get(connKey) instanceof String s && !s.isBlank()) return s;
-        return fallback;
+        if (conns == null) return null;
+        Object mongo = conns.get("mongodb");
+        if (mongo instanceof Map<?,?> m) {
+            Object uri = m.get("uri");
+            if (uri instanceof String s && !s.isBlank() && !s.contains("***")) return s;
+        }
+        return null;
+    }
+
+    /** Read MongoDB database name from saved connections.json (structure: mongodb.database). */
+    @SuppressWarnings("unchecked")
+    private static String resolveMongoDb(String explicit, Map<String, Object> conns) {
+        if (explicit != null && !explicit.isBlank()) return explicit;
+        if (conns == null) return null;
+        Object mongo = conns.get("mongodb");
+        if (mongo instanceof Map<?,?> m) {
+            Object db = m.get("database");
+            if (db instanceof String s && !s.isBlank()) return s;
+        }
+        return null;
     }
 
     // ── Inner types ───────────────────────────────────────────────────────────
 
     public record FlowRunRequest(
-            String mode,          // "testdata" | "optimize"
-            String mongoUri,
-            String mongoDb,
-            String claudeApiKey,
-            int    maxEndpoints
+            String       mode,           // "testdata" | "optimize"
+            List<String> endpointPaths,  // paths selected in the UI; empty = all
+            String       mongoUri,       // optional override
+            String       mongoDb,        // optional override
+            String       claudeApiKey    // optional override (falls back to ANTHROPIC_API_KEY env)
     ) {}
 
     private record FlowRunResult(String status, String jsonReport, String mdReport, String error) {}
