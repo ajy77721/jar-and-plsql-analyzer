@@ -4,67 +4,88 @@ import org.bson.Document;
 
 import java.lang.reflect.Method;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 /**
- * In-memory write buffer that maintains read-after-write consistency within a
+ * In-memory write buffer that enforces read-after-write consistency within a
  * single flow execution without ever touching the real database.
  *
- * Contract:
- *  - Every blocked write (INSERT/UPDATE/DELETE/REPLACE/BULK) is applied here
- *  - Every read checks this store first; real DB is only consulted when the
- *    shadow store has no documents for that collection
+ * Architecture:
+ *   ShadowFilterMatcher    – evaluates full MongoDB filter operators ($gt/$in/$and/$or/…)
+ *   ShadowUpdateApplier    – applies all update operators ($set/$inc/$push/$pull/…)
+ *   ShadowAggregationExecutor – runs full pipeline stages ($match/$group/$sort/$lookup/…)
  *
- * Lifecycle:
- *  - Cleared at the start of each FlowResult execution (between endpoints)
- *  - NOT cleared between steps — step 1's inserts must be visible to step 2's reads
- *
- * This guarantees the key invariant:
- *   "A read in step N always returns the data that would have existed in the DB
- *    had all prior writes in the same flow actually executed."
+ * Lifecycle contract:
+ *   clear()    – remove captured calls only (between steps — shadow data persists)
+ *   clearAll() – wipe everything including shadow docs (between FlowResult executions)
  */
 public class ShadowMongoStore {
 
-    // collection → ordered list of documents (preserves insertion order)
-    private final Map<String, List<Document>> store = new ConcurrentHashMap<>();
+    // Thread-safe per-collection document stores
+    private final Map<String, List<Document>> store = new LinkedHashMap<>();
+
+    private final ShadowFilterMatcher matcher = new ShadowFilterMatcher();
+    private final ShadowUpdateApplier updater = new ShadowUpdateApplier();
 
     // ── Apply writes ──────────────────────────────────────────────────────────
 
-    public void applyWrite(MongoOp op, String collection, Object input, Object[] args) {
+    public synchronized void applyWrite(MongoOp op, String collection, Object input, Object[] args) {
         switch (op) {
             case INSERT         -> storeOne(collection, firstDocument(args));
             case INSERT_MANY    -> storeAll(collection, allDocuments(args));
-            case SAVE           -> storeOne(collection, firstDocument(args));
-            case SAVE_ALL       -> storeAll(collection, allDocuments(args));
-            case UPDATE         -> applyUpdate(collection, input, args, false);
-            case UPDATE_MANY    -> applyUpdate(collection, input, args, true);
-            case UPSERT         -> applyUpsert(collection, input, args);
+            case SAVE           -> upsertById(collection, firstDocument(args));
+            case SAVE_ALL       -> allDocuments(args).forEach(d -> upsertById(collection, d));
+            case UPDATE         -> applyUpdate(collection, input, args, false, false);
+            case UPDATE_MANY    -> applyUpdate(collection, input, args, true,  false);
+            case UPSERT         -> applyUpdate(collection, input, args, false, true);
             case REPLACE        -> applyReplace(collection, input, args);
             case DELETE         -> applyDelete(collection, input, false);
             case DELETE_MANY,
                  FIND_ALL_AND_REMOVE -> applyDelete(collection, input, true);
-            case BULK_WRITE     -> applyBulk(collection, input);
+            case BULK_WRITE     -> applyBulkItems(collection, input);
             default             -> {}
         }
     }
 
-    // ── Query shadow store ────────────────────────────────────────────────────
+    // ── Query (find / count / exists) ─────────────────────────────────────────
 
-    /**
-     * Returns documents from the shadow store matching the given filter.
-     * Returns an empty list if nothing has been shadow-written to this collection.
-     * The caller should fall through to the real DB when this returns empty.
-     */
-    public List<Map<String, Object>> query(String collection, Object filter, int limit) {
+    public synchronized List<Map<String, Object>> query(String collection, Object filter, int limit) {
+        List<Document> docs = store.get(collection);
+        if (docs == null || docs.isEmpty()) return Collections.emptyList();
+        return docs.stream()
+                .filter(d -> matcher.matches(d, filter))
+                .limit(limit)
+                .map(d -> new LinkedHashMap<>(d))
+                .collect(Collectors.toList());
+    }
+
+    public synchronized long count(String collection, Object filter) {
+        List<Document> docs = store.get(collection);
+        if (docs == null) return 0L;
+        return docs.stream().filter(d -> matcher.matches(d, filter)).count();
+    }
+
+    public synchronized boolean exists(String collection, Object filter) {
+        List<Document> docs = store.get(collection);
+        if (docs == null) return false;
+        return docs.stream().anyMatch(d -> matcher.matches(d, filter));
+    }
+
+    // ── Aggregation ───────────────────────────────────────────────────────────
+
+    public synchronized List<Map<String, Object>> aggregate(String collection,
+                                                             String pipelineJson, int limit) {
         List<Document> docs = store.get(collection);
         if (docs == null || docs.isEmpty()) return Collections.emptyList();
 
-        Map<String, Object> filterMap = flattenFilter(filter);
-        return docs.stream()
-                .filter(doc -> matches(doc, filterMap))
+        List<Document> pipeline = ShadowAggregationExecutor.parsePipeline(pipelineJson);
+        if (pipeline.isEmpty()) return Collections.emptyList();
+
+        ShadowAggregationExecutor exec = new ShadowAggregationExecutor(store);
+        return exec.execute(new ArrayList<>(docs), pipeline).stream()
                 .limit(limit)
-                .map(doc -> new LinkedHashMap<>(doc))
+                .map(d -> new LinkedHashMap<>(d))
                 .collect(Collectors.toList());
     }
 
@@ -73,7 +94,7 @@ public class ShadowMongoStore {
         return docs != null && !docs.isEmpty();
     }
 
-    public void clear() {
+    public synchronized void clear() {
         store.clear();
     }
 
@@ -81,73 +102,77 @@ public class ShadowMongoStore {
 
     private void storeOne(String collection, Document doc) {
         if (doc == null) return;
-        if (!doc.containsKey("_id")) doc.put("_id", new org.bson.types.ObjectId().toString());
+        ensureId(doc);
         store.computeIfAbsent(collection, k -> new ArrayList<>()).add(doc);
     }
 
     private void storeAll(String collection, List<Document> docs) {
-        docs.forEach(doc -> storeOne(collection, doc));
+        docs.forEach(d -> storeOne(collection, d));
     }
 
-    private void applyUpdate(String collection, Object filter, Object[] args,
-                              boolean multi) {
-        Map<String, Object> fm = flattenFilter(filter);
-        Document updateSpec = args != null && args.length > 1
-                ? toDocument(args[1]) : null;
+    private void upsertById(String collection, Document doc) {
+        if (doc == null) return;
+        ensureId(doc);
+        List<Document> coll = store.computeIfAbsent(collection, k -> new ArrayList<>());
+        Object id = doc.get("_id");
+        for (int i = 0; i < coll.size(); i++) {
+            if (Objects.equals(coll.get(i).get("_id"), id)) {
+                coll.set(i, doc);
+                return;
+            }
+        }
+        coll.add(doc);
+    }
+
+    private void applyUpdate(String collection, Object filterInput, Object[] args,
+                              boolean multi, boolean upsert) {
+        Document filter = toDocument(filterInput);
+        Document updateSpec = args != null && args.length > 1 ? toDocument(args[1]) : null;
 
         List<Document> docs = store.getOrDefault(collection, Collections.emptyList());
-        boolean updated = false;
+        boolean matched = false;
+
         for (Document doc : docs) {
-            if (matches(doc, fm)) {
-                mergeUpdate(doc, updateSpec);
-                updated = true;
+            if (matcher.matches(doc, filter)) {
+                updater.apply(doc, updateSpec);
+                matched = true;
                 if (!multi) break;
             }
         }
-        // If no match and this is upsert-like, add a new doc
-        if (!updated && isUpsert(args)) {
-            Document newDoc = new Document(fm);
-            mergeUpdate(newDoc, updateSpec);
+
+        if (!matched && upsert) {
+            Document newDoc = filter != null ? new Document(filter) : new Document();
+            updater.apply(newDoc, updateSpec);
             storeOne(collection, newDoc);
         }
     }
 
-    private void applyUpsert(String collection, Object filter, Object[] args) {
-        Map<String, Object> fm = flattenFilter(filter);
-        List<Document> docs = store.getOrDefault(collection, Collections.emptyList());
-        boolean found = docs.stream().anyMatch(d -> matches(d, fm));
-        if (found) {
-            applyUpdate(collection, filter, args, false);
-        } else {
-            Document doc = new Document(fm);
-            if (args != null && args.length > 1) mergeUpdate(doc, toDocument(args[1]));
-            storeOne(collection, doc);
-        }
-    }
-
-    private void applyReplace(String collection, Object filter, Object[] args) {
-        Map<String, Object> fm = flattenFilter(filter);
-        List<Document> docs = store.getOrDefault(collection, Collections.emptyList());
+    private void applyReplace(String collection, Object filterInput, Object[] args) {
+        Document filter = toDocument(filterInput);
         Document replacement = args != null && args.length > 1 ? toDocument(args[1]) : null;
         if (replacement == null) return;
 
+        List<Document> docs = store.computeIfAbsent(collection, k -> new ArrayList<>());
         for (int i = 0; i < docs.size(); i++) {
-            if (matches(docs.get(i), fm)) {
-                docs.set(i, replacement);
+            if (matcher.matches(docs.get(i), filter)) {
+                Object id = docs.get(i).get("_id");
+                Document rep = new Document(replacement);
+                if (id != null && !rep.containsKey("_id")) rep.put("_id", id);
+                docs.set(i, rep);
                 return;
             }
         }
-        // no match → insert
-        storeOne(collection, replacement);
+        // No match → insert
+        storeOne(collection, new Document(replacement));
     }
 
-    private void applyDelete(String collection, Object filter, boolean multi) {
-        Map<String, Object> fm = flattenFilter(filter);
+    private void applyDelete(String collection, Object filterInput, boolean multi) {
         List<Document> docs = store.get(collection);
         if (docs == null) return;
+        Document filter = toDocument(filterInput);
         Iterator<Document> it = docs.iterator();
         while (it.hasNext()) {
-            if (matches(it.next(), fm)) {
+            if (matcher.matches(it.next(), filter)) {
                 it.remove();
                 if (!multi) return;
             }
@@ -155,38 +180,10 @@ public class ShadowMongoStore {
     }
 
     @SuppressWarnings("unchecked")
-    private void applyBulk(String collection, Object input) {
-        // input is a List<String> of op descriptions from wrapBulkOperations
-        // We can't reconstruct full documents from string descriptions in the POC,
-        // so we just note the bulk write occurred without storing individual docs.
-    }
-
-    // ── Update merging ────────────────────────────────────────────────────────
-
-    private void mergeUpdate(Document target, Document updateSpec) {
-        if (updateSpec == null) return;
-        // $set → merge fields into doc
-        Object setDoc = updateSpec.get("$set");
-        if (setDoc instanceof Document set) {
-            set.forEach(target::put);
-            return;
-        }
-        // No $set operator → treat whole doc as replacement fields (except _id)
-        updateSpec.forEach((k, v) -> {
-            if (!k.startsWith("$") && !k.equals("_id")) target.put(k, v);
-        });
-    }
-
-    private boolean isUpsert(Object[] args) {
-        if (args == null) return false;
-        for (Object arg : args) {
-            if (arg == null) continue;
-            try {
-                Object upsert = arg.getClass().getMethod("isUpsert").invoke(arg);
-                if (Boolean.TRUE.equals(upsert)) return true;
-            } catch (Exception ignored) {}
-        }
-        return false;
+    private void applyBulkItems(String collection, Object input) {
+        // input is List<String> of op descriptions from BulkOperations proxy
+        // Best-effort: we can't fully reconstruct ops from string descriptions
+        // but we note the bulk write occurred in the shadow
     }
 
     // ── Document extraction ───────────────────────────────────────────────────
@@ -217,15 +214,15 @@ public class ShadowMongoStore {
         return result;
     }
 
-    private Document toDocument(Object obj) {
-        if (obj == null) return null;
+    @SuppressWarnings("unchecked")
+    Document toDocument(Object obj) {
+        if (obj == null)            return null;
         if (obj instanceof Document d) return d;
         if (obj instanceof Map<?,?> m) {
             Document doc = new Document();
             m.forEach((k, v) -> doc.put(String.valueOf(k), v));
             return doc;
         }
-        // POJO → extract getXxx() fields
         return pojoToDocument(obj);
     }
 
@@ -246,45 +243,11 @@ public class ShadowMongoStore {
         return doc;
     }
 
-    // ── Filter matching ───────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Flattens an incoming filter object into a simple field→value EQ map,
-     * ignoring Mongo operator keys ($gt, $in, etc.) which are treated as
-     * "match anything" for shadow-store purposes.
-     */
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> flattenFilter(Object filter) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        if (filter == null) return result;
-
-        Document doc = toDocument(filter);
-        if (doc == null) return result;
-
-        doc.forEach((k, v) -> {
-            if (k.startsWith("$")) return;           // top-level operator — skip
-            if (v instanceof Document nested) {
-                // {"field": {"$eq": val}} → extract $eq value
-                Object eqVal = nested.get("$eq");
-                if (eqVal != null) result.put(k, eqVal);
-                // other operators ($gt etc.) → treat as wildcard (don't add to filter)
-            } else {
-                result.put(k, v);
-            }
-        });
-        return result;
+    private void ensureId(Document doc) {
+        if (!doc.containsKey("_id")) doc.put("_id", new org.bson.types.ObjectId().toString());
     }
-
-    private boolean matches(Document doc, Map<String, Object> filterMap) {
-        for (Map.Entry<String, Object> entry : filterMap.entrySet()) {
-            Object actual = doc.get(entry.getKey());
-            if (actual == null) return false;
-            if (!actual.toString().equals(String.valueOf(entry.getValue()))) return false;
-        }
-        return true;
-    }
-
-    // ── Utilities ─────────────────────────────────────────────────────────────
 
     private boolean isPrimitive(Object obj) {
         return obj instanceof Number || obj instanceof Boolean

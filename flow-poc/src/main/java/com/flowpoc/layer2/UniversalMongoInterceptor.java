@@ -81,15 +81,7 @@ public class UniversalMongoInterceptor {
 
             } else if (op.isFetchable()) {
                 // ── READ — shadow store first, real DB as fallback ────────────
-                // This enforces the read-after-write invariant: a read following a
-                // blocked write in the same flow sees the shadow-buffered document.
-                List<Map<String, Object>> shadowDocs = shadow.query(collection, input, 100);
-                if (!shadowDocs.isEmpty()) {
-                    result = new ArrayList<>(shadowDocs);
-                } else {
-                    result = null;
-                    try { result = superCall.call(); } catch (Exception ignored) {}
-                }
+                result = shadowFirst(op, collection, input, superCall);
                 interceptor.onMongoOperation(collection, op, input, toObjectList(result));
 
             } else {
@@ -107,6 +99,30 @@ public class UniversalMongoInterceptor {
             }
 
             return result;
+        }
+
+        // ── Shadow-first read helper ──────────────────────────────────────
+
+        private Object shadowFirst(MongoOp op, String collection, Object input,
+                                    Callable<?> superCall) {
+            List<Map<String, Object>> shadowDocs;
+            if (op == MongoOp.AGGREGATE) {
+                String pipeline = input != null ? input.toString() : "[]";
+                shadowDocs = shadow.aggregate(collection, pipeline, 100);
+            } else if (op == MongoOp.COUNT) {
+                if (shadow.hasCollection(collection))
+                    return shadow.count(collection, input);
+                try { return superCall.call(); } catch (Exception e) { return 0L; }
+            } else if (op == MongoOp.EXISTS) {
+                if (shadow.hasCollection(collection))
+                    return shadow.exists(collection, input);
+                try { return superCall.call(); } catch (Exception e) { return false; }
+            } else {
+                shadowDocs = shadow.query(collection, input, 100);
+            }
+
+            if (!shadowDocs.isEmpty()) return new ArrayList<>(shadowDocs);
+            try { return superCall.call(); } catch (Exception e) { return null; }
         }
 
         // ── MongoCollection proxy ─────────────────────────────────────────
@@ -129,15 +145,9 @@ public class UniversalMongoInterceptor {
                                 interceptor.onMongoOperation(collectionName, op, input,
                                         Collections.emptyList());
                             } else if (op.isFetchable()) {
-                                // Shadow-first read
-                                List<Map<String, Object>> shadowDocs =
-                                        shadow.query(collectionName, input, 100);
-                                if (!shadowDocs.isEmpty()) {
-                                    result = new ArrayList<>(shadowDocs);
-                                } else {
-                                    result = null;
-                                    try { result = method.invoke(raw, args); } catch (Exception ignored) {}
-                                }
+                                final Object[] finalArgs = args;
+                                result = shadowFirst(op, collectionName, input,
+                                        () -> method.invoke(raw, finalArgs));
                                 interceptor.onMongoOperation(collectionName, op, input,
                                         toObjectList(result));
                             } else {
