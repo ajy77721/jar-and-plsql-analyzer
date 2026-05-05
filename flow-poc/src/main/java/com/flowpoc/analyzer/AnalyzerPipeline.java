@@ -39,7 +39,7 @@ public class AnalyzerPipeline {
 
         public Builder add(OptimizationAnalyzer a) { analyzers.add(a); return this; }
 
-        /** Default MongoDB-focused pipeline. */
+        /** Default MongoDB-focused pipeline (no Claude). */
         public Builder withMongoDefaults() {
             return add(new QueryClassificationAnalyzer())
                     .add(new HierarchyFlowAnalyzer())
@@ -47,6 +47,16 @@ public class AnalyzerPipeline {
                     .add(new NplusOneAnalyzer())
                     .add(new BulkOperationAnalyzer())
                     .add(new AggregationRewriteAnalyzer());
+        }
+
+        /**
+         * All static analyzers + Claude AI as the final step.
+         * Claude enriches the existing findings with impact explanations and fix priority —
+         * it does NOT run independent detection logic.
+         * Pass null to fall back to the ANTHROPIC_API_KEY environment variable.
+         */
+        public Builder withMongoDefaultsAndClaude(String claudeApiKey) {
+            return withMongoDefaults().add(new ClaudeFlowAnalyzer(claudeApiKey));
         }
 
         public AnalyzerPipeline build() { return new AnalyzerPipeline(this); }

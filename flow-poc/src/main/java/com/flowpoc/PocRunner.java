@@ -19,6 +19,7 @@ import com.flowpoc.model.FlowStep;
 import com.flowpoc.model.TestDataSet;
 import com.flowpoc.report.FlowReporter;
 import com.flowpoc.report.JsonReporter;
+import com.flowpoc.report.MarkdownReporter;
 import com.mongodb.client.MongoClients;
 
 import java.io.File;
@@ -64,10 +65,10 @@ public class PocRunner {
             results = results.subList(0, config.getMaxEndpoints());
         }
 
-        // 3. Run optimization analyzers on each flow
-        AnalyzerPipeline pipeline = AnalyzerPipeline.builder()
-                .withMongoDefaults()
-                .build();
+        // 3. Run optimization analyzers (+ Claude if API key configured)
+        AnalyzerPipeline pipeline = config.isClaudeEnabled()
+                ? AnalyzerPipeline.builder().withMongoDefaultsAndClaude(config.getClaudeApiKey()).build()
+                : AnalyzerPipeline.builder().withMongoDefaults().build();
 
         for (FlowResult r : results) {
             pipeline.runAndAttach(r);
@@ -105,9 +106,19 @@ public class PocRunner {
             }
         }
 
-        // 6. Write report
+        // 6. Write JSON report to the provided output stream
         FlowReporter reporter = new JsonReporter();
         reporter.write(results, out);
+
+        // 7. Write Markdown report to file if reportOutputDir is configured
+        if (config.getReportOutputDir() != null) {
+            try {
+                java.nio.file.Path dir = java.nio.file.Paths.get(config.getReportOutputDir());
+                java.nio.file.Files.createDirectories(dir);
+                java.nio.file.Path mdFile = dir.resolve("flow-analysis-report.md");
+                new MarkdownReporter().writeToFile(results, mdFile);
+            } catch (Exception ignored) {}
+        }
     }
 
     private void fetchAndAttach(FlowResult result, DataFetcher fetcher) {

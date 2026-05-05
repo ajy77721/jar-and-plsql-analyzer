@@ -77,6 +77,13 @@
             <version>1.14.17</version>
         </dependency>
 
+        <!-- Spring Boot Web — REST API + UI trigger endpoint -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Testing -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

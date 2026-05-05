@@ -16,6 +16,8 @@ public final class PocConfig {
     private final int     maxEndpoints;    // 0 = all
     private final boolean layer2Enabled;
     private final String  jarFilePath;
+    private final String  claudeApiKey;   // Anthropic API key; null = Claude analysis skipped
+    private final String  reportOutputDir; // directory for .md report; null = stdout JSON only
 
     private PocConfig(Builder b) {
         this.analysisJsonPath = b.analysisJsonPath;
@@ -28,6 +30,8 @@ public final class PocConfig {
         this.maxEndpoints     = b.maxEndpoints;
         this.layer2Enabled    = b.layer2Enabled;
         this.jarFilePath      = b.jarFilePath;
+        this.claudeApiKey     = b.claudeApiKey;
+        this.reportOutputDir  = b.reportOutputDir;
     }
 
     public String  getAnalysisJsonPath() { return analysisJsonPath; }
@@ -40,6 +44,9 @@ public final class PocConfig {
     public int     getMaxEndpoints()     { return maxEndpoints; }
     public boolean isLayer2Enabled()     { return layer2Enabled; }
     public String  getJarFilePath()      { return jarFilePath; }
+    public String  getClaudeApiKey()     { return claudeApiKey; }
+    public String  getReportOutputDir()  { return reportOutputDir; }
+    public boolean isClaudeEnabled()     { return claudeApiKey != null && !claudeApiKey.isBlank(); }
 
     public static Builder builder() { return new Builder(); }
 
@@ -54,6 +61,8 @@ public final class PocConfig {
         private int     maxEndpoints  = 0;
         private boolean layer2Enabled = false;
         private String  jarFilePath;
+        private String  claudeApiKey;
+        private String  reportOutputDir;
 
         public Builder analysisJson(String path)    { this.analysisJsonPath = path; return this; }
         public Builder sampleSize(int n)            { this.sampleSize = n; return this; }
@@ -61,6 +70,8 @@ public final class PocConfig {
         public Builder oracle(String jdbcUrl)       { this.oracleJdbcUrl = jdbcUrl; this.enableOracle = true; return this; }
         public Builder maxEndpoints(int n)          { this.maxEndpoints = n; return this; }
         public Builder layer2(String jarFilePath)   { this.layer2Enabled = true; this.jarFilePath = jarFilePath; return this; }
+        public Builder claude(String apiKey)        { this.claudeApiKey = apiKey; return this; }
+        public Builder reportDir(String dir)        { this.reportOutputDir = dir; return this; }
 
         public PocConfig build() {
             if (analysisJsonPath == null) throw new IllegalStateException("analysisJsonPath required");
