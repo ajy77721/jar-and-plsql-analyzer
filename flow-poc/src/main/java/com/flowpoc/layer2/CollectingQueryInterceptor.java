@@ -25,12 +25,15 @@ public class CollectingQueryInterceptor implements QueryInterceptor {
         public boolean isSql()   { return sql != null; }
     }
 
-    private final List<CapturedCall> captured = new ArrayList<>();
+    private final List<CapturedCall>  captured    = new ArrayList<>();
+    private final ShadowMongoStore    shadowStore = new ShadowMongoStore();
 
     @Override
     public void onMongoOperation(String collection, MongoOp op, Object input, List<Object> results) {
         captured.add(new CapturedCall(collection, op, input, null, Collections.emptyList(), results));
     }
+
+    public ShadowMongoStore getShadowStore() { return shadowStore; }
 
     @Override
     @SuppressWarnings("unchecked")
@@ -43,7 +46,14 @@ public class CollectingQueryInterceptor implements QueryInterceptor {
         return Collections.unmodifiableList(captured);
     }
 
+    /** Clears only the captured calls — shadow store persists across steps within a flow. */
     public void clear() {
         captured.clear();
+    }
+
+    /** Clears both captured calls and the shadow store — call between FlowResult executions. */
+    public void clearAll() {
+        captured.clear();
+        shadowStore.clear();
     }
 }

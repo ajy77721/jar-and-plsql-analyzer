@@ -9,6 +9,7 @@ import net.bytebuddy.matcher.ElementMatchers;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.*;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
@@ -55,9 +56,11 @@ public class UniversalMongoInterceptor {
     public static class Dispatcher {
 
         private final CollectingQueryInterceptor interceptor;
+        private final ShadowMongoStore           shadow;
 
         public Dispatcher(CollectingQueryInterceptor interceptor) {
             this.interceptor = interceptor;
+            this.shadow      = interceptor.getShadowStore();
         }
 
         @RuntimeType
@@ -71,19 +74,30 @@ public class UniversalMongoInterceptor {
             Object  result;
 
             if (op.isMutation()) {
-                // ── WRITE BLOCKED ──────────────────────────────────────────
-                // Return a mock success object so the calling code doesn't
-                // throw NPE and can proceed to the next step.
+                // ── WRITE BLOCKED — stored in shadow, never sent to real DB ──
+                shadow.applyWrite(op, collection, input, args);
                 result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
                 interceptor.onMongoOperation(collection, op, input, Collections.emptyList());
 
+            } else if (op.isFetchable()) {
+                // ── READ — shadow store first, real DB as fallback ────────────
+                // This enforces the read-after-write invariant: a read following a
+                // blocked write in the same flow sees the shadow-buffered document.
+                List<Map<String, Object>> shadowDocs = shadow.query(collection, input, 100);
+                if (!shadowDocs.isEmpty()) {
+                    result = new ArrayList<>(shadowDocs);
+                } else {
+                    result = null;
+                    try { result = superCall.call(); } catch (Exception ignored) {}
+                }
+                interceptor.onMongoOperation(collection, op, input, toObjectList(result));
+
             } else {
-                // ── READ / META / PLUMBING ─────────────────────────────────
+                // ── META / PLUMBING / getCollection / bulkOps ─────────────────
                 result = null;
                 try { result = superCall.call(); } catch (Exception ignored) {}
 
                 if (op == MongoOp.GET_COLLECTION && result != null) {
-                    // Wrap raw collection so direct collection-level calls are also captured
                     result = wrapMongoCollection(result, collection);
                 } else if (op == MongoOp.BULK_WRITE && result != null) {
                     result = wrapBulkOperations(result, collection);
@@ -109,9 +123,23 @@ public class UniversalMongoInterceptor {
                             Object  result;
 
                             if (op.isMutation()) {
+                                // Same safety contract: shadow-buffer write, return mock
+                                shadow.applyWrite(op, collectionName, input, args);
                                 result = MongoWriteMocks.forReturnType(method.getReturnType(), args);
                                 interceptor.onMongoOperation(collectionName, op, input,
                                         Collections.emptyList());
+                            } else if (op.isFetchable()) {
+                                // Shadow-first read
+                                List<Map<String, Object>> shadowDocs =
+                                        shadow.query(collectionName, input, 100);
+                                if (!shadowDocs.isEmpty()) {
+                                    result = new ArrayList<>(shadowDocs);
+                                } else {
+                                    result = null;
+                                    try { result = method.invoke(raw, args); } catch (Exception ignored) {}
+                                }
+                                interceptor.onMongoOperation(collectionName, op, input,
+                                        toObjectList(result));
                             } else {
                                 result = null;
                                 try { result = method.invoke(raw, args); } catch (Exception ignored) {}

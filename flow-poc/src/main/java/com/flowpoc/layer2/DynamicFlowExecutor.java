@@ -47,13 +47,16 @@ public class DynamicFlowExecutor {
             return allCaptured;
         }
 
+        // Clear shadow store + captured calls from any previous flow execution
+        interceptor.clearAll();
+
         // Forward context: field values from prior step's DB results → next step's method args
         Map<String, Object> forwardCtx = new LinkedHashMap<>();
 
         try {
             for (FlowStep step : flowResult.allSteps()) {
                 try {
-                    interceptor.clear();
+                    interceptor.clear();   // clears captured only — shadow store persists across steps
                     invokeStep(step, context, forwardCtx);
 
                     List<CollectingQueryInterceptor.CapturedCall> calls =
