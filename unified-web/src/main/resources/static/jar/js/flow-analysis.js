@@ -21,8 +21,9 @@ JA.flowAnalysis = {
             const path   = ep.fullPath || ep.path || ep.endpointName || '';
             const safe   = JA.utils.escapeHtml(path);
             const methodCls = method === 'GET' ? '#2563eb' : method === 'POST' ? '#16a34a' : method === 'PUT' ? '#d97706' : method === 'DELETE' ? '#dc2626' : '#6b7280';
+            const fullKey = JA.utils.escapeHtml(method + ' ' + path);
             epRows += `<label class="flow-ep-row">
-                <input type="checkbox" class="flow-ep-cb" value="${safe}" checked>
+                <input type="checkbox" class="flow-ep-cb" value="${fullKey}" checked>
                 <span style="color:${methodCls};font-weight:600;min-width:52px;display:inline-block;font-size:11px">${JA.utils.escapeHtml(method)}</span>
                 <code style="font-size:12px">${safe}</code>
             </label>`;

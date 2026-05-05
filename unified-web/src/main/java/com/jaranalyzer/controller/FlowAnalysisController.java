@@ -187,14 +187,14 @@ public class FlowAnalysisController {
         new PocRunner(config).run(fullOut);
         String fullJson = fullOut.toString(StandardCharsets.UTF_8);
 
-        // Filter the JSON array to only matching endpoints
+        // Filter the JSON array to only matching endpoints — exact "METHOD PATH" match
         try {
             List<?> all = objectMapper.readValue(fullJson, List.class);
             List<?> filtered = all.stream()
                     .filter(item -> {
                         if (item instanceof Map<?,?> m) {
-                            String ep = String.valueOf(m.get("endpoint"));
-                            return selected.stream().anyMatch(ep::contains);
+                            String ep = String.valueOf(m.get("endpoint")); // e.g. "POST /api/v1/employees"
+                            return selected.contains(ep);
                         }
                         return false;
                     })
@@ -213,10 +213,10 @@ public class FlowAnalysisController {
                     new SqlOperationVisitor(new SqlPredicateExtractor())));
             List<FlowResult> results = walker.walk(new File(config.getAnalysisJsonPath()));
 
-            // Filter to selected endpoints (empty = all)
+            // Filter to selected endpoints (empty = all) — exact "METHOD PATH" match
             if (!selected.isEmpty()) {
                 results = results.stream()
-                        .filter(r -> selected.stream().anyMatch(r.getEndpointPath()::contains))
+                        .filter(r -> selected.contains(r.getEndpointMethod() + " " + r.getEndpointPath()))
                         .collect(Collectors.toList());
             }
 
