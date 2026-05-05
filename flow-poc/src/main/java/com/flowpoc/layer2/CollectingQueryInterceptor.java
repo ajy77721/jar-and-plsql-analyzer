@@ -7,45 +7,36 @@ import java.util.Map;
 
 public class CollectingQueryInterceptor implements QueryInterceptor {
 
+    /**
+     * One captured DB interaction — covers both MongoDB and SQL.
+     *
+     * For MongoDB: mongoOp is set, sql is null.
+     * For SQL:     mongoOp is UNKNOWN, sql carries the statement.
+     */
     public record CapturedCall(
-            String type,
-            String collection,
-            Object filter,
-            String sql,
-            List<Object> params,
-            List<Object> results
-    ) {}
+            String     collection,    // Mongo collection name, or null for SQL
+            MongoOp    mongoOp,       // operation type; UNKNOWN for SQL
+            Object     input,         // filter / document / pipeline stages / SQL params
+            String     sql,           // SQL statement (null for Mongo)
+            List<Object> params,      // SQL bind params (empty for Mongo)
+            List<Object> results      // returned documents / rows
+    ) {
+        public boolean isMongo() { return mongoOp != MongoOp.UNKNOWN; }
+        public boolean isSql()   { return sql != null; }
+    }
 
     private final List<CapturedCall> captured = new ArrayList<>();
 
     @Override
-    public void onMongoFind(String collection, Object filter, List<Object> results) {
-        captured.add(new CapturedCall("MONGO_FIND", collection, filter, null,
-                Collections.emptyList(), results));
-    }
-
-    @Override
-    public void onMongoAggregate(String collection, List<Object> pipeline, List<Object> results) {
-        captured.add(new CapturedCall("MONGO_AGGREGATE", collection, pipeline, null,
-                Collections.emptyList(), results));
-    }
-
-    @Override
-    public void onMongoInsert(String collection, Object document) {
-        captured.add(new CapturedCall("MONGO_INSERT", collection, document, null,
-                Collections.emptyList(), Collections.emptyList()));
-    }
-
-    @Override
-    public void onMongoUpdate(String collection, Object filter, Object update) {
-        captured.add(new CapturedCall("MONGO_UPDATE", collection, filter, null,
-                Collections.emptyList(), Collections.emptyList()));
+    public void onMongoOperation(String collection, MongoOp op, Object input, List<Object> results) {
+        captured.add(new CapturedCall(collection, op, input, null, Collections.emptyList(), results));
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public void onSqlQuery(String sql, List<Object> params, List<Map<String, Object>> results) {
-        captured.add(new CapturedCall("SQL", null, null, sql, params, (List<Object>) (List<?>) results));
+        captured.add(new CapturedCall(null, MongoOp.UNKNOWN, null, sql, params,
+                (List<Object>) (List<?>) results));
     }
 
     public List<CapturedCall> getCaptured() {

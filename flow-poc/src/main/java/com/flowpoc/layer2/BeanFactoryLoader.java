@@ -50,8 +50,8 @@ public class BeanFactoryLoader {
             Class<?> mongoTemplateClass = Class.forName(
                     "org.springframework.data.mongodb.core.MongoTemplate",
                     false, jarClassLoader.getClassLoader());
-            MongoTemplateInterceptor interceptorFactory =
-                    new MongoTemplateInterceptor(queryInterceptor);
+            UniversalMongoInterceptor interceptorFactory =
+                    new UniversalMongoInterceptor(queryInterceptor);
             Class<?> proxyClass = interceptorFactory.buildProxyClass(mongoTemplateClass);
             context.registerBeanDefinition("mongoTemplate",
                     BeanDefinitionBuilder.genericBeanDefinition(proxyClass)

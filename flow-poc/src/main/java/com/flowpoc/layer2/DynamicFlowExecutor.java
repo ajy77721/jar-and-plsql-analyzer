@@ -26,7 +26,7 @@ public class DynamicFlowExecutor {
 
     public List<CollectingQueryInterceptor.CapturedCall> execute(FlowResult flowResult) {
         List<CollectingQueryInterceptor.CapturedCall> allCaptured = new ArrayList<>();
-        GenericApplicationContext context = null;
+        GenericApplicationContext context;
 
         try {
             context = beanFactoryLoader.buildContext();
@@ -40,17 +40,15 @@ public class DynamicFlowExecutor {
                 try {
                     interceptor.clear();
                     invokeStep(step, context);
-                    List<CollectingQueryInterceptor.CapturedCall> calls = new ArrayList<>(interceptor.getCaptured());
+                    List<CollectingQueryInterceptor.CapturedCall> calls =
+                            new ArrayList<>(interceptor.getCaptured());
                     attachCapturedToStep(step, calls);
                     allCaptured.addAll(calls);
                 } catch (Exception ignored) {
                 }
             }
         } finally {
-            try {
-                context.close();
-            } catch (Exception ignored) {
-            }
+            try { context.close(); } catch (Exception ignored) {}
         }
 
         return allCaptured;
@@ -65,20 +63,15 @@ public class DynamicFlowExecutor {
             String simpleName = className.contains(".")
                     ? className.substring(className.lastIndexOf('.') + 1)
                     : className;
-
             Object bean = null;
-            try {
-                bean = context.getBean(simpleName);
-            } catch (Exception ignored) {
-            }
+            try { bean = context.getBean(simpleName); } catch (Exception ignored) {}
             if (bean == null) return;
 
             Method target = findMethod(bean.getClass(), methodName);
             if (target == null) return;
 
-            Object[] args = buildArgs(target);
             target.setAccessible(true);
-            target.invoke(bean, args);
+            target.invoke(bean, buildArgs(target));
         } catch (Exception ignored) {
         }
     }
@@ -104,26 +97,27 @@ public class DynamicFlowExecutor {
 
     private Object defaultFor(Class<?> type) {
         if (type == boolean.class || type == Boolean.class) return false;
-        if (type == int.class || type == Integer.class) return 0;
-        if (type == long.class || type == Long.class) return 0L;
-        if (type == double.class || type == Double.class) return 0.0;
-        if (type == String.class) return "";
+        if (type == int.class    || type == Integer.class)  return 0;
+        if (type == long.class   || type == Long.class)     return 0L;
+        if (type == double.class || type == Double.class)   return 0.0;
+        if (type == String.class)                           return "";
         return null;
     }
 
     private void attachCapturedToStep(FlowStep step,
                                       List<CollectingQueryInterceptor.CapturedCall> calls) {
         for (CollectingQueryInterceptor.CapturedCall call : calls) {
-            String rawSql = buildDynamicLabel(call);
-            ExtractedQuery.QueryType qtype = call.type().contains("SQL")
+            String rawLabel = buildDynamicLabel(call);
+
+            ExtractedQuery.QueryType qtype = call.isSql()
                     ? ExtractedQuery.QueryType.SELECT
-                    : ExtractedQuery.QueryType.UNKNOWN;
+                    : mongoOpToQueryType(call.mongoOp());
+
             ExtractedQuery eq = new ExtractedQuery(
-                    rawSql, qtype, call.collection(),
+                    rawLabel, qtype, call.collection(),
                     step.getClassName(), step.getMethodName());
 
-            if ("MONGO_AGGREGATE".equals(call.type()) && call.filter() instanceof List<?> stages) {
-                // Reconstruct pipeline string from captured stage objects
+            if (call.mongoOp() == MongoOp.AGGREGATE && call.input() instanceof List<?> stages) {
                 StringBuilder sb = new StringBuilder("[");
                 for (int i = 0; i < stages.size(); i++) {
                     if (i > 0) sb.append(",");
@@ -134,18 +128,34 @@ public class DynamicFlowExecutor {
             }
 
             step.addQuery(eq);
-            step.setBoundSql(rawSql);
+            step.setBoundSql(rawLabel);
             if (call.params() != null) step.setBoundParams(new ArrayList<>(call.params()));
         }
     }
 
     private String buildDynamicLabel(CollectingQueryInterceptor.CapturedCall call) {
-        if (call.sql() != null) return "[DYNAMIC] " + call.sql();
-        if ("MONGO_AGGREGATE".equals(call.type())) {
-            String stages = call.filter() != null ? call.filter().toString() : "[]";
-            return "[DYNAMIC] AGGREGATE " + call.collection() + " PIPELINE " + stages;
+        if (call.isSql()) return "[DYNAMIC:SQL] " + call.sql();
+        String op  = call.mongoOp().name();
+        String col = call.collection() != null ? call.collection() : "unknown";
+        String inp = call.input() != null ? call.input().toString() : "{}";
+        if (call.mongoOp() == MongoOp.AGGREGATE) {
+            return "[DYNAMIC:AGGREGATE] " + col + " PIPELINE " + inp;
         }
-        String filter = call.filter() != null ? call.filter().toString() : "{}";
-        return "[DYNAMIC] " + call.type() + " " + call.collection() + " FILTER " + filter;
+        return "[DYNAMIC:" + op + "] " + col + " INPUT " + inp;
+    }
+
+    private ExtractedQuery.QueryType mongoOpToQueryType(MongoOp op) {
+        if (op == null) return ExtractedQuery.QueryType.UNKNOWN;
+        if (op.isRead())  return ExtractedQuery.QueryType.SELECT;
+        if (op.isWrite()) {
+            return switch (op) {
+                case INSERT, INSERT_MANY, SAVE, SAVE_ALL -> ExtractedQuery.QueryType.INSERT;
+                case UPDATE, UPDATE_MANY, UPSERT         -> ExtractedQuery.QueryType.UPDATE;
+                case DELETE, DELETE_MANY,
+                     FIND_ALL_AND_REMOVE                 -> ExtractedQuery.QueryType.DELETE;
+                default                                  -> ExtractedQuery.QueryType.UNKNOWN;
+            };
+        }
+        return ExtractedQuery.QueryType.UNKNOWN;
     }
 }
