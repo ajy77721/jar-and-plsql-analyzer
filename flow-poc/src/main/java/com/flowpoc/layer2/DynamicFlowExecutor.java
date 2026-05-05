@@ -115,13 +115,24 @@ public class DynamicFlowExecutor {
                                       List<CollectingQueryInterceptor.CapturedCall> calls) {
         for (CollectingQueryInterceptor.CapturedCall call : calls) {
             String rawSql = buildDynamicLabel(call);
+            ExtractedQuery.QueryType qtype = call.type().contains("SQL")
+                    ? ExtractedQuery.QueryType.SELECT
+                    : ExtractedQuery.QueryType.UNKNOWN;
             ExtractedQuery eq = new ExtractedQuery(
-                    rawSql,
-                    call.type().contains("SQL") ? ExtractedQuery.QueryType.SELECT
-                            : ExtractedQuery.QueryType.UNKNOWN,
-                    call.collection(),
-                    step.getClassName(),
-                    step.getMethodName());
+                    rawSql, qtype, call.collection(),
+                    step.getClassName(), step.getMethodName());
+
+            if ("MONGO_AGGREGATE".equals(call.type()) && call.filter() instanceof List<?> stages) {
+                // Reconstruct pipeline string from captured stage objects
+                StringBuilder sb = new StringBuilder("[");
+                for (int i = 0; i < stages.size(); i++) {
+                    if (i > 0) sb.append(",");
+                    sb.append(stages.get(i));
+                }
+                sb.append("]");
+                eq.setAggregationPipeline(sb.toString());
+            }
+
             step.addQuery(eq);
             step.setBoundSql(rawSql);
             if (call.params() != null) step.setBoundParams(new ArrayList<>(call.params()));
@@ -130,6 +141,10 @@ public class DynamicFlowExecutor {
 
     private String buildDynamicLabel(CollectingQueryInterceptor.CapturedCall call) {
         if (call.sql() != null) return "[DYNAMIC] " + call.sql();
+        if ("MONGO_AGGREGATE".equals(call.type())) {
+            String stages = call.filter() != null ? call.filter().toString() : "[]";
+            return "[DYNAMIC] AGGREGATE " + call.collection() + " PIPELINE " + stages;
+        }
         String filter = call.filter() != null ? call.filter().toString() : "{}";
         return "[DYNAMIC] " + call.type() + " " + call.collection() + " FILTER " + filter;
     }

@@ -83,6 +83,9 @@ public class MongoOperation {
         ExtractedQuery eq = new ExtractedQuery(sql, op.toQueryType(),
                 collection, sourceClass, sourceMethod);
         predicates.forEach(eq::addPredicate);
+        if (op == Op.AGGREGATE && pipeline != null) {
+            eq.setAggregationPipeline(pipeline);
+        }
         return eq;
     }
 

@@ -18,6 +18,9 @@ public class ExtractedQuery {
     private final String sourceClass;
     private final String sourceMethod;
 
+    // set when the operation is a MongoDB aggregation pipeline
+    private String aggregationPipeline;
+
     // set during data-fetch phase
     private List<java.util.Map<String, Object>> fetchedSample;
 
@@ -37,6 +40,10 @@ public class ExtractedQuery {
     public List<String> getColumns() { return columns; }
     public String getSourceClass()   { return sourceClass; }
     public String getSourceMethod()  { return sourceMethod; }
+
+    public boolean isAggregation()                              { return aggregationPipeline != null; }
+    public String  getAggregationPipeline()                     { return aggregationPipeline; }
+    public void    setAggregationPipeline(String p)             { this.aggregationPipeline = p; }
 
     public List<java.util.Map<String, Object>> getFetchedSample() { return fetchedSample; }
     public void setFetchedSample(List<java.util.Map<String, Object>> s) { this.fetchedSample = s; }

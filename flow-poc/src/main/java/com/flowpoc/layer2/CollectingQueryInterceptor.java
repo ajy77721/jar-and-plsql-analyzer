@@ -25,6 +25,12 @@ public class CollectingQueryInterceptor implements QueryInterceptor {
     }
 
     @Override
+    public void onMongoAggregate(String collection, List<Object> pipeline, List<Object> results) {
+        captured.add(new CapturedCall("MONGO_AGGREGATE", collection, pipeline, null,
+                Collections.emptyList(), results));
+    }
+
+    @Override
     public void onMongoInsert(String collection, Object document) {
         captured.add(new CapturedCall("MONGO_INSERT", collection, document, null,
                 Collections.emptyList(), Collections.emptyList()));

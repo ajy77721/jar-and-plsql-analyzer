@@ -1,8 +1,8 @@
 package com.flowpoc.engine.visitor;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.flowpoc.engine.AggregationPipelineParser;
 import com.flowpoc.engine.MongoFilterParser;
-import com.flowpoc.model.ExtractedQuery;
 import com.flowpoc.model.FlowStep;
 import com.flowpoc.model.MongoOperation;
 import com.flowpoc.model.Predicate;
@@ -13,18 +13,21 @@ import com.flowpoc.model.Predicate;
  * Sources mined (in priority order):
  *  1. collectionsAccessed  – direct analysis output with collection + op
  *  2. stringLiterals       – Spring Data / MongoTemplate method-name patterns
- *  3. annotations          – @Document, @Query on method
+ *  3. annotations          – @Query (filter) and @Aggregation (pipeline)
  */
 public class MongoOperationVisitor implements CallTreeVisitor {
 
-    private final MongoFilterParser filterParser;
+    private final MongoFilterParser          filterParser;
+    private final AggregationPipelineParser  aggregationParser;
 
     public MongoOperationVisitor() {
-        this.filterParser = new MongoFilterParser();
+        this.filterParser      = new MongoFilterParser();
+        this.aggregationParser = new AggregationPipelineParser();
     }
 
     public MongoOperationVisitor(MongoFilterParser filterParser) {
-        this.filterParser = filterParser;
+        this.filterParser      = filterParser;
+        this.aggregationParser = new AggregationPipelineParser();
     }
 
     @Override
@@ -36,6 +39,8 @@ public class MongoOperationVisitor implements CallTreeVisitor {
         visitStringLiterals(node, step, className, methodName);
         visitAnnotations(node, step, className, methodName);
     }
+
+    // ---- sources ----
 
     private void visitCollectionsAccessed(JsonNode node, FlowStep step,
                                            String cls, String method) {
@@ -54,6 +59,14 @@ public class MongoOperationVisitor implements CallTreeVisitor {
 
             MongoOperation mop = new MongoOperation(collection, MongoOperation.Op.fromString(op),
                     null, cls, method);
+
+            // If the raw entry carries a pipeline field, parse it
+            String pipelineStr = coll.path("pipeline").asText("");
+            if (!pipelineStr.isBlank() && mop.getOp() == MongoOperation.Op.AGGREGATE) {
+                mop.setPipeline(pipelineStr);
+                aggregationParser.parse(pipelineStr).matchPredicates().forEach(mop::addPredicate);
+            }
+
             step.addQuery(mop.toExtractedQuery());
         }
     }
@@ -65,7 +78,6 @@ public class MongoOperationVisitor implements CallTreeVisitor {
 
         for (JsonNode lit : lits) {
             String s = lit.asText("").trim();
-            // Looks like a MongoDB collection name (no spaces, no SQL keywords)
             if (s.isBlank() || s.contains(" ") || s.length() > 80) continue;
             if (looksLikeCollectionName(s)) {
                 MongoOperation mop = new MongoOperation(
@@ -85,19 +97,32 @@ public class MongoOperationVisitor implements CallTreeVisitor {
             String name = ann.path("name").asText("");
             if (!"Query".equals(name) && !"Aggregation".equals(name)) continue;
 
-            JsonNode attrs = ann.path("attributes");
-            String queryStr = attrs.path("value").asText(attrs.path("pipeline").asText(""));
+            JsonNode attrs     = ann.path("attributes");
+            String   queryStr  = attrs.path("value").asText(attrs.path("pipeline").asText(""));
             if (queryStr.isBlank()) continue;
 
             String collection = inferCollectionFromClassName(cls);
-            MongoOperation mop = new MongoOperation(
-                    collection, MongoOperation.Op.FIND, queryStr, cls, method);
-            for (Predicate p : filterParser.parse(queryStr)) {
-                mop.addPredicate(p);
+
+            if ("Aggregation".equals(name)) {
+                MongoOperation mop = new MongoOperation(
+                        collection, MongoOperation.Op.AGGREGATE, queryStr, cls, method);
+                mop.setPipeline(queryStr);
+                AggregationPipelineParser.ParsedPipeline parsed = aggregationParser.parse(queryStr);
+                parsed.matchPredicates().forEach(mop::addPredicate);
+                step.addQuery(mop.toExtractedQuery());
+            } else {
+                // @Query — plain filter
+                MongoOperation mop = new MongoOperation(
+                        collection, MongoOperation.Op.FIND, queryStr, cls, method);
+                for (Predicate p : filterParser.parse(queryStr)) {
+                    mop.addPredicate(p);
+                }
+                step.addQuery(mop.toExtractedQuery());
             }
-            step.addQuery(mop.toExtractedQuery());
         }
     }
+
+    // ---- helpers ----
 
     private String inferOpFromMethod(String method) {
         if (method == null) return "FIND";
@@ -125,7 +150,6 @@ public class MongoOperationVisitor implements CallTreeVisitor {
     private String inferCollectionFromClassName(String cls) {
         if (cls == null || cls.isBlank()) return "unknown";
         String simple = cls.contains(".") ? cls.substring(cls.lastIndexOf('.') + 1) : cls;
-        // Remove Repository/Repo/Dao suffix → likely entity name → lower-case = collection
         String entity = simple.replaceAll("(?i)(Repository|Repo|Dao|Service|Impl)$", "");
         return entity.isEmpty() ? simple.toLowerCase() : entity.toLowerCase();
     }
