@@ -9,6 +9,10 @@ import com.flowpoc.engine.visitor.MongoOperationVisitor;
 import com.flowpoc.engine.visitor.SqlOperationVisitor;
 import com.flowpoc.fetch.DataFetcher;
 import com.flowpoc.fetch.MongoDataFetcher;
+import com.flowpoc.layer2.BeanFactoryLoader;
+import com.flowpoc.layer2.CollectingQueryInterceptor;
+import com.flowpoc.layer2.DynamicFlowExecutor;
+import com.flowpoc.layer2.JarClassLoader;
 import com.flowpoc.model.ExtractedQuery;
 import com.flowpoc.model.FlowResult;
 import com.flowpoc.model.FlowStep;
@@ -20,6 +24,7 @@ import com.mongodb.client.MongoClients;
 import java.io.File;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -78,7 +83,22 @@ public class PocRunner {
             }
         }
 
-        // 5. Write report
+        // 5. Layer 2: dynamic execution to capture bound queries
+        if (config.isLayer2Enabled() && config.getJarFilePath() != null) {
+            try {
+                JarClassLoader jarClassLoader = new JarClassLoader(new File(config.getJarFilePath()));
+                CollectingQueryInterceptor queryInterceptor = new CollectingQueryInterceptor();
+                BeanFactoryLoader bfl = new BeanFactoryLoader(
+                        jarClassLoader, Collections.emptyList(), queryInterceptor);
+                DynamicFlowExecutor executor = new DynamicFlowExecutor(bfl, queryInterceptor, config);
+                for (FlowResult r : results) {
+                    executor.execute(r);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        // 6. Write report
         FlowReporter reporter = new JsonReporter();
         reporter.write(results, out);
     }

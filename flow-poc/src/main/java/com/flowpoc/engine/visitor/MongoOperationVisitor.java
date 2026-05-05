@@ -1,9 +1,11 @@
 package com.flowpoc.engine.visitor;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.flowpoc.engine.MongoFilterParser;
 import com.flowpoc.model.ExtractedQuery;
 import com.flowpoc.model.FlowStep;
 import com.flowpoc.model.MongoOperation;
+import com.flowpoc.model.Predicate;
 
 /**
  * Visitor that extracts MongoDB operations from a call-tree node.
@@ -14,6 +16,16 @@ import com.flowpoc.model.MongoOperation;
  *  3. annotations          – @Document, @Query on method
  */
 public class MongoOperationVisitor implements CallTreeVisitor {
+
+    private final MongoFilterParser filterParser;
+
+    public MongoOperationVisitor() {
+        this.filterParser = new MongoFilterParser();
+    }
+
+    public MongoOperationVisitor(MongoFilterParser filterParser) {
+        this.filterParser = filterParser;
+    }
 
     @Override
     public void visit(JsonNode node, FlowStep step) {
@@ -77,10 +89,12 @@ public class MongoOperationVisitor implements CallTreeVisitor {
             String queryStr = attrs.path("value").asText(attrs.path("pipeline").asText(""));
             if (queryStr.isBlank()) continue;
 
-            // @Query on Spring Data repository — collection is the entity name
             String collection = inferCollectionFromClassName(cls);
             MongoOperation mop = new MongoOperation(
                     collection, MongoOperation.Op.FIND, queryStr, cls, method);
+            for (Predicate p : filterParser.parse(queryStr)) {
+                mop.addPredicate(p);
+            }
             step.addQuery(mop.toExtractedQuery());
         }
     }

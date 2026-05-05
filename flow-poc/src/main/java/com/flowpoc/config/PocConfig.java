@@ -14,6 +14,8 @@ public final class PocConfig {
     private final boolean enableOracle;    // stub — not implemented in v1
     private final String  oracleJdbcUrl;
     private final int     maxEndpoints;    // 0 = all
+    private final boolean layer2Enabled;
+    private final String  jarFilePath;
 
     private PocConfig(Builder b) {
         this.analysisJsonPath = b.analysisJsonPath;
@@ -24,6 +26,8 @@ public final class PocConfig {
         this.enableOracle     = b.enableOracle;
         this.oracleJdbcUrl    = b.oracleJdbcUrl;
         this.maxEndpoints     = b.maxEndpoints;
+        this.layer2Enabled    = b.layer2Enabled;
+        this.jarFilePath      = b.jarFilePath;
     }
 
     public String  getAnalysisJsonPath() { return analysisJsonPath; }
@@ -34,6 +38,8 @@ public final class PocConfig {
     public boolean isEnableOracle()      { return enableOracle; }
     public String  getOracleJdbcUrl()    { return oracleJdbcUrl; }
     public int     getMaxEndpoints()     { return maxEndpoints; }
+    public boolean isLayer2Enabled()     { return layer2Enabled; }
+    public String  getJarFilePath()      { return jarFilePath; }
 
     public static Builder builder() { return new Builder(); }
 
@@ -46,12 +52,15 @@ public final class PocConfig {
         private boolean enableOracle  = false;
         private String  oracleJdbcUrl;
         private int     maxEndpoints  = 0;
+        private boolean layer2Enabled = false;
+        private String  jarFilePath;
 
         public Builder analysisJson(String path)    { this.analysisJsonPath = path; return this; }
         public Builder sampleSize(int n)            { this.sampleSize = n; return this; }
         public Builder mongo(String uri, String db) { this.mongoUri = uri; this.mongoDatabase = db; this.enableMongo = true; return this; }
         public Builder oracle(String jdbcUrl)       { this.oracleJdbcUrl = jdbcUrl; this.enableOracle = true; return this; }
         public Builder maxEndpoints(int n)          { this.maxEndpoints = n; return this; }
+        public Builder layer2(String jarFilePath)   { this.layer2Enabled = true; this.jarFilePath = jarFilePath; return this; }
 
         public PocConfig build() {
             if (analysisJsonPath == null) throw new IllegalStateException("analysisJsonPath required");
