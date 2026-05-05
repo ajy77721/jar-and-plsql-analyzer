@@ -357,7 +357,12 @@ Object.assign(JA.summary, {
                 'WHAT: Side-by-side comparison of static analysis vs. Claude-corrected results — added, removed, and verified collections per endpoint.\n'
                 + 'WHY: Static bytecode analysis has blind spots (dynamic queries, string-built collection names, config-driven routing). Claude verifies against the MongoDB catalog and source code.\n'
                 + 'LOOK FOR: ADDED collections (missed by static analysis — potential blind spots in your migration plan), REMOVED collections (false positives from static analysis), and verification rates per domain.\n'
-                + 'TIP: Available after running Claude correction scan. Focus on ADDED collections — these represent real data dependencies that static analysis missed.' }
+                + 'TIP: Available after running Claude correction scan. Focus on ADDED collections — these represent real data dependencies that static analysis missed.' },
+            { cls: 'sum-tab-flow', id: 'flow', label: 'Flow Analysis', tip:
+                'WHAT: Two one-click actions — (1) Prepare Test Data: walks each endpoint call tree and fetches representative MongoDB records for test datasets. (2) Optimization Analysis: detects missing indexes, N+1 patterns, bulk read/write candidates, aggregation rewrites, and classifies queries as static (cacheable) or transactional.\n'
+                + 'WHY: Test data prep gives developers realistic data for unit tests without hand-crafting fixtures. Optimization analysis surfaces DB anti-patterns that slow your endpoints.\n'
+                + 'LOOK FOR: HIGH-severity findings (N+1, full-table scans, unbounded sorts), STATIC_CACHEABLE queries (load once at startup), and AGGREGATION_REWRITE suggestions ($lookup can eliminate N separate queries).\n'
+                + 'TIP: Download the .md report and share it with the developer who owns the affected endpoint — it includes ready-to-run createIndex commands and suggested code snippets.' }
         ];
         html += '<div class="sum-tabs">';
         for (let ti = 0; ti < tabDefs.length; ti++) {
@@ -379,6 +384,7 @@ Object.assign(JA.summary, {
         html += '<div class="sum-subtab" id="stab-vertical" style="display:none"></div>';
         html += '<div class="sum-subtab" id="stab-claude" style="display:none"></div>';
         html += '<div class="sum-subtab" id="stab-corrections" style="display:none"></div>';
+        html += '<div class="sum-subtab" id="stab-flow" style="display:none"></div>';
 
         html += '</div>';
         container.innerHTML = html;
@@ -441,7 +447,13 @@ Object.assign(JA.summary, {
             'dynamic': () => this._renderDynamicTab ? this._renderDynamicTab(this._epReports, esc) : '<p class="sum-muted" style="padding:20px">Dynamic flows loading...</p>',
             'vertical': () => this._renderVertVerification ? this._renderVertVerification(this._epReports, esc) : '',
             'claude': () => this._renderClaudeTab ? this._renderClaudeTab(this._epReports, esc) : '<p class="sum-muted" style="padding:20px">Claude insights loading...</p>',
-            'corrections': () => this._renderCorrectionsTab ? this._renderCorrectionsTab(this._epReports, esc) : '<p class="sum-muted" style="padding:20px">Claude corrections loading...</p>'
+            'corrections': () => this._renderCorrectionsTab ? this._renderCorrectionsTab(this._epReports, esc) : '<p class="sum-muted" style="padding:20px">Claude corrections loading...</p>',
+            'flow': () => {
+                const html = JA.flowAnalysis ? JA.flowAnalysis._renderFlowTab(this._analysis, esc) : '<p class="sum-muted" style="padding:20px">Flow analysis loading...</p>';
+                // Pre-fill connection fields after DOM is ready
+                if (JA.flowAnalysis) setTimeout(() => JA.flowAnalysis._prefillConnections(), 50);
+                return html;
+            }
         };
         if (this._renderReadyResolve) this._renderReadyResolve();
     },
