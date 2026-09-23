@@ -85,8 +85,11 @@ public class AdminController {
     public AdminController(AdminAuditService audit,
                            ObjectProvider<SsoSessionRegistry> ssoRegistry,
                            ObjectProvider<AwsSsoLoginService> ssoLogin,
-                           @Value("${app.admin.username:amp-admin}") String username,
-                           @Value("${app.admin.password:amp-admin-pwd}") String password) {
+                           // Env-var fallback (APP_ADMIN_USERNAME/PASSWORD) lets Kanopy inject
+                           // real credentials via envSecrets without code changes; the property
+                           // defaults are for local dev only and must not reach production.
+                           @Value("${app.admin.username:${APP_ADMIN_USERNAME:amp-admin}}") String username,
+                           @Value("${app.admin.password:${APP_ADMIN_PASSWORD:amp-admin-pwd}}") String password) {
         this.audit = audit;
         this.ssoRegistry = ssoRegistry;
         this.ssoLogin = ssoLogin;
