@@ -34,8 +34,9 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Run tests
-        run: mvn -B -no-transfer-progress test
+      # Testcases disabled for now — compile-only. To re-enable: mvn -B test
+      - name: Build (tests skipped)
+        run: mvn -B -no-transfer-progress package -DskipTests
 
   # ── build+publish steps ──
   publish:

@@ -9,7 +9,7 @@ service:
 ingress:
   enabled: true
   hosts:
-    - amp-analyzer.<your-kanopy-namespace>.prod.corp.mongodb.com
+    - amp-analyzer.amp-delivery.prod.corp.mongodb.com
 
 env:
   PORT: "8083"
