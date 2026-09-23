@@ -20,6 +20,7 @@ steps:
 
 - name: slack-start
   pull: if-not-exists
+  failure: ignore
   image: plugins/slack
   settings:
     channel: amp-analyzer
@@ -126,6 +127,7 @@ steps:
 
 - name: slack-finish
   pull: if-not-exists
+  failure: ignore
   image: plugins/slack
   settings:
     channel: amp-analyzer
