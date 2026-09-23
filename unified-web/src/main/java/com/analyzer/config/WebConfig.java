@@ -39,5 +39,9 @@ public class WebConfig implements WebMvcConfigurer {
         registry.addViewController("/parser/").setViewName("forward:/parser/index.html");
         registry.addViewController("/conversion").setViewName("redirect:/conversion/");
         registry.addViewController("/conversion/").setViewName("forward:/conversion/index.html");
+        // Admin portal — same sub-app pattern. The page itself is public (its login form is the
+        // gate); the /api/admin/** endpoints it calls are guarded by the admin credentials.
+        registry.addViewController("/admin-portal").setViewName("redirect:/admin-portal/");
+        registry.addViewController("/admin-portal/").setViewName("forward:/admin-portal/index.html");
     }
 }

@@ -57,7 +57,12 @@ class NoClientFilterTest {
         //    an earlier session per each file's own comment): the fetched array is a handful of
         //    statement types / risk-scored rows / table-verification rows, not a corpus scan.
         ALLOWED.put("parser/js/complexity.js", 3);
-        ALLOWED.put("parser/js/statements.js", 3);
+        // statements.js: 6 = the sortKeys/searchFn/extraFilter option objects of TWO PA.tf.init
+        // tables (the statements grid + the per-table detail panel's own pager). These are the
+        // shared framework's OWN extension points — PA.tf does the actual filtering/sorting, the
+        // data is fully resident — not hand-rolled chains. Budget was 3 when the file had one
+        // table; the detail-panel pager added the second triple.
+        ALLOWED.put("parser/js/statements.js", 6);
         ALLOWED.put("parser/js/joinSummary.js", 4);
         ALLOWED.put("parser/js/claudeEnrichment.js", 1);
         // refs.js (§90 UI-024 bug fix): one procedure's own calls/callers, not a corpus scan.

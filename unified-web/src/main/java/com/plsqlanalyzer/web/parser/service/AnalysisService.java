@@ -30,6 +30,14 @@ import java.util.stream.Stream;
 public class AnalysisService {
 
     private final Path flowOutputDir;
+    /**
+     * The app's config directory — the parent of {@code plsql-config.yaml}. TLS material paths
+     * (trust certs, client certs/keys, truststores, wallets) are stored relative to it and are
+     * resolved against it by {@code ConnectionConfig.buildSslProperties(configDir)} /
+     * {@code getJdbcUrl(configDir)}. May be {@code null} if the config file has no parent (a bare
+     * filename), in which case the generated env config falls back to the non-TLS URL.
+     */
+    private final Path configDir;
     /** Schema-resolver cache prefix: {data}/cache, addressed as a store key. */
     private static final ArtifactKey CACHE_ROOT_KEY = ArtifactKey.of("cache");
 
@@ -51,7 +59,8 @@ public class AnalysisService {
                            ClaudePersistenceService claudePersistenceService,
                            @Qualifier("parserArtifactStore") ArtifactStore store,
                            com.analyzer.storage.AnalysisRepository repository,
-                           com.plsqlanalyzer.web.controller.detail.ObjectResolutionService objectResolutionService) {
+                           com.plsqlanalyzer.web.controller.detail.ObjectResolutionService objectResolutionService,
+                           @Qualifier("plsqlConfigFilePath") Path plsqlConfigFilePath) {
         // The one place a local root is still built from the property, and deliberately the only
         // one: FlowAnalysisMain is an external entry point given --output-dir as a String and
         // writing through java.io, and buildEnvConfigFile must land beside that output on LOCAL
@@ -66,6 +75,7 @@ public class AnalysisService {
         this.store = store;
         this.repository = repository;
         this.objectResolutionService = objectResolutionService;
+        this.configDir = plsqlConfigFilePath != null ? plsqlConfigFilePath.getParent() : null;
     }
 
     /**
@@ -688,7 +698,15 @@ public class AnalysisService {
     private Path buildEnvConfigFile(EnvironmentConfig envConfig, String project, String environment,
                                      Path outputDir) {
         try {
-            String jdbcUrl = envConfig.getJdbcUrl();
+            // The connection that drives this environment: its db_type decides the driver, and its
+            // TLS settings decide whether the parser must be handed SSL properties too. Same
+            // selection rule as the db_type line below (the first configured connection).
+            ConnectionConfig activeConn = envConfig.getConnections().isEmpty()
+                    ? null : envConfig.getConnections().get(0);
+            boolean tlsEnabled = activeConn != null && activeConn.isTlsEnabled()
+                    && configDir != null;
+
+            String jdbcUrl = tlsEnabled ? activeConn.getJdbcUrl(configDir) : envConfig.getJdbcUrl();
             if (jdbcUrl == null || jdbcUrl.isBlank()) {
                 org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
                     .warn("[AnalysisService] No jdbcUrl for {}/{} — falling back to global config", project, environment);
@@ -696,12 +714,27 @@ public class AnalysisService {
             }
 
             StringBuilder sb = new StringBuilder();
-            sb.append("jdbc_url: \"").append(jdbcUrl.replace("\"", "\\\"")).append("\"\n");
+            sb.append("jdbc_url: \"").append(escapeYaml(jdbcUrl)).append("\"\n");
             // Write db_type so DbConnectionManager can load the right driver and use the right queries
-            String dbType = envConfig.getConnections().isEmpty() ? "ORACLE"
-                    : envConfig.getConnections().get(0).getDbType();
+            String dbType = activeConn == null ? "ORACLE" : activeConn.getDbType();
             if (dbType == null || dbType.isBlank()) dbType = "ORACLE";
             sb.append("db_type: \"").append(dbType.toUpperCase()).append("\"\n");
+            // Carry TLS settings through to the parser: the truststore/wallet/client-cert
+            // properties must be handed to DriverManager alongside user/password, or a
+            // TLS-required database rejects the parser's connection. Flattened to a plain
+            // string→string map; NONE when TLS is disabled so the file stays byte-identical to
+            // pre-TLS output for existing configs.
+            if (tlsEnabled) {
+                java.util.Properties ssl = activeConn.buildSslProperties(configDir);
+                if (ssl != null && !ssl.isEmpty()) {
+                    sb.append("ssl_properties:\n");
+                    // Sorted for a deterministic, diff-friendly file.
+                    for (String key : new java.util.TreeSet<>(ssl.stringPropertyNames())) {
+                        sb.append("  \"").append(escapeYaml(key)).append("\": \"")
+                          .append(escapeYaml(ssl.getProperty(key))).append("\"\n");
+                    }
+                }
+            }
             sb.append("db_users:\n");
             for (ConnectionConfig c : envConfig.getConnections()) {
                 String user = c.getUsername() != null ? c.getUsername() : "";
@@ -731,6 +764,16 @@ public class AnalysisService {
                 .warn("[AnalysisService] Could not build env config for {}/{}: {}", project, environment, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Escape a value for a double-quoted YAML scalar. Backslashes are escaped first: TLS paths
+     * (wallet directories, keystore locations) routinely contain Windows backslashes, which would
+     * otherwise start an escape sequence and corrupt the generated YAML.
+     */
+    private static String escapeYaml(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     /**

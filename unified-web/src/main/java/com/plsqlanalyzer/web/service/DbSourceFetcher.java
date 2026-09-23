@@ -1,9 +1,11 @@
 package com.plsqlanalyzer.web.service;
 
+import com.plsqlanalyzer.config.ConnectionConfig;
 import com.plsqlanalyzer.config.DbUserConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.sql.*;
 import java.util.*;
 
@@ -170,6 +172,12 @@ public class DbSourceFetcher {
 
     /**
      * Get a JDBC connection for the given user config using the default JDBC URL.
+     *
+     * <p>LEGACY, NO-TLS PATH — retained so callers that only hold a {@link DbUserConfig} keep
+     * compiling and behaving exactly as before. It carries no SSL properties, so a connection
+     * configured with {@code sslMode} != NONE will NOT negotiate TLS here. Callers that have the
+     * owning {@link ConnectionConfig} should use
+     * {@link #getConnection(DbUserConfig, ConnectionConfig, Path)} instead.
      */
     public Connection getConnection(DbUserConfig user) throws SQLException {
         return DriverManager.getConnection(jdbcUrl, user.getUsername(), user.getPassword());
@@ -177,9 +185,60 @@ public class DbSourceFetcher {
 
     /**
      * Get a JDBC connection using a custom JDBC URL (for environment-specific connections).
+     *
+     * <p>LEGACY, NO-TLS PATH — see {@link #getConnection(DbUserConfig)}. Prefer
+     * {@link #getConnection(DbUserConfig, String, ConnectionConfig, Path)} when the
+     * {@link ConnectionConfig} is available.
      */
     public Connection getConnection(DbUserConfig user, String customJdbcUrl) throws SQLException {
         return DriverManager.getConnection(customJdbcUrl, user.getUsername(), user.getPassword());
+    }
+
+    /**
+     * TLS-aware variant: opens a connection using the connection's OWN JDBC URL and SSL
+     * properties, both resolved against the app's config directory.
+     *
+     * <p>URL comes from {@link ConnectionConfig#getJdbcUrl(Path)} (which may rewrite the URL for
+     * TLS, e.g. Oracle TCPS) and {@link ConnectionConfig#buildSslProperties(Path)} supplies the
+     * truststore/wallet/client-cert properties. Both resolve relative paths under {@code configDir}
+     * — the parent of {@code plsql-config.yaml} — so the certs uploaded through the config
+     * controller are found. When TLS is disabled the SSL Properties are empty and this is
+     * equivalent to the legacy path.
+     *
+     * @param configDir the app config directory (parent of {@code plsql-config.yaml})
+     */
+    public Connection getConnection(DbUserConfig user, ConnectionConfig conn, Path configDir)
+            throws SQLException {
+        ConnectionConfig effective = conn;
+        String url = effective != null ? effective.getJdbcUrl(configDir) : jdbcUrl;
+        if (url == null || url.isBlank()) url = jdbcUrl;
+        return DriverManager.getConnection(url, connectionProperties(user, effective, configDir));
+    }
+
+    /**
+     * TLS-aware variant with a caller-supplied JDBC URL (environment override): the custom URL is
+     * used as-is, but the {@link ConnectionConfig}'s SSL properties are still merged in so a
+     * TLS-enabled connection keeps its truststore/wallet when the URL is overridden.
+     */
+    public Connection getConnection(DbUserConfig user, String customJdbcUrl,
+                                    ConnectionConfig conn, Path configDir) throws SQLException {
+        return DriverManager.getConnection(customJdbcUrl,
+                connectionProperties(user, conn, configDir));
+    }
+
+    /**
+     * Build the JDBC {@link Properties} shared by the TLS-aware overloads: credentials first,
+     * then the connection's TLS settings (empty when TLS is off).
+     */
+    private static Properties connectionProperties(DbUserConfig user, ConnectionConfig conn,
+                                                  Path configDir) {
+        Properties props = new Properties();
+        if (user.getUsername() != null) props.setProperty("user", user.getUsername());
+        if (user.getPassword() != null) props.setProperty("password", user.getPassword());
+        if (conn != null) {
+            props.putAll(conn.buildSslProperties(configDir));
+        }
+        return props;
     }
 
     public String getJdbcUrl() {

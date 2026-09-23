@@ -1,9 +1,22 @@
 package com.plsqlanalyzer.config;
 
+import java.nio.file.Path;
+
 public class Db2Dialect implements DbDialect {
 
     @Override
     public String buildJdbcUrl(ConnectionConfig conn) {
+        return buildJdbcUrl(conn, null);
+    }
+
+    /**
+     * DB2 has no TLS URL parameters: encryption is enabled via the driver property
+     * {@code sslConnection=true} and trust material via {@code sslTrustStoreLocation}, both
+     * produced by {@link ConnectionConfig#buildSslProperties(java.nio.file.Path)}. The URL is
+     * therefore identical with and without TLS.
+     */
+    @Override
+    public String buildJdbcUrl(ConnectionConfig conn, Path configDir) {
         if (conn.getCustomUrl() != null && !conn.getCustomUrl().isBlank()) {
             return conn.getCustomUrl();
         }

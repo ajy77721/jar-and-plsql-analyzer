@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/shared/mongodb-theme.css?v=1789287064">
+    <!-- Escape is loaded but every dynamic value below is also written through textContent: the
+         page never builds markup from data, so there is no path from an identity string to HTML. -->
+    <script src="/shared/escape.js?v=1788675772"></script>
+    <script src="/shared/theme-toggle.js?v=1789138484"></script>
+    <title>AMP Admin Portal</title>
+    <style>
+        /* Page-local aliases and layout only. Every colour comes from
+           /shared/mongodb-theme.css — redeclaring a token here would shadow it and break the
+           light/dark switch. */
+        :root {
+            --card-bg: var(--bg-card);
+            --text-light: var(--text-muted);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        [hidden] { display: none !important; }
+
+        /* ── login ─────────────────────────────────────────────────────────── */
+        .login-wrap {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .login-card {
+            width: 100%;
+            max-width: 380px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 8px 28px rgba(0, 30, 43, 0.08);
+        }
+        .login-card h1 { font-size: 20px; margin-bottom: 6px; }
+        .login-card p.sub { color: var(--text-muted); font-size: 13px; margin-bottom: 22px; }
+        .field { margin-bottom: 14px; }
+        .field label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+        .field input {
+            width: 100%;
+            padding: 10px 12px;
+            font-size: 14px;
+            color: var(--text);
+            background: var(--bg);
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+        }
+        .field input:focus { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--focus-ring); }
+        .error-box {
+            background: var(--badge-red-bg);
+            color: var(--badge-red);
+            border: 1px solid var(--badge-red);
+            border-radius: 8px;
+            padding: 9px 12px;
+            font-size: 13px;
+            margin-bottom: 14px;
+        }
+
+        /* ── buttons ───────────────────────────────────────────────────────── */
+        .btn {
+            font: inherit;
+            font-size: 13px;
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--border-strong);
+            background: var(--bg-card);
+            color: var(--text);
+            cursor: pointer;
+        }
+        .btn:hover { background: var(--bg-hover); }
+        .btn:disabled { opacity: 0.5; cursor: default; }
+        .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
+        .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+        .btn.danger { background: var(--badge-red-bg); border-color: var(--badge-red); color: var(--badge-red); }
+        .btn.danger:hover { background: var(--badge-red); color: var(--text-inverse); }
+        .btn.small { padding: 5px 10px; font-size: 12px; }
+        .btn.block { width: 100%; margin-top: 6px; }
+
+        /* ── shell ─────────────────────────────────────────────────────────── */
+        header.top {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 14px 22px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 5;
+        }
+        header.top h1 { font-size: 17px; font-weight: 600; }
+        header.top .spacer { flex: 1; }
+        .tabs { display: flex; gap: 6px; padding: 14px 22px 0; }
+        .tab {
+            font: inherit;
+            font-size: 13px;
+            padding: 8px 16px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+        .tab:hover { color: var(--text); background: var(--bg-hover); }
+        .tab.active {
+            background: var(--bg-card);
+            border-color: var(--border);
+            color: var(--accent);
+            font-weight: 600;
+        }
+        main { padding: 0 22px 40px; }
+        .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0 8px 8px 8px;
+            padding: 18px;
+        }
+        .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+        .toolbar .spacer { flex: 1; }
+        .toolbar label { font-size: 12px; color: var(--text-muted); }
+        .toolbar input[type=text], .toolbar select {
+            font: inherit;
+            font-size: 13px;
+            padding: 6px 9px;
+            color: var(--text);
+            background: var(--bg);
+            border: 1px solid var(--border-strong);
+            border-radius: 7px;
+        }
+        .meta { color: var(--text-muted); font-size: 12px; }
+        .empty { color: var(--text-muted); font-size: 13px; padding: 26px 4px; text-align: center; }
+
+        /* ── tables ────────────────────────────────────────────────────────── */
+        .table-scroll { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th {
+            text-align: left;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 10px;
+            white-space: nowrap;
+        }
+        td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+        tbody tr:hover { background: var(--bg-hover); }
+        td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+        td.nowrap, th.nowrap { white-space: nowrap; }
+        .muted { color: var(--text-muted); }
+
+        /* ── badges ────────────────────────────────────────────────────────── */
+        .badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 999px;
+            margin: 1px 3px 1px 0;
+            white-space: nowrap;
+        }
+        .badge-gray { background: var(--badge-gray-bg); color: var(--badge-gray); }
+        .badge-green { background: var(--badge-green-bg); color: var(--badge-green); }
+        .badge-blue { background: var(--badge-blue-bg); color: var(--badge-blue); }
+        .badge-orange { background: var(--badge-orange-bg); color: var(--badge-orange); }
+        .badge-red { background: var(--badge-red-bg); color: var(--badge-red); }
+        .badge-purple { background: var(--badge-purple-bg); color: var(--badge-purple); }
+        .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-disabled); }
+        .dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); }
+        .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+        .toast {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            max-width: 380px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--accent);
+            border-radius: 8px;
+            padding: 11px 14px;
+            font-size: 13px;
+            box-shadow: 0 8px 24px rgba(0, 30, 43, 0.18);
+            z-index: 20;
+        }
+        .toast.error { border-left-color: var(--red); }
+    </style>
+</head>
+<body>
+
+<!-- ── login view ─────────────────────────────────────────────────────────── -->
+<div id="login-view" class="login-wrap">
+    <form id="login-form" class="login-card" autocomplete="off">
+        <h1>AMP Admin Portal</h1>
+        <p class="sub">Sign in with the operator credentials configured on the server.</p>
+        <div id="login-error" class="error-box" hidden></div>
+        <div class="field">
+            <label for="login-user">Username</label>
+            <input id="login-user" name="username" type="text" autocomplete="username" spellcheck="false" required>
+        </div>
+        <div class="field">
+            <label for="login-pass">Password</label>
+            <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button id="login-btn" class="btn primary block" type="submit">Sign in</button>
+    </form>
+</div>
+
+<!-- ── authenticated app ──────────────────────────────────────────────────── -->
+<div id="app-view" hidden>
+    <header class="top">
+        <h1>AMP Admin Portal</h1>
+        <span class="spacer"></span>
+        <button id="refresh-btn" class="btn small" type="button">Refresh</button>
+        <button id="logout-btn" class="btn small" type="button">Log out</button>
+    </header>
+
+    <div class="tabs" role="tablist">
+        <button id="tab-users" class="tab active" type="button" role="tab">Users</button>
+        <button id="tab-audit" class="tab" type="button" role="tab">Audit History</button>
+    </div>
+
+    <main>
+        <!-- Users -->
+        <section id="panel-users" class="panel" role="tabpanel">
+            <div class="toolbar">
+                <span id="users-meta" class="meta">Loading…</span>
+                <span class="spacer"></span>
+                <span class="meta">Auto-refreshes every 30s</span>
+            </div>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Identity</th>
+                        <th>Email</th>
+                        <th>Account / Role</th>
+                        <th>Bucket / Region</th>
+                        <th>First seen</th>
+                        <th>Last seen</th>
+                        <th>Events</th>
+                        <th>Active</th>
+                        <th>Actions</th>
+                    </tr>
+                    </thead>
+                    <tbody id="users-body"></tbody>
+                </table>
+            </div>
+            <div id="users-empty" class="empty" hidden>No users have been seen yet.</div>
+        </section>
+
+        <!-- Audit -->
+        <section id="panel-audit" class="panel" role="tabpanel" hidden>
+            <div class="toolbar">
+                <label for="audit-type">Type</label>
+                <select id="audit-type">
+                    <option value="">All types</option>
+                    <option value="LOGIN">LOGIN</option>
+                    <option value="CONNECT">CONNECT</option>
+                    <option value="SWAP-DENIED">SWAP-DENIED</option>
+                    <option value="LOGOUT">LOGOUT</option>
+                </select>
+                <label for="audit-user">User</label>
+                <input id="audit-user" type="text" placeholder="name, email or account id" spellcheck="false">
+                <button id="audit-apply" class="btn small" type="button">Apply</button>
+                <span class="spacer"></span>
+                <button id="audit-clear" class="btn danger small" type="button">Clear audit history</button>
+            </div>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>User</th>
+                        <th>Account / Role</th>
+                        <th>Bucket / Region</th>
+                        <th>Capabilities</th>
+                        <th>Session</th>
+                    </tr>
+                    </thead>
+                    <tbody id="audit-body"></tbody>
+                </table>
+            </div>
+            <div id="audit-empty" class="empty" hidden>No audit events match the current filters.</div>
+            <div class="toolbar" style="margin-top:14px;">
+                <span id="audit-meta" class="meta"></span>
+                <span class="spacer"></span>
+                <button id="audit-more" class="btn small" type="button" hidden>Load more</button>
+            </div>
+        </section>
+    </main>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    var TOKEN_KEY = 'awsAdminToken';
+    var PAGE_SIZE = 200;
+    var POLL_MS = 30000;
+
+    var state = {
+        tab: 'users',
+        auditLimit: PAGE_SIZE,
+        pollTimer: null,
+        busy: false
+    };
+
+    var $ = function (id) { return document.getElementById(id); };
+
+    /* ── DOM helpers: every dynamic value goes in as text, never as markup ── */
+
+    function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = String(text);
+        return node;
+    }
+
+    function td(text, className) {
+        return el('td', className || null, text === undefined || text === null || text === '' ? '—' : text);
+    }
+
+    function fmtTime(ms) {
+        if (!ms || !isFinite(ms)) return '—';
+        try { return new Date(Number(ms)).toLocaleString(); } catch (e) { return '—'; }
+    }
+
+    function typeBadge(type) {
+        var cls = 'badge-gray';
+        if (type === 'LOGIN') cls = 'badge-green';
+        else if (type === 'CONNECT') cls = 'badge-blue';
+        else if (type === 'SWAP-DENIED') cls = 'badge-red';
+        else if (type === 'LOGOUT') cls = 'badge-orange';
+        return el('span', 'badge ' + cls, type || 'UNKNOWN');
+    }
+
+    function textOr(value) {
+        return (value === undefined || value === null || value === '') ? '—' : String(value);
+    }
+
+    function toast(message, isError) {
+        var node = el('div', 'toast' + (isError ? ' error' : ''), message);
+        document.body.appendChild(node);
+        setTimeout(function () { node.remove(); }, 4200);
+    }
+
+    /* ── token + auth handling ─────────────────────────────────────────────── */
+
+    function readToken() {
+        try { return sessionStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+    }
+
+    function storeToken(token) {
+        try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) { /* storage unavailable */ }
+    }
+
+    function dropToken() {
+        try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* storage unavailable */ }
+    }
+
+    function showLogin(message) {
+        stopPolling();
+        $('app-view').hidden = true;
+        $('login-view').hidden = false;
+        var box = $('login-error');
+        if (message) {
+            box.textContent = message;
+            box.hidden = false;
+        } else {
+            box.textContent = '';
+            box.hidden = true;
+        }
+        var pass = $('login-pass');
+        if (pass) pass.value = '';
+    }
+
+    function showApp() {
+        $('login-view').hidden = true;
+        $('app-view').hidden = false;
+        selectTab(state.tab);
+        startPolling();
+    }
+
+    /* Any 403 on any call means the token is gone or stale: drop it and ask again. */
+    function handleForbidden(message) {
+        dropToken();
+        showLogin(message || 'Admin login required');
+    }
+
+    async function api(path, options) {
+        options = options || {};
+        var headers = { 'X-Admin-Key': readToken() || '' };
+        var init = { method: options.method || 'GET', headers: headers };
+        if (options.body !== undefined) {
+            headers['Content-Type'] = 'application/json';
+            init.body = JSON.stringify(options.body);
+        }
+        var res = await fetch(path, init);
+        var data = null;
+        try { data = await res.json(); } catch (e) { data = null; }
+        if (res.status === 403) {
+            handleForbidden(data && data.error ? data.error : 'Admin login required');
+            throw new Error('forbidden');
+        }
+        if (!res.ok) {
+            throw new Error((data && data.error) ? data.error : ('Request failed (' + res.status + ')'));
+        }
+        return data;
+    }
+
+    /* ── login form ────────────────────────────────────────────────────────── */
+
+    $('login-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        var user = $('login-user').value;
+        var pass = $('login-pass').value;
+        var btn = $('login-btn');
+        btn.disabled = true;
+        try {
+            var res = await fetch('/api/admin/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user, password: pass })
+            });
+            var data = null;
+            try { data = await res.json(); } catch (e) { data = null; }
+            if (res.ok && data && data.ok && data.token) {
+                storeToken(data.token);
+                $('login-error').hidden = true;
+                showApp();
+                await loadUsers();
+            } else {
+                $('login-error').textContent = (data && data.error) ? data.error : 'Invalid admin credentials';
+                $('login-error').hidden = false;
+            }
+        } catch (e) {
+            $('login-error').textContent = 'Could not reach the admin API.';
+            $('login-error').hidden = false;
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    $('logout-btn').addEventListener('click', async function () {
+        try { await api('/api/admin/logout', { method: 'POST' }); } catch (e) { /* best effort */ }
+        dropToken();
+        showLogin('');
+    });
+
+    /* ── tabs ──────────────────────────────────────────────────────────────── */
+
+    function selectTab(tab) {
+        state.tab = tab;
+        var users = tab === 'users';
+        $('tab-users').classList.toggle('active', users);
+        $('tab-audit').classList.toggle('active', !users);
+        $('panel-users').hidden = !users;
+        $('panel-audit').hidden = users;
+        if (users) loadUsers(); else loadAudit(true);
+    }
+
+    $('tab-users').addEventListener('click', function () { selectTab('users'); });
+    $('tab-audit').addEventListener('click', function () { selectTab('audit'); });
+    $('refresh-btn').addEventListener('click', function () {
+        if (state.tab === 'users') loadUsers(); else loadAudit(true);
+    });
+
+    /* ── users tab ─────────────────────────────────────────────────────────── */
+
+    async function loadUsers() {
+        try {
+            var data = await api('/api/admin/users');
+            renderUsers((data && data.users) || []);
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    function renderUsers(users) {
+        var body = $('users-body');
+        body.textContent = '';
+        $('users-empty').hidden = users.length > 0;
+
+        users.forEach(function (u) {
+            var tr = document.createElement('tr');
+
+            var nameCell = td(u.name || u.key);
+            tr.appendChild(nameCell);
+            tr.appendChild(td(u.email));
+            tr.appendChild(td((textOr(u.accountName) + ' / ' + textOr(u.roleName)), 'muted'));
+            tr.appendChild(td(textOr(u.bucket) + ' / ' + textOr(u.region), 'mono'));
+
+            tr.appendChild(td(fmtTime(u.firstSeenEpochMs), 'nowrap muted'));
+            tr.appendChild(td(fmtTime(u.lastSeenEpochMs), 'nowrap muted'));
+
+            var events = el('td');
+            var counts = u.events || {};
+            var keys = Object.keys(counts);
+            if (!keys.length) {
+                events.appendChild(el('span', 'muted', '—'));
+            } else {
+                keys.sort();
+                keys.forEach(function (k) {
+                    events.appendChild(typeBadge(k));
+                    events.appendChild(el('span', 'muted', String(counts[k]) + ' '));
+                });
+            }
+            tr.appendChild(events);
+
+            var activeCell = el('td', 'nowrap');
+            activeCell.appendChild(el('span', 'dot' + (u.currentlyActive ? ' on' : '')));
+            activeCell.appendChild(el('span', 'muted', u.currentlyActive ? ' active' : ' offline'));
+            tr.appendChild(activeCell);
+
+            var actions = el('td');
+            var wrap = el('div', 'row-actions');
+            var revoke = el('button', 'btn danger small', 'Revoke session');
+            revoke.type = 'button';
+            revoke.disabled = !u.currentlyActive || !u.sessionIdMasked;
+            revoke.addEventListener('click', function () {
+                confirmRevoke(u);
+            });
+            var forget = el('button', 'btn small', 'Forget user');
+            forget.type = 'button';
+            forget.addEventListener('click', function () {
+                confirmForget(u);
+            });
+            wrap.appendChild(revoke);
+            wrap.appendChild(forget);
+            actions.appendChild(wrap);
+            tr.appendChild(actions);
+
+            body.appendChild(tr);
+        });
+
+        $('users-meta').textContent = users.length + ' user' + (users.length === 1 ? '' : 's');
+    }
+
+    async function confirmRevoke(u) {
+        var who = u.name || u.email || u.key;
+        if (!window.confirm('Revoke the active AWS SSO session for ' + who + '?\n\n'
+                + 'They will be signed out and must authenticate again.')) return;
+        try {
+            var res = await api('/api/admin/sessions/' + encodeURIComponent(u.sessionIdMasked) + '/revoke',
+                    { method: 'POST' });
+            if (res && res.revoked) {
+                toast('Session revoked for ' + who + '.');
+            } else {
+                toast((res && res.note) ? res.note : 'Session could not be revoked.', true);
+            }
+            loadUsers();
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    async function confirmForget(u) {
+        var who = u.name || u.email || u.key;
+        if (!window.confirm('Forget ' + who + '?\n\n'
+                + 'Their rollup is removed and all of their audit lines are deleted from the audit log. '
+                + 'This cannot be undone.')) return;
+        try {
+            await api('/api/admin/users/' + encodeURIComponent(u.key) + '/forget', { method: 'POST' });
+            toast('Forgot ' + who + '.');
+            loadUsers();
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    /* ── audit tab ─────────────────────────────────────────────────────────── */
+
+    async function loadAudit(reset) {
+        if (reset) state.auditLimit = PAGE_SIZE;
+        var type = $('audit-type').value;
+        var user = $('audit-user').value.trim();
+        var query = '?limit=' + state.auditLimit
+                + (type ? '&type=' + encodeURIComponent(type) : '')
+                + (user ? '&user=' + encodeURIComponent(user) : '');
+        try {
+            var data = await api('/api/admin/audit' + query);
+            renderAudit((data && data.events) || []);
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    function renderAudit(events) {
+        var body = $('audit-body');
+        body.textContent = '';
+        $('audit-empty').hidden = events.length > 0;
+
+        events.forEach(function (e) {
+            var tr = document.createElement('tr');
+            tr.appendChild(td(fmtTime(e.timestampEpochMs), 'nowrap muted'));
+
+            var typeCell = el('td');
+            typeCell.appendChild(typeBadge(e.type));
+            tr.appendChild(typeCell);
+
+            tr.appendChild(td(e.name || e.email || e.accountId));
+            tr.appendChild(td(textOr(e.accountId) + ' / ' + textOr(e.role), 'muted'));
+            tr.appendChild(td(textOr(e.bucket) + ' / ' + textOr(e.region), 'mono'));
+
+            var capCell = el('td');
+            var caps = e.capabilities;
+            if (caps) {
+                var parts = [];
+                if (caps.read) parts.push('read');
+                if (caps.upload) parts.push('upload');
+                if (caps.write) parts.push('write');
+                var label = caps.ok ? 'ok' : 'failed';
+                capCell.appendChild(el('span', 'badge ' + (caps.ok ? 'badge-green' : 'badge-red'), label));
+                if (parts.length) capCell.appendChild(el('span', 'muted', ' ' + parts.join(', ')));
+                if (caps.error) capCell.appendChild(el('div', 'muted', caps.error));
+            } else {
+                capCell.appendChild(el('span', 'muted', '—'));
+            }
+            tr.appendChild(capCell);
+
+            tr.appendChild(td(e.sessionIdMasked, 'mono'));
+            body.appendChild(tr);
+        });
+
+        $('audit-meta').textContent = events.length + ' event' + (events.length === 1 ? '' : 's') + ' shown';
+        $('audit-more').hidden = events.length < state.auditLimit;
+    }
+
+    $('audit-apply').addEventListener('click', function () { loadAudit(true); });
+    $('audit-type').addEventListener('change', function () { loadAudit(true); });
+    $('audit-user').addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') { event.preventDefault(); loadAudit(true); }
+    });
+    $('audit-more').addEventListener('click', function () {
+        state.auditLimit += PAGE_SIZE;
+        loadAudit(false);
+    });
+
+    $('audit-clear').addEventListener('click', async function () {
+        if (!window.confirm('Clear the entire audit history?\n\n'
+                + 'Every audit line is deleted and all user rollups are reset. This cannot be undone.')) return;
+        try {
+            await api('/api/admin/audit/clear', { method: 'POST' });
+            toast('Audit history cleared.');
+            loadAudit(true);
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    });
+
+    /* ── polling ───────────────────────────────────────────────────────────── */
+
+    function startPolling() {
+        stopPolling();
+        state.pollTimer = setInterval(function () {
+            if (document.hidden) return;
+            if (state.tab !== 'users') return;
+            if ($('app-view').hidden) return;
+            loadUsers();
+        }, POLL_MS);
+    }
+
+    function stopPolling() {
+        if (state.pollTimer) {
+            clearInterval(state.pollTimer);
+            state.pollTimer = null;
+        }
+    }
+
+    /* ── boot ──────────────────────────────────────────────────────────────── */
+
+    (async function boot() {
+        if (!readToken()) {
+            showLogin('');
+            return;
+        }
+        /* Probe with the stored token: a 403 here is the page telling us the token is stale or
+           was never valid, and the api() helper reacts by re-showing the login form. */
+        showApp();
+        await loadUsers();
+    })();
+})();
+</script>
+</body>
+</html>

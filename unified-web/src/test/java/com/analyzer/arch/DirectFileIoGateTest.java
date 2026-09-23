@@ -67,17 +67,37 @@ class DirectFileIoGateTest {
         ALLOWED.put("unified-web/AppConfig", 1);
         ALLOWED.put("jar-analyzer-core/DomainConfigLoader", 5);
         ALLOWED.put("plsql-config/ConfigLoader", 3);
-        ALLOWED.put("unified-web/ConfigController", 3);
+        // Budget raised 3→6: the TLS cert-upload endpoint writes user-uploaded certificates into
+        // {config}/certs/<connection>/ — the self-contained-connection design puts cert material
+        // beside plsql-config.yaml on purpose (drivers need file paths; see the plsql-config TLS
+        // entries below). Same local-config concern as the original 3 ops.
+        ALLOWED.put("unified-web/ConfigController", 6);
 
         // ── Credential files — plaintext production DB passwords. These MUST stay on local disk;
         //    CredentialGuardStore throws if they are pushed through the store.
-        ALLOWED.put("unified-web/AnalysisService", 7);
+        ALLOWED.put("unified-web/AnalysisService", 6);
         ALLOWED.put("unified-web/ParserAnalysisExecutor", 1);
         ALLOWED.put("plsql-parser/DbConnectionManager", 2);
+
+        // ── TLS certificate paths for JDBC — the drivers themselves consume FILE paths (MySQL
+        //    trustCertificateKeyStoreUrl, Postgres sslrootcert/sslcert, Oracle and Db2 keystores),
+        //    so cert material must live at a resolvable local path inside the config tree. These
+        //    classes only RESOLVE paths and convert keystores (PEM→JKS/PKCS12); no analysis
+        //    artifact ever flows through here, so the ArtifactStore route cannot apply.
+        ALLOWED.put("plsql-config/ConnectionConfig", 5);
+        ALLOWED.put("plsql-config/MySqlDialect", 1);
+        ALLOWED.put("plsql-config/PostgresDialect", 3);
+        ALLOWED.put("plsql-config/SqlServerDialect", 1);
+        ALLOWED.put("plsql-config/TlsKeystoreConverter", 7);
 
         // ── Logging and traversal guards — local operational concerns, not artifacts.
         ALLOWED.put("unified-web/LogController", 10);
         ALLOWED.put("unified-web/SourceController", 4);
+        // Admin audit trail (who logged in / connected / was denied) — same reasoning as the log
+        // archive: it must survive a store being unreachable (an admin investigating a denial needs
+        // it regardless of S3 health), and the admin-portal privacy rule says identity metadata
+        // stays inside the data tree, never in shared storage.
+        ALLOWED.put("unified-web/AdminAuditService", 12);
         // Reads the local log directory in order to EMPTY it: it ships each rolled log into the
         // store and deletes the local copy. The local reads are the mechanism by which logs stop
         // being local, so they are the point rather than an exception to it. The live log must stay
@@ -90,7 +110,7 @@ class DirectFileIoGateTest {
 
         // ── Storage bootstrap — the one Path.of that builds the store root itself.
         ALLOWED.put("plsql-parser/FlowAnalysisMain", 1);
-        ALLOWED.put("flow-poc/PocRunner", 2);
+        // flow-poc/PocRunner deleted (was budget 2): fully migrated to the store — 0 direct ops.
         ALLOWED.put("jar-analyzer-core/JarDataPaths", 1);
         // Mode 4 (entity-ingest) — IngestMain.storeSource(String) builds a StorageFactory.Settings
         // the identical way FlowAnalysisMain/PocRunner do above, for the identical reason: a CLI's

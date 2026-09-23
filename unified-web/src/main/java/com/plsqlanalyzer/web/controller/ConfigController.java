@@ -9,12 +9,14 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -27,6 +29,15 @@ public class ConfigController {
     // and firewall rate-limit (ORA-17800) triggered by rapid repeated TCP handshakes on every page load.
     private static final long QUICK_TEST_CACHE_MS = 300_000;
     private final Map<String, Object[]> quickTestCache = new ConcurrentHashMap<>();
+
+    // Uploaded certificates/wallets live under {configDir}/certs/{connectionName}/{filename}.
+    // Only this conservative character set is accepted for BOTH the connection-name directory
+    // component and the filename — it excludes '/', '\\', ':' and '..' can never survive as a
+    // distinct path segment, so a crafted name cannot escape the certs directory.
+    private static final Pattern SAFE_PATH_SEGMENT = Pattern.compile("[A-Za-z0-9._-]+");
+    // Hard cap on a single uploaded certificate/wallet (base64 or PEM text decodes to bytes,
+    // and it is the DECODED byte length that is checked).
+    private static final long MAX_CERT_BYTES = 5L * 1024 * 1024;
 
     private final PlsqlConfig config;
     private final Path configFilePath;
@@ -265,6 +276,20 @@ public class ConfigController {
         if (updated.getCustomUrl() != null) existing.setCustomUrl(updated.getCustomUrl());
         if (updated.getDescription() != null) existing.setDescription(updated.getDescription());
         if (updated.getSchemasRaw() != null) existing.setSchemas(updated.getSchemasRaw());
+        // TLS fields must be carried across explicitly: this endpoint copies field-by-field (it
+        // does NOT replace the object), so anything omitted here would silently be dropped on save.
+        if (updated.getSslMode() != null) existing.setSslMode(updated.getSslMode());
+        if (updated.getHostnameValidation() != null) existing.setHostnameValidation(updated.getHostnameValidation());
+        if (updated.getTrustCertPath() != null) existing.setTrustCertPath(updated.getTrustCertPath());
+        if (updated.getClientCertPath() != null) existing.setClientCertPath(updated.getClientCertPath());
+        if (updated.getClientKeyPath() != null) existing.setClientKeyPath(updated.getClientKeyPath());
+        if (updated.getTruststorePath() != null) existing.setTruststorePath(updated.getTruststorePath());
+        // Blank means "unchanged", mirroring the password handling above (the editor cannot
+        // pre-fill a secret, so an untouched form submits an empty string).
+        if (updated.getTruststorePassword() != null && !updated.getTruststorePassword().isBlank()) {
+            existing.setTruststorePassword(updated.getTruststorePassword());
+        }
+        if (updated.getWalletPath() != null) existing.setWalletPath(updated.getWalletPath());
         existing.setTested(true);
         save();
         log.info("Updated connection {} in {}/{}", existing.getName(), projectName, envName);
@@ -290,6 +315,109 @@ public class ConfigController {
     @PostMapping("/test-connection")
     public ResponseEntity<?> testAnyConnection(@RequestBody ConnectionConfig conn) {
         return doTest(conn);
+    }
+
+    // ── Certificate / wallet upload for TLS-enabled connections ──
+
+    /**
+     * Store one certificate, key material, truststore or Oracle wallet file for a connection.
+     *
+     * <p>The body is {@code { "filename": "trust.pem", "content": "<PEM text or base64>") }}. PEM
+     * text (anything containing a {@code -----BEGIN ...-----} marker) is written verbatim; every
+     * other payload is treated as base64, which is how the UI ships binary artifacts such as
+     * {@code .zip} wallets or {@code .jks}/{@code .p12} keystores. The decoded payload is capped
+     * at {@link #MAX_CERT_BYTES}.
+     *
+     * <p>The file lands at {@code {configDir}/certs/{connectionName}/{filename}} and the response
+     * returns that path RELATIVE to the config dir:
+     * {@code { "ok": true, "path": "certs/{connectionName}/{filename}" }}. That relative string is
+     * exactly what belongs in the connection's {@code trustCertPath}/{@code walletPath}/
+     * {@code clientCertPath} fields, because {@code ConnectionConfig.buildSslProperties(configDir)}
+     * resolves those fields against the same config dir at connect time.
+     *
+     * <p>Both the connection name and the filename are restricted to {@code [A-Za-z0-9._-]} and
+     * {@code ..} is rejected outright, so a crafted value cannot traverse out of the certs tree.
+     * Certificate contents are never logged.
+     */
+    @PostMapping("/certs/{connectionName}")
+    public ResponseEntity<?> uploadCertificate(@PathVariable String connectionName,
+                                               @RequestBody Map<String, String> body) {
+        try {
+            String filename = body != null ? body.get("filename") : null;
+            String content = body != null ? body.get("content") : null;
+            if (filename == null || filename.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "filename is required"));
+            }
+            if (content == null || content.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "content is required"));
+            }
+            if (!isSafePathSegment(connectionName)) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false,
+                        "error", "Invalid connection name — only letters, digits, dot, dash and underscore are allowed"));
+            }
+            if (!isSafePathSegment(filename)) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false,
+                        "error", "Invalid filename — only letters, digits, dot, dash and underscore are allowed"));
+            }
+
+            byte[] bytes = decodeCertificateContent(filename, content);
+            if (bytes.length == 0) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "Certificate content is empty"));
+            }
+            if (bytes.length > MAX_CERT_BYTES) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false,
+                        "error", "Certificate exceeds the " + (MAX_CERT_BYTES / (1024 * 1024)) + " MB limit"));
+            }
+
+            Path certsRoot = configDir().resolve("certs");
+            Path dir = certsRoot.resolve(connectionName);
+            Path target = dir.resolve(filename).normalize();
+            // Defence in depth: the character whitelist already blocks separators and "..", but
+            // verify the resolved path really is inside the certs tree before touching disk.
+            if (!target.startsWith(certsRoot.normalize())) {
+                return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "Invalid certificate path"));
+            }
+            Files.createDirectories(dir);
+            Files.write(target, bytes);
+
+            String relativePath = "certs/" + connectionName + "/" + filename;
+            // Log the name only — never the certificate/key/token contents.
+            log.info("Stored certificate '{}' for connection '{}'", filename, connectionName);
+            return ResponseEntity.ok(Map.of("ok", true, "path", relativePath));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("ok", false, "error", e.getMessage()));
+        } catch (Exception e) {
+            log.error("Failed to store certificate for connection '{}': {}", connectionName, e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of("ok", false,
+                    "error", "Failed to store certificate"));
+        }
+    }
+
+    /** True when a single path component matches the upload whitelist and cannot traverse. */
+    private static boolean isSafePathSegment(String value) {
+        return value != null && !value.isBlank()
+                && !value.contains("..")
+                && SAFE_PATH_SEGMENT.matcher(value).matches();
+    }
+
+    /**
+     * Decode an uploaded certificate payload. PEM text is stored verbatim; anything else is
+     * assumed to be base64 (binary wallets/keystores). Falling back to the raw string when base64
+     * decoding fails keeps a marker-less PEM usable instead of rejecting it.
+     */
+    private static byte[] decodeCertificateContent(String filename, String content) {
+        String trimmed = content.trim();
+        String lower = filename.toLowerCase(Locale.ROOT);
+        boolean binaryName = lower.endsWith(".zip") || lower.endsWith(".jks")
+                || lower.endsWith(".p12") || lower.endsWith(".pfx");
+        if (!binaryName && trimmed.contains("-----BEGIN")) {
+            return trimmed.getBytes(StandardCharsets.UTF_8);
+        }
+        try {
+            return Base64.getMimeDecoder().decode(trimmed);
+        } catch (IllegalArgumentException notBase64) {
+            return trimmed.getBytes(StandardCharsets.UTF_8);
+        }
     }
 
     // ── Quick test for a saved project/environment (uses stored credentials) ──
@@ -332,7 +460,9 @@ public class ConfigController {
             Map<String, String> m = new LinkedHashMap<>();
             m.put("name", c.getName());
             m.put("username", c.getUsername());
-            m.put("jdbcUrl", c.getJdbcUrl() != null ? c.getJdbcUrl() : "");
+            // Show the TLS-aware URL — the one runtime will actually dial for this connection.
+            String resolvedUrl = c.getJdbcUrl(configDir());
+            m.put("jdbcUrl", resolvedUrl != null ? resolvedUrl : "");
             m.put("description", c.getDescription() != null ? c.getDescription() : "");
             connSummaries.add(m);
         }
@@ -351,8 +481,22 @@ public class ConfigController {
         return project.findEnvironment(envName);
     }
 
+    /**
+     * The app's config directory — the parent of {@code plsql-config.yaml}. This is the base
+     * against which {@link ConnectionConfig#buildSslProperties(java.nio.file.Path)} and
+     * {@link ConnectionConfig#getJdbcUrl(java.nio.file.Path)} resolve relative certificate,
+     * wallet and truststore paths, so test-connect and runtime agree on every TLS artifact.
+     */
+    private Path configDir() {
+        Path parent = configFilePath != null ? configFilePath.getParent() : null;
+        return parent != null ? parent : Path.of(".");
+    }
+
     private ResponseEntity<?> doTest(ConnectionConfig conn) {
-        String jdbcUrl = conn.getJdbcUrl();
+        Path configDir = configDir();
+        // Build the URL with the config dir so TLS-only URL rewrites (e.g. Oracle TCPS / wallet
+        // service URLs) are exercised by the test, not just by runtime connections.
+        String jdbcUrl = conn.getJdbcUrl(configDir);
         if (jdbcUrl == null || jdbcUrl.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("success", false,
                     "error", "Cannot build JDBC URL — check hostname, port, and database/service name"));
@@ -395,6 +539,11 @@ public class ConfigController {
             props.setProperty("socketTimeout", "15000");
         }
         // SQL Server timeout already embedded in JDBC URL via loginTimeout parameter
+
+        // Merge the connection's TLS settings (ssl mode, hostname validation, trust/client certs,
+        // truststores, wallet) LAST so the test dials with exactly the Properties runtime will use.
+        // buildSslProperties() returns an empty Properties when TLS is disabled — a no-op then.
+        props.putAll(conn.buildSslProperties(configDir));
 
         try {
             long start = System.currentTimeMillis();

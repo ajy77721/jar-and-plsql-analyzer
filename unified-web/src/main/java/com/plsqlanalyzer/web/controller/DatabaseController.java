@@ -1,6 +1,7 @@
 package com.plsqlanalyzer.web.controller;
 
 import com.plsqlanalyzer.analyzer.service.AnalysisService;
+import com.plsqlanalyzer.config.ConnectionConfig;
 import com.plsqlanalyzer.config.DbUserConfig;
 import com.plsqlanalyzer.config.EnvironmentConfig;
 import com.plsqlanalyzer.config.PlsqlConfig;
@@ -14,9 +15,11 @@ import com.plsqlanalyzer.web.service.PersistenceService;
 import com.plsqlanalyzer.web.util.DbDialectSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.*;
 
@@ -35,18 +38,27 @@ public class DatabaseController {
     private final AnalysisService analysisService;
     private final PersistenceService persistenceService;
     private final ObjectResolutionService objectResolutionService;
+    /**
+     * The app config directory — the parent of {@code plsql-config.yaml}. TLS material paths
+     * (trust certs, client certs/keys, truststores, wallets) are stored relative to it and are
+     * resolved against it by {@code ConnectionConfig.getJdbcUrl(configDir)} /
+     * {@code buildSslProperties(configDir)}. May be {@code null} if the config file has no parent.
+     */
+    private final Path configFilePath;
 
     // Cache fetched sources so source viewer can access them
     private final Map<String, String> fetchedSources = new LinkedHashMap<>();
 
     public DatabaseController(PlsqlConfig config, DbSourceFetcher dbFetcher,
                               AnalysisService analysisService, PersistenceService persistenceService,
-                              ObjectResolutionService objectResolutionService) {
+                              ObjectResolutionService objectResolutionService,
+                              @Qualifier("plsqlConfigFilePath") Path configFilePath) {
         this.config = config;
         this.dbFetcher = dbFetcher;
         this.analysisService = analysisService;
         this.persistenceService = persistenceService;
         this.objectResolutionService = objectResolutionService;
+        this.configFilePath = configFilePath;
     }
 
     @GetMapping("/users")
@@ -72,6 +84,7 @@ public class DatabaseController {
             return ResponseEntity.badRequest().body(Map.of("success", false, "error", "User not found in config: " + username));
         }
 
+        // legacy no-TLS path: no ConnectionConfig available at this site
         boolean ok = dbFetcher.testConnection(user);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("success", ok);
@@ -112,7 +125,10 @@ public class DatabaseController {
             user = users.get(0);
         }
         String jdbcUrl = resolveJdbcUrl(project, env);
-        try (Connection conn = jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user)) {
+        ConnectionConfig connConfig = resolveConnectionConfig(project, env, user);
+        try (Connection conn = connConfig != null
+                ? dbFetcher.getConnection(user, connConfig, configDir())
+                : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user))) {
             return ResponseEntity.ok(dbFetcher.listObjects(conn, schema.toUpperCase()));
         } catch (Exception e) {
             // 503, not an empty list. This queries the live database, so an empty answer reads as
@@ -140,7 +156,16 @@ public class DatabaseController {
         }
         DbUserConfig user = findUser(username);
         if (user == null) return ResponseEntity.notFound().build();
-        return ResponseEntity.ok(dbFetcher.listObjects(user));
+        String jdbcUrl = resolveJdbcUrl(project, env);
+        ConnectionConfig connConfig = resolveConnectionConfig(project, env, user);
+        try (Connection conn = connConfig != null
+                ? dbFetcher.getConnection(user, connConfig, configDir())
+                : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user))) {
+            return ResponseEntity.ok(dbFetcher.listObjects(conn, user.getUsername()));
+        } catch (Exception e) {
+            log.error("listObjects failed for {}: {}", username, e.getMessage());
+            return ResponseEntity.ok(new ArrayList<>());
+        }
     }
 
     @GetMapping("/source/{username}/{objectName}")
@@ -186,7 +211,18 @@ public class DatabaseController {
             }
         }
 
-        String source = dbFetcher.fetchSource(user, username.toUpperCase(), objectName.toUpperCase(), objectType);
+        String jdbcUrl = resolveJdbcUrl(project, env);
+        ConnectionConfig connConfig = resolveConnectionConfig(project, env, user);
+        String source;
+        try (Connection conn = connConfig != null
+                ? dbFetcher.getConnection(user, connConfig, configDir())
+                : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user))) {
+            source = dbFetcher.fetchSource(conn, username.toUpperCase(), objectName.toUpperCase(), objectType);
+        } catch (Exception e) {
+            log.error("Failed to fetch source for {}.{} ({}): {}",
+                    username, objectName, objectType, e.getMessage());
+            return ResponseEntity.notFound().build();
+        }
         if (source == null || source.isBlank()) {
             return ResponseEntity.notFound().build();
         }
@@ -268,10 +304,13 @@ public class DatabaseController {
         if (user == null) return ResponseEntity.notFound().build();
 
         String jdbcUrl = resolveJdbcUrl(project, env);
+        ConnectionConfig connConfig = resolveConnectionConfig(project, env, user);
         OracleDictionaryService dictService = analysisService.getDictionaryService();
         List<Map<String, Object>> packages = new ArrayList<>();
 
-        try (Connection conn = jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user)) {
+        try (Connection conn = connConfig != null
+                ? dbFetcher.getConnection(user, connConfig, configDir())
+                : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user))) {
             List<ObjectRecord> objects = dictService.listObjects(conn, username);
 
             // Group by package name
@@ -343,10 +382,13 @@ public class DatabaseController {
         if (user == null) return ResponseEntity.notFound().build();
 
         String jdbcUrl = resolveJdbcUrl(project, env);
+        ConnectionConfig connConfig = resolveConnectionConfig(project, env, user);
         OracleDictionaryService dictService = analysisService.getDictionaryService();
         List<Map<String, Object>> procs = new ArrayList<>();
 
-        try (Connection conn = jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user)) {
+        try (Connection conn = connConfig != null
+                ? dbFetcher.getConnection(user, connConfig, configDir())
+                : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user))) {
             List<ProcedureRecord> records = dictService.listProcedures(conn, username, packageName);
             for (ProcedureRecord rec : records) {
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -418,7 +460,10 @@ public class DatabaseController {
             });
         }
         for (DbUserConfig user : orderedUsers) {
-            try (Connection conn = jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user)) {
+            ConnectionConfig connConfig = resolveConnectionConfig(project, env, user);
+            try (Connection conn = connConfig != null
+                    ? dbFetcher.getConnection(user, connConfig, configDir())
+                    : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user))) {
 
                 // Search all_tables across all visible schemas for this table
                 String findSql = "SELECT owner FROM all_tables WHERE table_name = ? AND ROWNUM = 1";
@@ -626,11 +671,14 @@ public class DatabaseController {
         }
 
         String execJdbcUrl = resolveJdbcUrl(project, environment);
+        ConnectionConfig execConnConfig = resolveConnectionConfig(project, environment, user);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("sql", sql);
         result.put("schema", user.getUsername());
 
-        try (Connection conn = execJdbcUrl != null ? dbFetcher.getConnection(user, execJdbcUrl) : dbFetcher.getConnection(user)) {
+        try (Connection conn = execConnConfig != null
+                ? dbFetcher.getConnection(user, execConnConfig, configDir())
+                : (execJdbcUrl != null ? dbFetcher.getConnection(user, execJdbcUrl) : dbFetcher.getConnection(user))) {
             // Set read-only and limit results
             conn.setReadOnly(true);
 
@@ -731,7 +779,10 @@ public class DatabaseController {
         if (users.isEmpty()) throw new java.sql.SQLException("No database user configured");
         DbUserConfig user = users.get(0);
         String jdbcUrl = resolveJdbcUrl(projectName, envName);
-        return jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user);
+        ConnectionConfig connConfig = resolveConnectionConfig(projectName, envName, user);
+        return connConfig != null
+                ? dbFetcher.getConnection(user, connConfig, configDir())
+                : (jdbcUrl != null ? dbFetcher.getConnection(user, jdbcUrl) : dbFetcher.getConnection(user));
     }
 
     private Map<String, Object> browseUnsupported(String projectName, String envName) {
@@ -767,5 +818,32 @@ public class DatabaseController {
             }
         }
         return dbFetcher.getJdbcUrl();
+    }
+
+    /**
+     * The app config directory — parent of {@code plsql-config.yaml}. Relative TLS material paths
+     * (trust certs, client certs/keys, truststores, wallets) are resolved against it by
+     * {@link ConnectionConfig#getJdbcUrl(java.nio.file.Path)} /
+     * {@link ConnectionConfig#buildSslProperties(java.nio.file.Path)}.
+     */
+    private Path configDir() {
+        return configFilePath != null ? configFilePath.getParent() : null;
+    }
+
+    /**
+     * Resolve the {@link ConnectionConfig} backing a dial for the given project/environment and
+     * user, so the TLS-aware {@link DbSourceFetcher#getConnection(DbUserConfig, ConnectionConfig, Path)}
+     * path can be used (it applies TCPS/SSL URL rewriting and truststore/wallet properties).
+     *
+     * <p>Returns {@code null} in legacy single-environment mode (no {@code ConnectionConfig}
+     * objects exist there — only {@code DbUserConfig}) or when no project/environment is supplied,
+     * in which case callers fall back to the legacy no-TLS overloads.
+     */
+    private ConnectionConfig resolveConnectionConfig(String projectName, String envName, DbUserConfig user) {
+        if (projectName == null || projectName.isBlank() || envName == null || envName.isBlank()) return null;
+        EnvironmentConfig env = config.resolveEnvironment(projectName, envName);
+        if (env == null || env.getConnections().isEmpty()) return null;
+        ConnectionConfig match = user != null ? env.findConnectionByUsername(user.getUsername()) : null;
+        return match != null ? match : env.getConnections().get(0);
     }
 }

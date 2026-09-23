@@ -763,6 +763,18 @@ PA.api = {
         return res.json();
     },
 
+    // Upload a TLS certificate/wallet for a connection.
+    // content: PEM text for .pem, base64 for .zip/.jks → { ok:true, path:"certs/{name}/{filename}" }
+    async uploadCert(connectionName, filename, content) {
+        const res = await fetch(`/api/plsql/config/certs/${encodeURIComponent(connectionName)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename, content })
+        });
+        if (!res.ok) return PA.apiFail(res);
+        return res.json();
+    },
+
     async addConnection(projectName, envName, conn) {
         const res = await fetch(`/api/plsql/config/projects/${encodeURIComponent(projectName)}/environments/${encodeURIComponent(envName)}/connections`, {
             method: 'POST',

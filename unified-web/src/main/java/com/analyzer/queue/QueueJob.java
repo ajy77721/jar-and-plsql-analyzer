@@ -1,5 +1,8 @@
 package com.analyzer.queue;
 
+import com.analyzer.storage.sso.CapturedCredentials;
+import com.analyzer.storage.sso.CapturedStores;
+
 import java.time.Instant;
 import java.util.*;
 
@@ -46,6 +49,19 @@ public class QueueJob {
     public volatile Long totalMs;
     public volatile Thread runThread;
     public volatile Map<String, Object> followUpJob;
+
+    /**
+     * The submitter's per-user SSO snapshot, captured on the request thread at submit time so the
+     * job can run under their stores and role on a queue thread with no request context.
+     *
+     * <p>Deliberately <b>not</b> part of {@link #metadata}: it holds live credentials and is never
+     * serialized or exposed. {@link #toMap()} / {@link #toSummaryMap()} omit it, no code writes a
+     * {@code QueueJob} to disk or JSON, and {@code transient} documents the intent. A {@code null}
+     * snapshot means "no SSO session" (e.g. {@code app.auth.sso.required=false}) and the job keeps
+     * the legacy shared-bean / default-credentials path.
+     */
+    public transient CapturedStores capturedStores;
+    public transient CapturedCredentials capturedCredentials;
 
     public QueueJob(Type type, String displayName, Map<String, Object> metadata) {
         this.id = UUID.randomUUID().toString().substring(0, 8);

@@ -239,18 +239,25 @@ public class OracleDefinitionAndQueryDiversityAuditTest extends ParserTestBase {
         dumpSub("A6: proc calling TABLE(fn())", proc);
     }
 
-    // ── B7: table alias with vs without AS ──────────────────────────────────────
+    // ── B7: alias with vs without AS ──────────────────────────────────────
+    // Corrected: the original version of this test used `JOIN customers AS c` and expected a
+    // clean parse — but genuine Oracle REJECTS `AS` before a TABLE alias (ORA-00933; AS is only
+    // legal for COLUMN aliases), so no source that ever ran on Oracle can contain it, and the
+    // parser flagging it is correct behavior, not a grammar gap. The legal Oracle diversity is:
+    // column alias WITH AS and WITHOUT AS, plus a bare table alias — all three below.
     @Test
-    @DisplayName("B7: table alias without AS vs with AS")
+    @DisplayName("B7: column alias with AS and without AS; bare table alias")
     void aliasWithWithoutAs() {
         String sql = """
                 CREATE OR REPLACE PACKAGE BODY test_pkg AS
                   PROCEDURE proc_alias_mix IS
                     v_cnt NUMBER;
                   BEGIN
-                    SELECT COUNT(*) INTO v_cnt
+                    SELECT COUNT(*) AS total, o.customer_id cust_id
+                    INTO v_cnt
                     FROM orders o
-                    JOIN customers AS c ON c.id = o.customer_id;
+                    JOIN customers c ON c.id = o.customer_id
+                    GROUP BY o.customer_id;
                   END proc_alias_mix;
                 END test_pkg;
                 /

@@ -28,6 +28,15 @@ public class DbConnectionManager implements AutoCloseable {
     private final String jdbcUrl;
     private final List<DbUser> dbUsers;
     private final String dbType;
+    /**
+     * Optional TLS properties parsed from the generated env YAML's {@code ssl_properties:}
+     * mapping (written by AnalysisService from the source connection's
+     * {@code ConnectionConfig.buildSslProperties(configDir)}). Empty when the source connection
+     * has TLS disabled, in which case it is not merged at all. These are merged into every
+     * connection's Properties AFTER user/password and timeouts, so the driver sees the truststore/
+     * wallet/client-cert settings at connect time.
+     */
+    private final Properties sslProperties = new Properties();
     private final AtomicInteger dbCallCount = new AtomicInteger(0);
 
     // Max connections per DB user.  3 users × 3 = 9 total.
@@ -124,6 +133,18 @@ public class DbConnectionManager implements AutoCloseable {
                 ));
             }
         }
+
+        // Optional TLS settings. Absent for TLS-disabled configs (the common, backward-compatible
+        // case) and for every config generated before this feature existed. Values are flattened to
+        // strings by the writer; coerce defensively here in case a Path or number round-trips.
+        Object sslObj = config.get("ssl_properties");
+        if (sslObj instanceof Map<?, ?> sslMap) {
+            for (Map.Entry<?, ?> e : sslMap.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) {
+                    sslProperties.setProperty(e.getKey().toString(), e.getValue().toString());
+                }
+            }
+        }
         initPools();
         loadDriver();
     }
@@ -202,6 +223,11 @@ public class DbConnectionManager implements AutoCloseable {
         if (!isMySQL() && !isSqlServer() && !isDB2() && !isPostgres()) {
             props.setProperty("oracle.jdbc.loginTimeout", "15");
             props.setProperty("oracle.net.CONNECT_TIMEOUT", "15000");
+        }
+        // TLS settings last: truststore/wallet/client-cert properties from the generated env
+        // config. Empty (and skipped) for TLS-disabled connections.
+        if (!sslProperties.isEmpty()) {
+            props.putAll(sslProperties);
         }
         Connection conn = DriverManager.getConnection(jdbcUrl, props);
         conn.setAutoCommit(false);

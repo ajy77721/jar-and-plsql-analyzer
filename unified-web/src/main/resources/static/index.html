@@ -351,7 +351,7 @@
                         style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
                         onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
                     <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.5;margin-top:6px">
-                        Your AWS access portal URL (IAM Identity Center &rarr; Settings).<br>
+                        Your AWS access portal URL, e.g. https://d-xxxxxxxxxx.awsapps.com/start.<br>
                         Saved in this browser for next time.
                     </div>
                     <button id="awsSsoStartBtn" onclick="awsSsoContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
@@ -380,6 +380,8 @@
                 <div id="awsSsoStep3" style="display:none">
                     <div id="awsSsoError3" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
                     <div id="awsSsoConnectedMsg" style="display:none;padding:10px 14px;background:var(--badge-green-bg);color:var(--green);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+                    <div id="awsSsoCapabilities" style="display:none;margin-bottom:14px"></div>
+                    <div id="awsSsoIdentity" style="display:none;font-size:12px;font-weight:600;color:var(--sidebar-text);margin-bottom:12px"></div>
                     <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">S3 bucket</label>
                     <input id="awsSsoBucket" type="text" value="amp-analyzer-parse-jar"
                         style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none;margin-bottom:14px"
@@ -451,7 +453,9 @@
 
     async function loadClaudeStats() {
         try {
-            const d = await fetch('/api/sessions/claude-stats').then(r => r.ok ? r.json() : null).catch(() => null);
+            const res = await fetch('/api/sessions/claude-stats');
+            if (awsSsoHandle401(res)) return;
+            const d = res.ok ? await res.json().catch(() => null) : null;
             if (!d) return;
 
             const calls    = d.totalCalls    || 0;
@@ -535,6 +539,7 @@
     async function fetchJars() {
         if (!_cachedJars) {
             const res = await fetch('/api/jar/jars');
+            if (awsSsoHandle401(res)) return;
             _cachedJars = await res.json();
         }
         return _cachedJars;
@@ -542,6 +547,7 @@
     async function fetchWars() {
         if (!_cachedWars) {
             const res = await fetch('/api/war/wars');
+            if (awsSsoHandle401(res)) return;
             _cachedWars = await res.json();
         }
         return _cachedWars;
@@ -549,6 +555,7 @@
     async function fetchParserAnalyses() {
         if (!_cachedParserAnalyses) {
             const res = await fetch('/api/parser/analyses');
+            if (awsSsoHandle401(res)) return;
             _cachedParserAnalyses = await res.json();
         }
         return _cachedParserAnalyses;
@@ -1089,7 +1096,9 @@
     let _queuePollId = null;
     async function pollQueue() {
         try {
-            const d = await fetch('/api/queue').then(r => r.json());
+            const res = await fetch('/api/queue');
+            if (awsSsoHandle401(res)) return;
+            const d = await res.json();
             const prev = queueState;
             queueState = d;
             renderQueue();
@@ -1143,24 +1152,35 @@
     // AWS SSO login -> S3 access
     // ---------------------------------------------------------------------------
     const AWS_SSO_START_URL_KEY = 'awsSsoStartUrl';
+    const AWS_SSO_BUCKET_KEY = 'awsSsoBucket';   // last bucket the connect call succeeded with
+    const AWS_SSO_REGION_KEY = 'awsSsoRegion';
     const AWS_SSO_DEFAULT_BUCKET = 'amp-analyzer-parse-jar';
     const AWS_SSO_DEFAULT_REGION = 'ap-south-1';
     const AWS_SSO_POLL_FALLBACK_MS = 5000;
 
     let _awsSsoPollId = null;    // setInterval handle for /api/auth/aws/poll
     let _awsSsoSession = null;   // last known session from /api/auth/aws/session or /connect
+    let _awsSsoAutoOpened = false;  // auto-open the login modal at most once per page load
 
     function setAwsSsoPill(session) {
         const el = document.getElementById('awsSsoStatus');
         if (el) {
             if (session && session.connected) {
-                el.textContent = 'AWS: connected · ' + (session.role || '?') + ' @ ' + (session.bucket || '?');
+                // Per-user identity: prefer the authenticated person, fall back to the account.
+                // Never render token material — only name/email/account/role/bucket.
+                const who = session.name || session.email || session.accountName || '?';
+                el.textContent = 'AWS: ' + who;
                 el.style.background = 'var(--badge-green-bg)';
                 el.style.color = 'var(--green)';
+                // capabilities is only present once the connect call has been verified server-side.
+                el.title = session.capabilities
+                    ? '✓verified — ' + (session.role || '?') + ' @ ' + (session.bucket || '?')
+                    : '';
             } else {
                 el.textContent = 'AWS: not connected';
                 el.style.background = 'var(--sidebar-hover)';
                 el.style.color = 'var(--sidebar-muted)';
+                el.title = '';
             }
         }
         const summary = document.getElementById('awsSsoBarSummary');
@@ -1183,11 +1203,82 @@
             _awsSsoSession = d.connected ? d : null;
             setAwsSsoPill(d);
             awsSsoFillTargets(_awsSsoSession);
+            // No session yet -> prompt for login once, on first resolution only. Later
+            // session checks (e.g. after a disconnect) do not reopen the modal.
+            if (!d.connected && !_awsSsoAutoOpened) {
+                _awsSsoAutoOpened = true;
+                openAwsSsoModal();
+            }
         } catch (e) { /* silent */ }
     }
     loadAwsSsoStatus();
 
+    // Global 401 -> SSO login gate.
+    //
+    // Data APIs (/api/** other than /api/auth/*) answer HTTP 401
+    // {ok:false, error:"Authenticate via AWS SSO first"} when this browser has no SSO session.
+    // Home-page data fetches call this right after the fetch, before any res.json()/.ok handling:
+    //
+    //     const res = await fetch('/api/...');
+    //     if (awsSsoHandle401(res)) return;   // login modal replaces the generic "Error loading"
+    //
+    // The status check is synchronous so the call-site guard stays a plain `if`; the body is
+    // inspected on a clone (with the SSO-gate message check) before the modal is popped. Only
+    // the error string is ever rendered — never token material.
+    function awsSsoHandle401(res) {
+        if (!res || res.status !== 401) return false;
+        try {
+            res.clone().json().then(function (d) {
+                const msg = (d && d.error) || '';
+                if (msg.indexOf('Authenticate via AWS SSO') === -1) return;
+                // Server says there is no session: drop any stale client view so the modal
+                // opens on step 1 where the error strip lives, and don't let the boot session
+                // check auto-open on top of this.
+                _awsSsoSession = null;
+                _awsSsoAutoOpened = true;
+                setAwsSsoPill(null);
+                openAwsSsoModal();
+                awsSsoShowError(1, msg);
+            }).catch(function () { /* non-JSON 401 — leave it to the call site */ });
+        } catch (e) { /* clone unavailable — call site still short-circuits on the 401 */ }
+        return true;
+    }
+    window.awsSsoHandle401 = awsSsoHandle401;
+
+    // Three small permission badges. `caps` is the capabilities object from the connect/session
+    // response; missing operations read as denied so a partial/failed probe is legible.
+    function awsSsoRenderCapabilities(caps) {
+        const el = document.getElementById('awsSsoCapabilities');
+        if (!el) return;
+        if (!caps || typeof caps !== 'object') { el.innerHTML = ''; el.style.display = 'none'; return; }
+        const defs = [['Read', 'read'], ['Upload', 'upload'], ['Write', 'write']];
+        el.innerHTML = defs.map(function (d) {
+            const ok = !!caps[d[1]];
+            const bg = ok ? 'var(--badge-green-bg)' : 'var(--badge-red-bg)';
+            const fg = ok ? 'var(--green)' : 'var(--badge-red)';
+            return '<span style="display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;'
+                 + 'border-radius:var(--radius);margin-right:6px;background:' + bg + ';color:' + fg + '">'
+                 + d[0] + ' ' + (ok ? '✓' : '✗') + '</span>';
+        }).join('');
+        el.style.display = 'block';
+    }
+
+    // Identity line above the step-3 target inputs: who the SSO token belongs to. Falls back
+    // name -> email -> accountName; greys out when the token carried no identity claims.
+    // Only identity fields are rendered — never token material.
+    function awsSsoRenderIdentity(session) {
+        const el = document.getElementById('awsSsoIdentity');
+        if (!el) return;
+        if (!session || !session.connected) { el.style.display = 'none'; return; }
+        const name = session.name || session.email || session.accountName;
+        const role = session.role;
+        el.textContent = 'Signed in as ' + (name || 'unknown') + ' · ' + (role || 'unknown');
+        el.style.color = (name || role) ? 'var(--sidebar-text)' : 'var(--sidebar-muted)';
+        el.style.display = 'block';
+    }
+
     function awsSsoFillTargets(session) {
+        awsSsoRenderIdentity(session);
         const bucketEl = document.getElementById('awsSsoBucket');
         const regionEl = document.getElementById('awsSsoRegion');
         if (!bucketEl || !regionEl) return;
@@ -1195,9 +1286,14 @@
             if (session.bucket) bucketEl.value = session.bucket;
             if (session.region) regionEl.value = session.region;
         } else {
-            if (!bucketEl.value) bucketEl.value = AWS_SSO_DEFAULT_BUCKET;
-            if (!regionEl.value) regionEl.value = AWS_SSO_DEFAULT_REGION;
+            // No live session: prefer the last bucket/region this browser connected with,
+            // then whatever the field already holds, then the built-in defaults.
+            const savedBucket = localStorage.getItem(AWS_SSO_BUCKET_KEY);
+            const savedRegion = localStorage.getItem(AWS_SSO_REGION_KEY);
+            bucketEl.value = savedBucket || bucketEl.value || AWS_SSO_DEFAULT_BUCKET;
+            regionEl.value = savedRegion || regionEl.value || AWS_SSO_DEFAULT_REGION;
         }
+        awsSsoRenderCapabilities(session && session.connected ? session.capabilities : null);
         const msg = document.getElementById('awsSsoConnectedMsg');
         const disc = document.getElementById('awsSsoDisconnectWrap');
         if (session && session.connected) {
@@ -1276,8 +1372,9 @@
                 body: JSON.stringify({ startUrl: startUrl })
             });
             const d = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                awsSsoShowError(1, d.message || res.statusText || 'Failed to start AWS SSO');
+            // Backend reports failures as HTTP 200 + {ok:false, error} — check both
+            if (!res.ok || d.ok === false) {
+                awsSsoShowError(1, d.error || d.message || res.statusText || 'Failed to start AWS SSO');
                 return;
             }
             localStorage.setItem(AWS_SSO_START_URL_KEY, startUrl);
@@ -1320,15 +1417,18 @@
         try {
             const res = await fetch('/api/auth/aws/poll', { method: 'POST' });
             const d = await res.json().catch(() => ({}));
-            if (!res.ok) {
+            if (!res.ok || d.ok === false) {
                 awsSsoStopPoll();
-                awsSsoShowError(2, d.message || res.statusText || 'AWS SSO polling failed');
+                awsSsoShowError(2, d.error || d.message || res.statusText || 'AWS SSO polling failed');
                 return;
             }
             if (d.status === 'complete') {
                 awsSsoStopPoll();
                 awsSsoShowStep(3);
                 awsSsoFillTargets(null);
+                // Login just landed server-side — pull the session so the step-3 identity line
+                // can show who signed in (the poll response carries no identity fields).
+                loadAwsSsoStatus();
             }
             // status === "pending" -> keep polling
         } catch (e) {
@@ -1354,19 +1454,40 @@
                 body: JSON.stringify({ bucket: bucket, region: region })
             });
             const d = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                awsSsoShowError(3, d.message || res.statusText || 'Failed to connect to S3');
+            if (!res.ok || d.ok === false) {
+                awsSsoShowError(3, d.error || d.message || res.statusText || 'Failed to connect to S3');
+                // The failure response still carries the capability probe, so surface which
+                // operation(s) were denied (e.g. Upload ✗ Write ✗) next to the error.
+                awsSsoRenderCapabilities(d.capabilities);
                 return;
             }
             _awsSsoSession = {
                 connected: true,
                 account: d.account,
+                // Identity fields, when the connect response carries them (the /session endpoint
+                // always does) — so the pill can show the person without a second round trip.
+                name: d.name,
+                email: d.email,
+                accountName: d.accountName,
+                accountId: d.accountId,
                 role: d.role,
                 bucket: d.bucket || bucket,
-                region: d.region || region
+                region: d.region || region,
+                capabilities: d.capabilities || { read: true, upload: true, write: true }
             };
             setAwsSsoPill(_awsSsoSession);
             awsSsoFillTargets(_awsSsoSession);
+            // Every home-page data call was 401ing before this first connect, so reload the
+            // stats/cards once now that the server has a session. Same set as the Refresh button.
+            invalidateCache();
+            loadStats();
+            loadProgress();
+            loadClaudeStats();
+            // Remember the target this browser last connected to, for the next modal open.
+            try {
+                localStorage.setItem(AWS_SSO_BUCKET_KEY, _awsSsoSession.bucket);
+                localStorage.setItem(AWS_SSO_REGION_KEY, _awsSsoSession.region);
+            } catch (e) { /* storage unavailable — non-fatal */ }
         } catch (e) {
             awsSsoShowError(3, 'Failed to connect to S3: ' + e.message);
         } finally {

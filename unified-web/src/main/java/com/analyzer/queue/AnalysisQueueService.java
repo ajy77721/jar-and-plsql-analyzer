@@ -1,5 +1,10 @@
 package com.analyzer.queue;
 
+import com.analyzer.storage.sso.CapturedCredentials;
+import com.analyzer.storage.sso.CapturedStores;
+import com.analyzer.storage.sso.SsoCredentialsResolver;
+import com.analyzer.storage.sso.SsoJobContext;
+import com.analyzer.storage.sso.SsoStoreSwapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -43,6 +48,11 @@ public class AnalysisQueueService {
     private final JarExportBundleExecutor jarExportBundleExecutor;
     private final PurposeSummaryExecutor purposeSummaryExecutor;
 
+    /** Snapshots the submitter's per-user stores at submit time, on the request thread. */
+    private final SsoStoreSwapper ssoStoreSwapper;
+    /** Snapshots the submitter's role credentials for jobs whose calls sign with them directly. */
+    private final SsoCredentialsResolver ssoCredentialsResolver;
+
     public AnalysisQueueService(JarAnalysisExecutor jarExecutor,
                                  JarTargetedAnalysisExecutor jarTargetedExecutor,
                                  WarAnalysisExecutor warExecutor,
@@ -52,7 +62,9 @@ public class AnalysisQueueService {
                                  ParserValidationExecutor parserValidationExecutor,
                                  ClaudeJobExecutor claudeExecutor,
                                  JarExportBundleExecutor jarExportBundleExecutor,
-                                 PurposeSummaryExecutor purposeSummaryExecutor) {
+                                 PurposeSummaryExecutor purposeSummaryExecutor,
+                                 SsoStoreSwapper ssoStoreSwapper,
+                                 SsoCredentialsResolver ssoCredentialsResolver) {
         this.jarExecutor = jarExecutor;
         this.jarTargetedExecutor = jarTargetedExecutor;
         this.warExecutor = warExecutor;
@@ -63,10 +75,35 @@ public class AnalysisQueueService {
         this.claudeExecutor = claudeExecutor;
         this.jarExportBundleExecutor = jarExportBundleExecutor;
         this.purposeSummaryExecutor = purposeSummaryExecutor;
+        this.ssoStoreSwapper = ssoStoreSwapper;
+        this.ssoCredentialsResolver = ssoCredentialsResolver;
     }
 
+    /**
+     * Submits a job, capturing the calling user's per-user SSO state <em>now</em>, while the request
+     * thread still exists, and attaching it to the in-memory job for the queue thread to install.
+     *
+     * <p>This is the single submit point every controller reaches, so capturing here rather than in
+     * each of them cannot be forgotten by a new endpoint. {@link SsoStoreSwapper#captureCurrent()}
+     * and {@link SsoCredentialsResolver#captureCurrent()} both answer {@code null} when the thread
+     * has no SSO-bound session — the documented legacy path (see {@code QueueJob}).
+     */
     public QueueJob submit(QueueJob.Type type, String displayName, Map<String, Object> metadata) {
+        return submit(type, displayName, metadata,
+                ssoStoreSwapper.captureCurrent(),
+                needsCredentials(type) ? ssoCredentialsResolver.captureCurrent() : null);
+    }
+
+    /**
+     * Captures both snapshots explicitly. Used for a follow-up job, which is submitted from the queue
+     * worker — a thread with no request context — and therefore inherits its parent's snapshot rather
+     * than trying (and failing) to capture its own.
+     */
+    private QueueJob submit(QueueJob.Type type, String displayName, Map<String, Object> metadata,
+                            CapturedStores capturedStores, CapturedCredentials capturedCredentials) {
         QueueJob job = new QueueJob(type, displayName, metadata);
+        job.capturedStores = capturedStores;
+        job.capturedCredentials = capturedCredentials;
         synchronized (lock) {
             pendingQueue.add(job);
         }
@@ -74,6 +111,21 @@ public class AnalysisQueueService {
         broadcastUpdate(job, "job-queued");
         processNext();
         return job;
+    }
+
+    /**
+     * True for the job kinds whose code signs AWS calls with a credential provider directly (the
+     * Claude/Bedrock path), so the submitter's role is captured alongside their stores. The
+     * artifact-only jobs get their credentials from the captured stores' own clients and need no
+     * separate snapshot.
+     */
+    private static boolean needsCredentials(QueueJob.Type type) {
+        return switch (type) {
+            case CLAUDE_ENRICH, CLAUDE_ENRICH_SINGLE, CLAUDE_RESCAN, CLAUDE_FULL_SCAN,
+                 CLAUDE_CORRECT, CLAUDE_CORRECT_SINGLE, PLSQL_CLAUDE_VERIFY,
+                 PLSQL_PURPOSE_SUMMARY -> true;
+            default -> false;
+        };
     }
 
     public boolean cancel(String jobId) {
@@ -260,19 +312,27 @@ public class AnalysisQueueService {
         worker.submit(() -> {
             fJob.runThread = Thread.currentThread();
             try {
-                switch (fJob.type) {
-                    case JAR_UPLOAD -> jarExecutor.execute(fJob, broadcast);
-                    case JAR_TARGETED -> jarTargetedExecutor.execute(fJob, broadcast);
-                    case WAR_UPLOAD -> warExecutor.execute(fJob, broadcast);
-                    case PLSQL_ANALYSIS -> plsqlExecutor.execute(fJob, broadcast);
-                    case PLSQL_FAST_ANALYSIS -> fastExecutor.execute(fJob, broadcast);
-                    case PARSER_ANALYSIS -> parserExecutor.execute(fJob, broadcast);
-                    case PARSER_VALIDATION -> parserValidationExecutor.execute(fJob, broadcast);
-                    case CLAUDE_ENRICH, CLAUDE_ENRICH_SINGLE, CLAUDE_RESCAN,
-                         CLAUDE_FULL_SCAN, CLAUDE_CORRECT, CLAUDE_CORRECT_SINGLE,
-                         PLSQL_CLAUDE_VERIFY -> claudeExecutor.execute(fJob, broadcast);
-                    case JAR_EXPORT_BUNDLE -> jarExportBundleExecutor.execute(fJob, broadcast);
-                    case PLSQL_PURPOSE_SUMMARY -> purposeSummaryExecutor.execute(fJob, broadcast);
+                // Run under the submitter's snapshot, when one was captured. install() returns null
+                // (and installs nothing) for a job with no SSO session, leaving the legacy shared-bean
+                // / default-credentials path untouched; try-with-resources then restores whatever was
+                // in force. This covers every executor uniformly — and, crucially, the store writes
+                // the executors make through PersistenceService/ClaudeAnalysisService, which each hold
+                // the same routing bean rather than the job's own field.
+                try (SsoJobContext sso = SsoJobContext.install(fJob.capturedStores, fJob.capturedCredentials)) {
+                    switch (fJob.type) {
+                        case JAR_UPLOAD -> jarExecutor.execute(fJob, broadcast);
+                        case JAR_TARGETED -> jarTargetedExecutor.execute(fJob, broadcast);
+                        case WAR_UPLOAD -> warExecutor.execute(fJob, broadcast);
+                        case PLSQL_ANALYSIS -> plsqlExecutor.execute(fJob, broadcast);
+                        case PLSQL_FAST_ANALYSIS -> fastExecutor.execute(fJob, broadcast);
+                        case PARSER_ANALYSIS -> parserExecutor.execute(fJob, broadcast);
+                        case PARSER_VALIDATION -> parserValidationExecutor.execute(fJob, broadcast);
+                        case CLAUDE_ENRICH, CLAUDE_ENRICH_SINGLE, CLAUDE_RESCAN,
+                             CLAUDE_FULL_SCAN, CLAUDE_CORRECT, CLAUDE_CORRECT_SINGLE,
+                             PLSQL_CLAUDE_VERIFY -> claudeExecutor.execute(fJob, broadcast);
+                        case JAR_EXPORT_BUNDLE -> jarExportBundleExecutor.execute(fJob, broadcast);
+                        case PLSQL_PURPOSE_SUMMARY -> purposeSummaryExecutor.execute(fJob, broadcast);
+                    }
                 }
                 if (fJob.status == QueueJob.Status.RUNNING) {
                     fJob.status = QueueJob.Status.COMPLETE;
@@ -310,7 +370,10 @@ public class AnalysisQueueService {
                         String fDisplay = (String) followUp.get("displayName");
                         followUp.remove("type");
                         followUp.remove("displayName");
-                        submit(fType, fDisplay, followUp);
+                        // Inherit the parent's SSO snapshot: this runs on the queue worker, so a
+                        // fresh captureCurrent() would see no request context and hand the follow-up
+                        // the default credentials — the exact fallback the snapshot exists to avoid.
+                        submit(fType, fDisplay, followUp, fJob.capturedStores, fJob.capturedCredentials);
                     } catch (Exception e) {
                         log.warn("[QUEUE] Failed to submit follow-up job: {}", e.getMessage());
                     }

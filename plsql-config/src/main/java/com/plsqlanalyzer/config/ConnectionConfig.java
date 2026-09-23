@@ -1,5 +1,7 @@
 package com.plsqlanalyzer.config;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 public class ConnectionConfig {
     private String name;
     private String username;
@@ -22,6 +24,30 @@ public class ConnectionConfig {
     // when absent/empty so existing configs (no `schemas` key) keep working unchanged.
     private java.util.List<String> schemas;
 
+    // ── TLS / connection-security settings ──────────────────────────────────────
+    // All null/absent by default so existing YAML configs (no TLS keys) continue to mean
+    // "plaintext, exactly as before". "NONE" is the explicit spelling of the same thing.
+
+    // TLS policy: NONE (default) | REQUIRED | VERIFY_CA | VERIFY_FULL. null == NONE.
+    private String sslMode;
+    // Whether the server certificate hostname must match the connected host. Null == true.
+    private Boolean hostnameValidation;
+    // Repo-relative path (under the config directory, e.g. "certs/MY_CONN/trust.pem") to a
+    // PEM trust bundle (server CA / self-signed chain). Converted to JKS/PKCS12 where the
+    // driver requires it — see TlsKeystoreConverter.
+    private String trustCertPath;
+    // Optional PEM client certificate + private key for mutual TLS. Both must be set for the
+    // pair to be used (PostgreSQL sslcert/sslkey).
+    private String clientCertPath;
+    private String clientKeyPath;
+    // Optional pre-built JKS truststore (with its password) for drivers/setups that insist on
+    // a keystore rather than PEM: IBM DB2 and Oracle JSSE truststore configurations.
+    private String truststorePath;
+    private String truststorePassword;
+    // Optional Oracle wallet directory (under certs/) used for TLS material in place of a
+    // plain truststore. Rendered as an "oracle.net.wallet_location" property.
+    private String walletPath;
+
     public ConnectionConfig() {}
 
     public DbType resolvedDbType() {
@@ -36,8 +62,133 @@ public class ConnectionConfig {
         return port > 0 ? port : dialect().getDefaultPort();
     }
 
+    /**
+     * Legacy, TLS-free URL accessor. Retained verbatim for every existing caller — it builds
+     * the same plaintext URL the analyzer has always emitted (no TLS parameters), regardless
+     * of any {@code sslMode} on this config.
+     */
     public String getJdbcUrl() {
-        return dialect().buildJdbcUrl(this);
+        return getJdbcUrl(null);
+    }
+
+    /**
+     * TLS-aware URL builder. When {@code configDir} is supplied and TLS is enabled, the
+     * dialect appends the appropriate protocol/parameter changes (MySQL query params,
+     * SQL Server {@code encrypt=} flags, PostgreSQL {@code sslmode=}, Oracle TCPS).
+     *
+     * @param configDir the configuration directory relative certificate paths resolve
+     *                  against, or {@code null} for the legacy plaintext URL
+     */
+    public String getJdbcUrl(java.nio.file.Path configDir) {
+        return dialect().buildJdbcUrl(this, configDir);
+    }
+
+    /**
+     * True when this connection asks for an encrypted transport. A null/blank/`NONE` sslMode
+     * means plaintext (TLS is opt-in, preserving backward compatibility).
+     */
+    @JsonIgnore
+    public boolean isTlsEnabled() {
+        return sslMode != null && !sslMode.isBlank() && !"NONE".equalsIgnoreCase(sslMode.trim());
+    }
+
+    /**
+     * Effective hostname-validation flag. The stored {@link Boolean} is a wrapper so an absent
+     * key can mean "default"; a null value therefore resolves to {@code true} (validate), which
+     * is the safe default for VERIFY_* modes.
+     */
+    @JsonIgnore
+    public boolean isHostnameValidation() {
+        return hostnameValidation == null || hostnameValidation;
+    }
+
+    /**
+     * Builds driver {@link java.util.Properties} carrying TLS material that cannot be
+     * expressed in the JDBC URL. Returns an empty set when TLS is disabled, so callers can
+     * pass the result straight to a driver in every configuration.
+     *
+     * <p>Only drivers whose TLS knobs live outside the URL are handled here:
+     * <ul>
+     *   <li><b>ORACLE</b> — truststore (PEM converted to JKS, or a JKS/password pair, or a
+     *       wallet directory) plus the DN-match flags when hostname validation is off.</li>
+     *   <li><b>DB2</b> — {@code sslConnection=true} plus a JKS truststore.</li>
+     *   <li><b>MYSQL / SQLSERVER / POSTGRES</b> — TLS is expressed entirely in the URL, so no
+     *       properties are produced.</li>
+     * </ul>
+     *
+     * <p>Relative certificate paths are resolved against {@code configDir} here, so the
+     * returned properties always point at absolute files.
+     */
+    public java.util.Properties buildSslProperties(java.nio.file.Path configDir) {
+        java.util.Properties props = new java.util.Properties();
+        if (!isTlsEnabled()) {
+            return props;
+        }
+        switch (resolvedDbType()) {
+            case ORACLE -> applyOracleSslProperties(props, configDir);
+            case DB2    -> applyDb2SslProperties(props, configDir);
+            default     -> { /* MYSQL, SQLSERVER, POSTGRES: URL-side only */ }
+        }
+        return props;
+    }
+
+    /**
+     * Oracle TLS material lives in driver/JSSE properties rather than the thin URL. Precedence
+     * is wallet &gt; explicit JKS truststore &gt; PEM bundle, mirroring how operators are
+     * expected to supply Oracle credentials (a wallet, when present, is the whole story).
+     * The negotiated TLS version is left to the server/JVM ({@code oracle.net.ssl_version} is
+     * intentionally not set). When hostname validation is disabled we relax the DN-match flags
+     * so self-signed / CN-mismatched endpoints still connect.
+     */
+    private void applyOracleSslProperties(java.util.Properties props, java.nio.file.Path configDir) {
+        java.nio.file.Path wallet = TlsKeystoreConverter.resolve(
+                walletPath != null ? java.nio.file.Path.of(walletPath) : null, configDir);
+        if (wallet != null) {
+            props.setProperty("oracle.net.wallet_location", "file:" + wallet);
+        } else if (truststorePath != null && !truststorePath.isBlank()) {
+            java.nio.file.Path ts = TlsKeystoreConverter.resolve(java.nio.file.Path.of(truststorePath), configDir);
+            props.setProperty("javax.net.ssl.trustStore", ts.toString());
+            if (truststorePassword != null) {
+                props.setProperty("javax.net.ssl.trustStorePassword", truststorePassword);
+            }
+        } else if (trustCertPath != null && !trustCertPath.isBlank()) {
+            TlsKeystoreConverter.KeystoreArtifact art = TlsKeystoreConverter.ensureTrustStoreArtifact(
+                    java.nio.file.Path.of(trustCertPath), configDir);
+            props.setProperty("javax.net.ssl.trustStore", art.path().toString());
+            props.setProperty("javax.net.ssl.trustStorePassword", art.password());
+        }
+        if (!isHostnameValidation()) {
+            props.setProperty("oracle.net.ssl_server_dn_match", "false");
+            props.setProperty("oracle.net.ssl_client_dn_match", "false");
+        }
+    }
+
+    /**
+     * DB2 takes all TLS settings as driver properties: {@code sslConnection=true} turns on
+     * encryption, and trust material is supplied as a JKS truststore location + password.
+     * Either a pre-built JKS ({@code truststorePath}) or a PEM bundle ({@code trustCertPath},
+     * converted to a sibling JKS) is accepted.
+     */
+    private void applyDb2SslProperties(java.util.Properties props, java.nio.file.Path configDir) {
+        props.setProperty("sslConnection", "true");
+        java.nio.file.Path store = null;
+        String password = null;
+        if (truststorePath != null && !truststorePath.isBlank()) {
+            store = TlsKeystoreConverter.resolve(java.nio.file.Path.of(truststorePath), configDir);
+            password = truststorePassword;
+        } else if (trustCertPath != null && !trustCertPath.isBlank()) {
+            TlsKeystoreConverter.KeystoreArtifact art = TlsKeystoreConverter.ensureTrustStoreArtifact(
+                    java.nio.file.Path.of(trustCertPath), configDir);
+            store = art.path();
+            password = art.password();
+        }
+        if (store != null) {
+            props.setProperty("sslTrustStoreLocation", store.toString());
+            if (password != null) {
+                props.setProperty("sslTrustStorePassword", password);
+            }
+            props.setProperty("sslTrustStoreType", "JKS");
+        }
     }
 
     public DbUserConfig toDbUserConfig() {
@@ -96,4 +247,42 @@ public class ConnectionConfig {
     /** Raw stored value (may be null) — used by (de)serialization to avoid persisting a default. */
     public java.util.List<String> getSchemasRaw() { return schemas; }
     public void setSchemas(java.util.List<String> schemas) { this.schemas = schemas; }
+
+    /** TLS policy: NONE | REQUIRED | VERIFY_CA | VERIFY_FULL; null == NONE. */
+    public String getSslMode() { return sslMode; }
+    public void setSslMode(String sslMode) { this.sslMode = sslMode; }
+
+    /**
+     * Raw hostname-validation flag (null means "use default true"); see
+     * {@link #isHostnameValidation()} for the effective value. No explicit @JsonProperty here:
+     * the YAML key {@code hostname_validation} comes from ConfigLoader's SNAKE_CASE strategy,
+     * while REST (Spring's default camelCase mapper) binds {@code hostnameValidation}. An explicit
+     * @JsonProperty would force snake_case on BOTH mappers and silently drop the REST field.
+     */
+    public Boolean getHostnameValidation() { return hostnameValidation; }
+    public void setHostnameValidation(Boolean hostnameValidation) { this.hostnameValidation = hostnameValidation; }
+
+    /** Repo-relative path to a PEM trust bundle (server CA / self-signed chain). */
+    public String getTrustCertPath() { return trustCertPath; }
+    public void setTrustCertPath(String trustCertPath) { this.trustCertPath = trustCertPath; }
+
+    /** Repo-relative path to an optional PEM client certificate (mutual TLS). */
+    public String getClientCertPath() { return clientCertPath; }
+    public void setClientCertPath(String clientCertPath) { this.clientCertPath = clientCertPath; }
+
+    /** Repo-relative path to the private key paired with {@link #getClientCertPath()}. */
+    public String getClientKeyPath() { return clientKeyPath; }
+    public void setClientKeyPath(String clientKeyPath) { this.clientKeyPath = clientKeyPath; }
+
+    /** Optional pre-built JKS truststore path (for DB2 / Oracle JSSE truststore setups). */
+    public String getTruststorePath() { return truststorePath; }
+    public void setTruststorePath(String truststorePath) { this.truststorePath = truststorePath; }
+
+    /** Password for {@link #getTruststorePath()}; never logged. */
+    public String getTruststorePassword() { return truststorePassword; }
+    public void setTruststorePassword(String truststorePassword) { this.truststorePassword = truststorePassword; }
+
+    /** Optional Oracle wallet directory under certs/. */
+    public String getWalletPath() { return walletPath; }
+    public void setWalletPath(String walletPath) { this.walletPath = walletPath; }
 }

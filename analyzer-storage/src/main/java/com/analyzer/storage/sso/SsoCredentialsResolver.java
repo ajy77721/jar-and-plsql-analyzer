@@ -9,43 +9,44 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.services.sso.model.RoleCredentials;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Supplies the S3 client with credentials: the logged-in user's SSO role credentials while a
- * session is active, and the ordinary AWS default chain the rest of the time.
+ * Supplies the S3 client with credentials: the <em>current request's</em> SSO role credentials
+ * while that user is logged in, and the ordinary AWS default chain the rest of the time.
  *
- * <h2>Why one provider, swapped answers</h2>
+ * <h2>Per-user, discovered from the request</h2>
  *
- * <p>The {@code S3Client} is built once and holds a credentials provider for its lifetime — an S3
- * client cannot be told to change provider without rebuilding it, and rebuilding it on every login
- * would mean rebuilding every store that holds it. So the client holds <em>this</em> provider from
- * the start, and this provider decides per call. That is why {@code StorageConfig} can pass it in at
- * startup: before any login it simply reports the default chain, which is exactly today's
- * behaviour, and no existing deployment changes.
+ * <p>This used to answer from one shared login session. In the per-user model it asks
+ * {@link CurrentHttpSession} which {@code HttpSession} the calling thread belongs to, looks that
+ * user's state up in {@link SsoSessionRegistry}, and mints/caches role credentials for that user
+ * alone. Credentials are cached in a map keyed by session id, so one user's refresh never touches
+ * another's, and each key's check-and-fill is single-flight on that user's {@link SsoSessionState#lock()}.
  *
- * <h2>Layering of the caches (both are needed)</h2>
+ * <h2>Two lifetimes, two layers of cache</h2>
  *
  * <ul>
  *   <li>An <b>access token</b> is renewed (refresh-token grant) by {@link AwsSsoLoginService} when it
- *       nears expiry — that call is already single-flight there.</li>
- *   <li><b>Role credentials</b> (the short-lived STS-style triple S3 actually signs with) are minted
- *       by {@code sso:GetRoleCredentials} and are cached here until their own expiry. They are a
- *       separate lifetime from the access token and are much more expensive to fetch, so caching
- *       them matters even when the token is fresh.</li>
+ *       nears expiry — single-flight per user, on the same lock.</li>
+ *   <li><b>Role credentials</b> (the short-lived STS-style triple S3 signs with) are minted by
+ *       {@code sso:GetRoleCredentials} and cached here until their own expiry. They are far more
+ *       expensive to fetch than they are to store.</li>
  * </ul>
  *
- * <p>{@link #resolveCredentials()} is called on the S3 request path, possibly concurrently, so the
- * cache check-and-fill runs under a lock. Two threads that both find the cache cold will thus do
- * one fetch, not two — the single-flight requirement.
+ * <h2>Never a hard failure on the request path</h2>
  *
- * <h2>Never a hard failure</h2>
+ * <p>No session, not logged in, or the AWS round trip failing all fall back to
+ * {@link DefaultCredentialsProvider} rather than throwing, so SSO state can never take down the
+ * default workflow. The one place "no session" is treated as an error is the per-user store router
+ * ({@link SessionRoutingArtifactStore}), which owns that policy explicitly.
  *
- * <p>If there is no session, or the SSO round trip fails for any reason, this resolver falls back
- * to {@link DefaultCredentialsProvider} rather than throwing. That keeps a logged-out or
- * misconfigured SSO state from taking down every S3 operation the application performs; the switch
- * between the two modes is logged at INFO (and the failure at WARN) so it is never silent. No token,
- * secret key or session token ever appears in a log line.
+ * <p><b>Capture for background work.</b> {@link #captureCurrent()} snapshots the caller's
+ * credentials while their request thread still exists, so a queued job can run under the submitter's
+ * identity instead of silently reverting to the default chain.
+ *
+ * <p>No access token, refresh token, secret access key or session token ever appears in a log line
+ * or an exception message.
  */
 @Component
 public class SsoCredentialsResolver implements AwsCredentialsProvider {
@@ -59,55 +60,110 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
     private static final long DEFAULT_CREDENTIAL_LIFETIME_MS = TimeUnit.HOURS.toMillis(1);
 
     private final AwsSsoLoginService login;
+    private final SsoSessionRegistry registry;
+    private final CurrentHttpSession currentSession;
     private final AwsCredentialsProvider fallback;
 
-    private final Object lock = new Object();
+    /** Per-user role-credential cache; entries are dropped when their session ends or goes invalid. */
+    private final ConcurrentHashMap<String, Cached> cache = new ConcurrentHashMap<>();
 
-    private volatile AwsSessionCredentials cached;
-    private volatile long cachedExpiresAtEpochMs;
-
-    /** Tracks the last mode reported, so the switch is logged once rather than per request. */
-    private volatile boolean servingSso;
-
-    public SsoCredentialsResolver(AwsSsoLoginService login) {
+    public SsoCredentialsResolver(AwsSsoLoginService login, SsoSessionRegistry registry,
+                                  CurrentHttpSession currentSession) {
         this.login = login;
+        this.registry = registry;
+        this.currentSession = currentSession;
         this.fallback = DefaultCredentialsProvider.create();
     }
 
+    /**
+     * The credentials for the current request's user, or the default chain when the thread has no
+     * SSO-bound session or its credentials cannot be obtained.
+     *
+     * <p>Called on every S3 operation, possibly concurrently.
+     */
     @Override
     public AwsCredentials resolveCredentials() {
-        if (!login.isLoggedIn()) {
-            logSwitch(false);
-            cached = null;
+        // A background job's captured role credentials win over request discovery: the queue thread
+        // has no HttpSession, so without this the job would sign with the default chain. See
+        // SsoJobContext and captureCurrent().
+        CapturedCredentials captured = SsoJobContext.credentials();
+        if (captured != null) return captured.credentials();
+        String sessionId = currentSession.currentSessionId();
+        if (sessionId == null) {
             return fallback.resolveCredentials();
         }
-        AwsSessionCredentials credentials = currentSsoCredentials();
-        if (credentials != null) {
-            logSwitch(true);
-            return credentials;
-        }
-        // A live session that could not produce role credentials: fall through rather than fail.
-        logSwitch(false);
-        return fallback.resolveCredentials();
+        AwsSessionCredentials credentials = credentialsFor(sessionId);
+        return credentials != null ? credentials : fallback.resolveCredentials();
     }
 
-    /** Returns cached-or-freshly-minted role credentials, or {@code null} if none can be obtained. */
-    private AwsSessionCredentials currentSsoCredentials() {
-        long now = System.currentTimeMillis();
-        AwsSessionCredentials current = cached;
-        if (current != null && cachedExpiresAtEpochMs - REFRESH_SKEW_MS > now) {
-            return current;
+    /** The current thread's session id, or {@code null}; exposed so callers do not re-derive it. */
+    public String currentSessionId() {
+        return currentSession.currentSessionId();
+    }
+
+    /**
+     * A provider fixed to {@code sessionId}'s credentials, for building an S3 client that belongs to
+     * one user rather than to whatever thread happens to use it. Falls back to the default chain if
+     * that user's credentials cannot be resolved, so a client built this way is never left with no
+     * answer at all.
+     */
+    public AwsCredentialsProvider resolveFor(String sessionId) {
+        if (sessionId == null) return fallback;
+        return () -> {
+            AwsSessionCredentials credentials = credentialsFor(sessionId);
+            return credentials != null ? credentials : fallback.resolveCredentials();
+        };
+    }
+
+    /** A provider that always returns a captured snapshot, ignoring the request context entirely. */
+    public AwsCredentialsProvider resolveFor(CapturedCredentials captured) {
+        return captured == null ? fallback : captured.asProvider();
+    }
+
+    /**
+     * Snapshots the current request's user and credentials for hand-off to a background job, or
+     * {@code null} when the thread has no SSO-bound session or no credentials could be obtained.
+     *
+     * <p>Must be called on the request thread — that is the whole point: the job it is passed to has
+     * no request context of its own.
+     */
+    public CapturedCredentials captureCurrent() {
+        String sessionId = currentSession.currentSessionId();
+        if (sessionId == null) return null;
+        AwsSessionCredentials credentials = credentialsFor(sessionId);
+        return credentials == null ? null : new CapturedCredentials(sessionId, credentials);
+    }
+
+    /** Drops {@code sessionId}'s cached credentials; called on logout so a stale triple cannot linger. */
+    public void forget(String sessionId) {
+        if (sessionId != null) cache.remove(sessionId);
+    }
+
+    /** Returns this user's cached-or-freshly-minted role credentials, or {@code null} if none. */
+    private AwsSessionCredentials credentialsFor(String sessionId) {
+        SsoSessionState state = registry.get(sessionId);
+        // No state, or a state between logins: there is nothing to sign with. Drop any cached
+        // triple so a later login for the same session id cannot accidentally reuse the old one.
+        if (state == null || !state.loggedIn()) {
+            cache.remove(sessionId);
+            return null;
         }
-        synchronized (lock) {
-            // Re-check under the lock: another thread may have refreshed while we waited.
+        long now = System.currentTimeMillis();
+        Cached current = cache.get(sessionId);
+        if (current != null && current.expiresAtEpochMs - REFRESH_SKEW_MS > now) {
+            return current.credentials;
+        }
+        synchronized (state.lock()) {
+            // Re-check under the per-user lock: another thread may have refreshed while we waited.
             now = System.currentTimeMillis();
-            current = cached;
-            if (current != null && cachedExpiresAtEpochMs - REFRESH_SKEW_MS > now) {
-                return current;
+            current = cache.get(sessionId);
+            if (current != null && current.expiresAtEpochMs - REFRESH_SKEW_MS > now) {
+                return current.credentials;
             }
-            String token = login.accessToken();
-            AwsSsoLoginService.Identity identity = login.identity();
-            if (token == null || identity == null) {
+            String token = login.accessToken(state);
+            SsoIdentity identity = state.identity();
+            if (token == null || identity == null
+                    || identity.accountId() == null || identity.roleName() == null) {
                 return null;
             }
             try {
@@ -121,33 +177,25 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
                 }
                 AwsSessionCredentials minted = AwsSessionCredentials.create(
                         role.accessKeyId(), role.secretAccessKey(), role.sessionToken());
-                cached = minted;
-                cachedExpiresAtEpochMs = role.expiration() != null
+                long expiresAt = role.expiration() != null
                         ? role.expiration()
                         : now + DEFAULT_CREDENTIAL_LIFETIME_MS;
+                cache.put(sessionId, new Cached(minted, expiresAt));
+                log.info("[aws-sso] minted S3 role credentials for account {} role {}",
+                        identity.accountId(), identity.roleName());
                 return minted;
             } catch (RuntimeException e) {
                 // Class name only: the SDK exception may carry the request, and the request carries
                 // the bearer token.
                 log.warn("[aws-sso] GetRoleCredentials failed ({}); using the default AWS chain",
                         e.getClass().getSimpleName());
-                cached = null;
+                cache.remove(sessionId);
                 return null;
             }
         }
     }
 
-    /** Logs the user-SSO <-> default-chain switch exactly once per transition. No account/role names
-     * beyond the ones already exposed by the status endpoints, and no credential material. */
-    private void logSwitch(boolean sso) {
-        if (sso == servingSso) return;
-        servingSso = sso;
-        if (sso) {
-            AwsSsoLoginService.Identity id = login.identity();
-            log.info("[aws-sso] S3 credentials now come from the user's SSO session"
-                    + (id != null ? " (account " + id.accountId() + ", role " + id.roleName() + ")" : ""));
-        } else {
-            log.info("[aws-sso] S3 credentials reverted to the default AWS provider chain");
-        }
+    /** Cached role credentials plus their absolute expiry. Never logged. */
+    private record Cached(AwsSessionCredentials credentials, long expiresAtEpochMs) {
     }
 }
