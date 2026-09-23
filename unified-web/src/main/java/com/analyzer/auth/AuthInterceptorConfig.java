@@ -41,28 +41,13 @@ public class AuthInterceptorConfig implements WebMvcConfigurer {
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(authInterceptor)
-                .addPathPatterns("/**")
-                .excludePathPatterns(
-                        // Shell/login pages and error handling: reachable without any credential.
-                        "/login",
-                        "/login.html",
-                        "/favicon.ico",
-                        "/error",
-                        // Static assets and per-app front-end roots.
-                        "/*.css",
-                        "/*.js",
-                        "/shared/**",
-                        "/jar/**",
-                        "/war/**",
-                        "/parser/**",
-                        "/plsql/**",
-                        "/conversion/**",
-                        "/docs/**",
-                        "/index.html",
-                        "/");
-        // NOTE: "/api/auth/**" is intentionally absent. Those routes must pass through the
-        // interceptor so that ApiKeyAuthInterceptor can classify them as public itself; excluding
-        // them here would fork the rule in two places.
+        // Page-lock model: EVERYTHING passes through the interceptor, which alone decides —
+        // public paths, asset passthrough, page redirects to /?login=1 for the unauthenticated,
+        // and the /api/** 401s. The per-app page exclusions the old registration had (/jar/**,
+        // /war/**, …) were removed on purpose: those are page NAVIGATIONS now, and an
+        // unauthenticated visitor clicking a card must land on the home page's SSO login instead
+        // of the tool. Asset files under those trees still load — ApiKeyAuthInterceptor.isAssetPath
+        // passes them; classifying here as well would fork the rule in two places.
+        registry.addInterceptor(authInterceptor).addPathPatterns("/**");
     }
 }

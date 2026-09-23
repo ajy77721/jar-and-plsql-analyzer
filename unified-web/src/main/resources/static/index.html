@@ -1212,6 +1212,18 @@
                 _awsSsoAutoOpened = true;
                 openAwsSsoModal();
             }
+            // Page lock: an unauthenticated visitor cannot navigate to the tool pages at all —
+            // clicking a card opens the SSO login instead. The User Manual stays reachable (its
+            // content is public by design); everything else demands the login first.
+            document.querySelectorAll('a.card').forEach(card => {
+                card.addEventListener('click', e => {
+                    if (!_awsSsoSession) {
+                        e.preventDefault();
+                        _awsSsoAutoOpened = true;
+                        openAwsSsoModal();
+                    }
+                });
+            });
         } catch (e) { /* silent */ }
     }
     loadAwsSsoStatus();

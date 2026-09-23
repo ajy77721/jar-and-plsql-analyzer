@@ -71,7 +71,9 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
     }
 
     private static boolean isPublic(String path) {
-        return path.equals("/login")
+        return path.equals("/")
+                || path.equals("/index.html")
+                || path.equals("/login")
                 || path.equals("/login.html")
                 || path.startsWith("/api/auth/")
                 || path.equals("/favicon.ico")
@@ -102,25 +104,49 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
         // whole gate; with the escape hatch off (local dev, no Identity Center) the app is open,
         // exactly as before the SSO rollout.
         if (!ssoGateSatisfied(path, req.getSession(false))) {
-            writeJson(res, HttpServletResponse.SC_UNAUTHORIZED, SSO_REQUIRED_401_BODY);
-            return false;
+            if (path.startsWith("/api/")) {
+                writeJson(res, HttpServletResponse.SC_UNAUTHORIZED, SSO_REQUIRED_401_BODY);
+                return false;
+            }
+            // Page navigations (e.g. typing /jar/ directly, or a stale bookmark) are bounced to
+            // the home page, whose login modal auto-opens when unauthenticated — the UI is the
+            // sign-in surface. Static assets (css/js/images) pass so whatever page the user IS on
+            // can still render; the User Manual content (/api/docs) is public by design.
+            if (!isAssetPath(path)) {
+                res.sendRedirect(req.getContextPath() + "/?login=1");
+                return false;
+            }
+            return true;
         }
         return true;
     }
 
     /**
-     * The AWS SSO half of the gate. It applies only to {@code /api/} paths outside the public
-     * {@code /api/auth/*} routes; anything else (a static page, an asset) passes untouched so the
-     * browser can load the UI that will then drive the SSO login.
+     * True for asset-looking requests (css/js/images/fonts/maps) that must always load — even for
+     * an unauthenticated visitor — so whatever page they are on can render and drive the login.
+     * Page-like paths (no asset extension) are navigations and get redirected to the home page.
+     */
+    private static boolean isAssetPath(String path) {
+        int dot = path.lastIndexOf('.');
+        if (dot < 0 || dot < path.length() - 8) return false;
+        String ext = path.substring(dot + 1).toLowerCase();
+        return ext.equals("css") || ext.equals("js") || ext.equals("png") || ext.equals("jpg")
+                || ext.equals("jpeg") || ext.equals("gif") || ext.equals("svg") || ext.equals("ico")
+                || ext.equals("woff") || ext.equals("woff2") || ext.equals("map") || ext.equals("md");
+    }
+
+    /**
+     * The AWS SSO gate. It applies to EVERY non-public path — data APIs and page navigations
+     * alike (the page-lock requirement: an unauthenticated visitor cannot open /jar/ etc.).
+     * The caller decides the response shape: 401 JSON for APIs, a redirect to /?login=1 for
+     * page navigations, passthrough for assets.
      *
      * <p>If the registry bean is absent — SSO support not compiled in, or its component scan
-     * disabled — the request is allowed. This is a deliberate fail-open: the API key gate has
-     * already run, and the alternative would be to lock out every deployment that does not ship the
-     * registry.
+     * disabled — the request is allowed. This is a deliberate fail-open: the alternative would be
+     * to lock out every deployment that does not ship the registry.
      */
     private boolean ssoGateSatisfied(String path, HttpSession session) {
         if (!ssoRequired) return true;
-        if (!path.startsWith("/api/") || path.startsWith("/api/auth/")) return true;
 
         SsoSessionRegistry registry = ssoSessionRegistry.getIfAvailable();
         if (registry == null) return true;
