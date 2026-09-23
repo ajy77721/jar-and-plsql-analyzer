@@ -1,0 +1,139 @@
+---
+kind: pipeline
+type: kubernetes
+name: default
+
+platform:
+  os: linux
+
+# Modeled on the hello-flask template's .drone.yml:
+#   test -> build+publish image to ECR -> Helm deploy to Kanopy (staging on push, prod on tag)
+
+steps:
+- name: test
+  pull: if-not-exists
+  image: maven:3.9-eclipse-temurin-17
+  commands:
+  - mvn -B -no-transfer-progress test
+
+- name: slack-start
+  pull: if-not-exists
+  image: plugins/slack
+  settings:
+    channel: <your-team-channel>
+    template: "*Staging*: building (<{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}>) by {{build.author}} from `{{build.branch}}`\n"
+  environment:
+    SLACK_WEBHOOK:
+      from_secret: slack_webhook
+  when:
+    branch:
+    - main
+    event:
+    - push
+    status:
+    - success
+    - failure
+
+- name: build+publish-main-branch
+  pull: if-not-exists
+  image: plugins/ecr
+  settings:
+    create_repository: true
+    registry: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
+    repo: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/<namespace>/amp-analyzer
+    tags:
+    - git-${DRONE_COMMIT_SHA:0:7}
+    - latest
+  environment:
+    ECR_ACCESS_KEY:
+      from_secret: ecr_access_key
+    ECR_SECRET_KEY:
+      from_secret: ecr_secret_key
+  when:
+    branch:
+    - main
+    event:
+    - push
+
+- name: build+publish-tag
+  pull: if-not-exists
+  image: plugins/ecr
+  settings:
+    create_repository: true
+    registry: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
+    repo: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/<namespace>/amp-analyzer
+    tags:
+    - ${DRONE_TAG}
+    - git-${DRONE_COMMIT_SHA:0:7}
+  environment:
+    ECR_ACCESS_KEY:
+      from_secret: ecr_access_key
+    ECR_SECRET_KEY:
+      from_secret: ecr_secret_key
+  when:
+    event:
+    - tag
+
+- name: deploy-staging
+  pull: if-not-exists
+  image: quay.io/mongodb/drone-helm:v2
+  settings:
+    chart: mongodb/web-app
+    chart_version: 4.7.3   # check the latest at 10gen/helm-charts before first deploy
+    client_only: true
+    helm_repos: mongodb=https://10gen.github.io/helm-charts
+    namespace: <your-kanopy-namespace>
+    prefix: staging
+    release: amp-analyzer
+    tiller_ns: <your-kanopy-namespace>
+    values: image.tag=git-${DRONE_COMMIT_SHA:0:7},image.repository=<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/<namespace>/amp-analyzer
+    values_files:
+    - ./environments/staging.yml
+  environment:
+    API_SERVER: https://api.staging.corp.mongodb.com
+    STAGING_KUBERNETES_TOKEN:
+      from_secret: staging_kubernetes_token
+  when:
+    branch:
+    - main
+    event:
+    - push
+
+- name: deploy-prod
+  pull: if-not-exists
+  image: quay.io/mongodb/drone-helm:v2
+  settings:
+    chart: mongodb/web-app
+    chart_version: 4.7.3
+    client_only: true
+    helm_repos: mongodb=https://10gen.github.io/helm-charts
+    namespace: <your-kanopy-namespace>
+    prefix: prod
+    release: amp-analyzer
+    tiller_ns: <your-kanopy-namespace>
+    values: image.tag=${DRONE_TAG},image.repository=<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/<namespace>/amp-analyzer
+    values_files:
+    - ./environments/prod.yml
+  environment:
+    API_SERVER: https://api.prod.corp.mongodb.com
+    PROD_KUBERNETES_TOKEN:
+      from_secret: prod_kubernetes_token
+  when:
+    event:
+    - tag
+
+- name: slack-finish
+  pull: if-not-exists
+  image: plugins/slack
+  settings:
+    channel: <your-team-channel>
+    template: "{{#success build.status}}\n  ✅ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> deployed in {{since build.started}}\n{{else}}\n  ❌ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> failed {{build.link}}\n{{/success}}\n"
+  environment:
+    SLACK_WEBHOOK:
+      from_secret: slack_webhook
+  when:
+    status:
+    - success
+    - failure
+
+...

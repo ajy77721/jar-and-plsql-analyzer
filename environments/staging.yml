@@ -1,0 +1,41 @@
+# Kanopy values for amp-analyzer — staging environment.
+# Consumed by the mongodb/web-app Helm chart via .drone.yml (deploy-staging step).
+
+replicaCount: 1
+
+service:
+  targetPort: 8083
+
+ingress:
+  enabled: true
+  hosts:
+    - amp-analyzer.<your-kanopy-namespace>.staging.corp.mongodb.com
+
+env:
+  PORT: "8083"
+  # Container JVM sizing: 75% of the pod memory limit (see JAVA_OPTS below)
+  JAVA_OPTS: "-XX:MaxRAMPercentage=75 -XX:+UseG1GC"
+  # All artifacts live in S3 (default in application.properties) — the pod is stateless.
+  # AWS credentials must reach the app via the default provider chain:
+  # either a pod IAM role (preferred) or envSecrets with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
+  # AWS_REGION is required for the S3 storage backend:
+  #   AWS_REGION: ap-south-1
+
+envSecrets:
+  # e.g. AWS credentials for the S3 storage backend, created via the Kanopy secrets flow:
+  # aws-creds: <name-of-secret-store-entry>
+
+resources:
+  limits:
+    cpu: "2"
+    memory: 10Gi
+  requests:
+    cpu: "1"
+    memory: 6Gi
+
+# Liveness/readiness on the home dashboard
+probes:
+  liveness:
+    path: /
+  readiness:
+    path: /

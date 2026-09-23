@@ -1,0 +1,34 @@
+# Kanopy values for amp-analyzer — production environment.
+# Consumed by the mongodb/web-app Helm chart via .drone.yml (deploy-prod step, tag pushes only).
+
+replicaCount: 1
+
+service:
+  targetPort: 8083
+
+ingress:
+  enabled: true
+  hosts:
+    - amp-analyzer.<your-kanopy-namespace>.prod.corp.mongodb.com
+
+env:
+  PORT: "8083"
+  JAVA_OPTS: "-XX:MaxRAMPercentage=75 -XX:+UseG1GC"
+  # AWS_REGION: ap-south-1  (required for the S3 storage backend)
+
+envSecrets:
+  # aws-creds: <name-of-secret-store-entry>
+
+resources:
+  limits:
+    cpu: "4"
+    memory: 12Gi
+  requests:
+    cpu: "2"
+    memory: 8Gi
+
+probes:
+  liveness:
+    path: /
+  readiness:
+    path: /
