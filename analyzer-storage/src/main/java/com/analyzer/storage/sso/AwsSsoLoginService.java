@@ -112,6 +112,7 @@ public class AwsSsoLoginService {
     private final SsoClient sso;
     private final Region region;
     private final ApplicationEventPublisher events;
+    private final AwsIdentityStoreLookup identityLookup;
 
     /**
      * @param regionProperty the Identity Center / IAM region the OIDC and SSO endpoints live in.
@@ -121,8 +122,10 @@ public class AwsSsoLoginService {
      */
     public AwsSsoLoginService(
             @Value("${app.storage.sso.region:${app.storage.s3.region:us-east-1}}") String regionProperty,
-            ApplicationEventPublisher events) {
+            ApplicationEventPublisher events,
+            AwsIdentityStoreLookup identityLookup) {
         this.events = events;
+        this.identityLookup = identityLookup;
         this.region = Region.of((regionProperty == null || regionProperty.isBlank())
                 ? "us-east-1" : regionProperty.trim());
         // Built once: both clients are thread-safe and stateless, and rebuilding one per call would
@@ -292,6 +295,47 @@ public class AwsSsoLoginService {
         return sso;
     }
 
+    /**
+     * Revokes this session <b>at AWS</b>, so a logout or an admin revoke kills the server-side
+     * Identity Center sign-in session rather than only forgetting local state.
+     *
+     * <p>Uses the {@code sso:Logout} operation, which is Identity Center's server-side revocation:
+     * it invalidates the access token and the sign-in session it belongs to, so the refresh token can
+     * no longer mint new credentials either. (The AWS SDK at the pinned 2.29.24 has no
+     * {@code ssooidc:RevokeToken} model — that operation does not exist on the SSO OIDC endpoint —
+     * so {@code sso:Logout} is the correct and available primitive.)
+     *
+     * <p>Deliberately non-fatal and best-effort: a missing session, an already-expired token, or an
+     * endpoint failure are all normal and log one INFO line — the caller must still proceed to drop
+     * local state, because a live local session is worse than a failed AWS logout. No token or secret
+     * is ever logged.
+     *
+     * @return true when AWS accepted the logout, false when there was nothing to revoke or it could
+     *         not be completed (the caller ignores this and clears local state regardless)
+     */
+    public boolean revokeAwsToken(SsoSessionState state) {
+        if (state == null) return false;
+        synchronized (state.lock()) {
+            SsoSessionState.TokenState tokens = state.tokens();
+            if (tokens == null || tokens.accessToken() == null) {
+                // Nothing was ever minted for this session (or it was already cleared); there is no
+                // AWS-side session to end.
+                log.info("[aws-sso] no AWS-side session token to revoke for this session");
+                return false;
+            }
+            try {
+                sso.logout(b -> b.accessToken(tokens.accessToken()));
+                log.info("[aws-sso] AWS-side Identity Center session revoked (sso:Logout)");
+                return true;
+            } catch (RuntimeException e) {
+                // Class name only: the request carries the access token and must not be logged.
+                log.info("[aws-sso] AWS-side logout did not complete ({}); "
+                        + "clearing the local session anyway", e.getClass().getSimpleName());
+                return false;
+            }
+        }
+    }
+
     /** Resolves identity from a fresh access token: first account, then a PowerUser/Administrator role. */
     private SsoIdentity resolveIdentity(String accessToken, String idToken) {
         List<AccountInfo> accounts = sso.listAccounts(b -> b.accessToken(accessToken)).accountList();
@@ -314,12 +358,27 @@ public class AwsSsoLoginService {
                 .findFirst()
                 .orElse(roles.get(0));
         IdentityClaims claims = identityClaims(idToken);
-        return new SsoIdentity(claims.name(), claims.email(),
-                account.accountId(), account.accountName(), role.roleName());
+        String name = claims.name();
+        String email = claims.email();
+        // A bare `sub` is NOT a human name: Identity Center routinely returns only that. Prefer a
+        // real name/email claim, and when there is none, ask Identity Store to turn the sub (which
+        // for Identity Center is the Identity Store UserId) into a person. Best-effort — an empty
+        // result just leaves the identity anonymous as before.
+        if (name == null || email == null) {
+            AwsIdentityStoreLookup.ResolvedIdentity resolved = identityLookup
+                    .lookup(claims.userId(), claims.storeId())
+                    .orElse(null);
+            if (resolved != null) {
+                name = firstNonBlank(name, resolved.name());
+                email = firstNonBlank(email, resolved.email());
+            }
+        }
+        return new SsoIdentity(name, email,
+                account.accountId(), account.accountName(), role.roleName(), null);
     }
 
     /**
-     * Decodes the {@code name}/{@code email} display claims out of a {@code CreateToken} id_token.
+     * Decodes the display and identity claims out of a {@code CreateToken} id_token.
      *
      * <p>An id_token is a JWT: {@code header.payload.signature}, the payload being base64url-encoded
      * JSON. Only the payload is read here, and it is <b>not</b> signature-verified — deliberately:
@@ -329,26 +388,36 @@ public class AwsSsoLoginService {
      * relevant is derived from these claims (authorisation keys off the account id and role name from
      * the {@code sso} calls, which are themselves token-authenticated).
      *
+     * <p>The {@code sub} is deliberately <b>not</b> used as a name or email. It is an opaque
+     * identifier, and rendering it as a person's name is exactly the "anonymous account id" symptom
+     * this class exists to avoid; instead it is surfaced as {@code userId} for the Identity Store
+     * lookup. Email/name fall back only to genuinely human claims.
+     *
      * <p>Every fallback is null-safe: a missing id_token, a malformed one, or absent claims yield a
      * {@link IdentityClaims} with null fields rather than an exception, because "no display name" is
      * a normal Identity Center configuration, not a login failure.
      */
     private static IdentityClaims identityClaims(String idToken) {
-        if (idToken == null || idToken.isBlank()) return new IdentityClaims(null, null);
+        if (idToken == null || idToken.isBlank()) return new IdentityClaims(null, null, null, null);
         try {
             String[] parts = idToken.split("\\.");
-            if (parts.length < 2) return new IdentityClaims(null, null);
+            if (parts.length < 2) return new IdentityClaims(null, null, null, null);
             JsonNode claims = JSON.readTree(Base64.getUrlDecoder().decode(parts[1]));
             String email = firstNonBlank(
-                    text(claims, "email"), text(claims, "preferred_username"), text(claims, "sub"));
+                    text(claims, "email"), text(claims, "preferred_username"));
             String name = firstNonBlank(
-                    text(claims, "name"), text(claims, "preferred_username"),
-                    text(claims, "email"), text(claims, "sub"));
-            return new IdentityClaims(name, email);
+                    text(claims, "name"), text(claims, "preferred_username"), email);
+            // Identity Center puts the Identity Store UserId in `sub`; some instances also name the
+            // store outright, which saves the ListInstances round trip.
+            String userId = firstNonBlank(
+                    text(claims, "sub"), text(claims, "userId"), text(claims, "user_id"));
+            String storeId = firstNonBlank(
+                    text(claims, "identity_store_id"), text(claims, "identityStoreId"));
+            return new IdentityClaims(name, email, userId, storeId);
         } catch (RuntimeException | IOException e) {
             // Class name only; the token itself is never logged.
             log.debug("[aws-sso] id_token claims could not be decoded ({})", e.getClass().getSimpleName());
-            return new IdentityClaims(null, null);
+            return new IdentityClaims(null, null, null, null);
         }
     }
 
@@ -409,7 +478,14 @@ public class AwsSsoLoginService {
     public record PollResult(String status, String accountId, String accountName, String roleName) {
     }
 
-    /** The {@code name}/{@code email} claims decoded from an id_token; either or both may be null. */
-    private record IdentityClaims(String name, String email) {
+    /**
+     * The display/identity claims decoded from an id_token; any field may be null.
+     *
+     * @param name       a human name claim ({@code name}/{@code preferred_username}), or null
+     * @param email      an email claim ({@code email}/{@code preferred_username}), or null
+     * @param userId     the Identity Store UserId ({@code sub}), or null when absent
+     * @param storeId    the IdentityStoreId named by the token, or null
+     */
+    private record IdentityClaims(String name, String email, String userId, String storeId) {
     }
 }

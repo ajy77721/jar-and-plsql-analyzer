@@ -5,6 +5,8 @@ PA.statements = {
     _activeTypes: new Set(),
 
     load: async function() {
+        var container = document.getElementById('stmtContainer');
+        if (container) container.innerHTML = '<div class="empty-msg">Loading statements...</div>';
         await PA.statements._fetchAndSetTotals();
         PA.statements._initTypePills();
         PA.statements._initTable();

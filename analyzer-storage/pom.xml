@@ -83,6 +83,22 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssooidc</artifactId>
         </dependency>
+        <!--
+            Identity Store: resolves the human behind an Identity Center login when the OIDC
+            id_token carries only a `sub`. DescribeUser(UserId) turns that opaque id into a
+            UserName/DisplayName/Emails. The `ssoadmin` module is needed only to discover the
+            IdentityStoreId via ListInstances when the id_token does not name it; the region is the
+            SSO region and the credentials are the process's default chain, so neither is configured
+            here. Both take their version from the SDK BOM imported above, like every other AWS module.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>identitystore</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssoadmin</artifactId>
+        </dependency>
 
         <!--
             MongoDB backend. No version here: mongodb.version in the parent pom drives the Boot

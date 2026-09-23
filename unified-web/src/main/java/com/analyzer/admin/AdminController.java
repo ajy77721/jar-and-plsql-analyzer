@@ -3,8 +3,10 @@ package com.analyzer.admin;
 import com.analyzer.admin.AdminAuditService.AuditEntry;
 import com.analyzer.admin.AdminAuditService.UserRollup;
 import com.analyzer.storage.sso.ActiveUserInfo;
+import com.analyzer.storage.sso.AwsSsoLoginService;
 import com.analyzer.storage.sso.SsoIdentity;
 import com.analyzer.storage.sso.SsoSessionRegistry;
+import com.analyzer.storage.sso.SsoSessionState;
 import com.analyzer.storage.sso.SsoStoreSwapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -72,6 +75,7 @@ public class AdminController {
 
     private final AdminAuditService audit;
     private final ObjectProvider<SsoSessionRegistry> ssoRegistry;
+    private final ObjectProvider<AwsSsoLoginService> ssoLogin;
     private final String username;
     private final String password;
 
@@ -80,10 +84,12 @@ public class AdminController {
 
     public AdminController(AdminAuditService audit,
                            ObjectProvider<SsoSessionRegistry> ssoRegistry,
+                           ObjectProvider<AwsSsoLoginService> ssoLogin,
                            @Value("${app.admin.username:amp-admin}") String username,
                            @Value("${app.admin.password:amp-admin-pwd}") String password) {
         this.audit = audit;
         this.ssoRegistry = ssoRegistry;
+        this.ssoLogin = ssoLogin;
         this.username = username;
         this.password = password;
     }
@@ -174,18 +180,25 @@ public class AdminController {
         ResponseEntity<Map<String, Object>> denied = requireAuth(key);
         if (denied != null) return denied;
 
-        Map<String, ActiveUserInfo> activeByKey = new LinkedHashMap<>();
+        // Group live sessions by PERSON. A session with no identity yet (mid-login or abandoned)
+        // is not a person and never becomes a user row — it is reported separately, below.
+        Map<String, List<ActiveUserInfo>> activeByKey = new LinkedHashMap<>();
+        List<ActiveUserInfo> pending = new ArrayList<>();
         for (ActiveUserInfo active : activeUsers()) {
             String k = activeKey(active);
-            if (k != null) activeByKey.putIfAbsent(k, active);
+            if (k == null) {
+                pending.add(active);
+                continue;
+            }
+            activeByKey.computeIfAbsent(k, x -> new ArrayList<>()).add(active);
         }
 
         List<Map<String, Object>> users = new ArrayList<>();
         Set<String> emitted = new HashSet<>();
         for (UserRollup rollup : audit.rollups()) {
             emitted.add(rollup.key());
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("key", rollup.key());
+            List<ActiveUserInfo> activeSessions = activeByKey.getOrDefault(rollup.key(), List.of());
+            Map<String, Object> row = personRow(rollup.key(), activeSessions);
             row.put("name", rollup.name());
             row.put("email", rollup.email());
             row.put("accountId", rollup.accountId());
@@ -196,37 +209,32 @@ public class AdminController {
             row.put("firstSeenEpochMs", rollup.firstSeenEpochMs());
             row.put("lastSeenEpochMs", rollup.lastSeenEpochMs());
             row.put("events", rollup.eventCounts());
-
-            ActiveUserInfo active = activeByKey.get(rollup.key());
-            row.put("currentlyActive", active != null);
             // The live target wins over the last one the audit recorded, so an operator sees what
-            // the session is connected to right now rather than what it connected to last time.
-            if (active != null) {
+            // the person is connected to right now rather than what they connected to last time.
+            if (!activeSessions.isEmpty()) {
+                ActiveUserInfo active = activeSessions.get(0);
                 if (active.bucket() != null) row.put("bucket", active.bucket());
                 if (active.region() != null) row.put("region", active.region());
-                row.put("sessionIdMasked", AdminAuditService.maskSession(active.sessionId()));
             }
             users.add(row);
         }
 
-        for (Map.Entry<String, ActiveUserInfo> entry : activeByKey.entrySet()) {
+        for (Map.Entry<String, List<ActiveUserInfo>> entry : activeByKey.entrySet()) {
             if (emitted.contains(entry.getKey())) continue;
-            ActiveUserInfo active = entry.getValue();
-            SsoIdentity identity = active.identity();
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("key", entry.getKey());
-            row.put("name", identity == null ? null : identity.name());
+            List<ActiveUserInfo> activeSessions = entry.getValue();
+            ActiveUserInfo first = activeSessions.get(0);
+            SsoIdentity identity = first.identity();
+            Map<String, Object> row = personRow(entry.getKey(), activeSessions);
+            row.put("name", identity == null ? null : identity.shownName());
             row.put("email", identity == null ? null : identity.email());
             row.put("accountId", identity == null ? null : identity.accountId());
             row.put("accountName", identity == null ? null : identity.accountName());
             row.put("roleName", identity == null ? null : identity.roleName());
-            row.put("bucket", active.bucket());
-            row.put("region", active.region());
+            row.put("bucket", first.bucket());
+            row.put("region", first.region());
             row.put("firstSeenEpochMs", 0L);
-            row.put("lastSeenEpochMs", active.lastActivityEpochMs());
+            row.put("lastSeenEpochMs", first.lastActivityEpochMs());
             row.put("events", Map.of());
-            row.put("currentlyActive", true);
-            row.put("sessionIdMasked", AdminAuditService.maskSession(active.sessionId()));
             users.add(row);
         }
 
@@ -234,10 +242,42 @@ public class AdminController {
                 .comparingLong((Map<String, Object> r) -> asLong(r.get("lastSeenEpochMs"))).reversed()
                 .thenComparing(r -> String.valueOf(r.get("key"))));
 
+        // Sessions that started a flow but never resolved an identity: not people, so they get
+        // their own section (masked id + last activity + per-session revoke) rather than a ghost row.
+        List<Map<String, Object>> pendingLogins = new ArrayList<>();
+        for (ActiveUserInfo active : pending) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("sessionIdMasked", AdminAuditService.maskSession(active.sessionId()));
+            row.put("lastActivityEpochMs", active.lastActivityEpochMs());
+            row.put("bucket", active.bucket());
+            row.put("region", active.region());
+            pendingLogins.add(row);
+        }
+        pendingLogins.sort(Comparator
+                .comparingLong((Map<String, Object> r) -> asLong(r.get("lastActivityEpochMs"))).reversed());
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", true);
         out.put("users", users);
+        out.put("pendingLogins", pendingLogins);
         return ResponseEntity.ok(out);
+    }
+
+    /**
+     * The person-shaped columns shared by both user-row sources. {@code displayName} is the admin's
+     * correction (when set) and always wins over the identity-store name; {@code sessionCount} tells
+     * the portal how many live sessions a person-level revoke will end.
+     */
+    private Map<String, Object> personRow(String key, List<ActiveUserInfo> activeSessions) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("key", key);
+        row.put("displayName", audit.displayNameFor(key));
+        row.put("currentlyActive", !activeSessions.isEmpty());
+        row.put("sessionCount", activeSessions.size());
+        if (!activeSessions.isEmpty()) {
+            row.put("sessionIdMasked", AdminAuditService.maskSession(activeSessions.get(0).sessionId()));
+        }
+        return row;
     }
 
     // ── audit history ───────────────────────────────────────────────────────────
@@ -263,12 +303,18 @@ public class AdminController {
         return ResponseEntity.ok(out);
     }
 
-    private static Map<String, Object> eventJson(AuditEntry e) {
+    private Map<String, Object> eventJson(AuditEntry e) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("type", e.type());
         m.put("timestampEpochMs", e.timestampEpochMs());
         m.put("name", e.name());
         m.put("email", e.email());
+        // The audit "User" column chain: an admin display-name correction, else the email/name the
+        // event was recorded with, else the account id. The stored line itself is never rewritten —
+        // only how it is labelled in this read.
+        String displayName = audit.displayNameFor(e.key());
+        m.put("displayName", displayName);
+        m.put("user", firstNonBlank(displayName, e.email(), e.name(), e.accountId()));
         m.put("accountId", e.accountId());
         m.put("role", e.roleName());
         m.put("bucket", e.bucket());
@@ -326,6 +372,9 @@ public class AdminController {
         }
 
         if (matches == 1) {
+            // AWS first (best-effort), then always drop local state — an AWS failure must never
+            // leave a live local session behind.
+            revokeAtAws(registry, fullId);
             registry.end(fullId);
             out.put("revoked", true);
             out.put("sessionIdMasked", AdminAuditService.maskSession(fullId));
@@ -372,6 +421,86 @@ public class AdminController {
         return ResponseEntity.ok(out);
     }
 
+    /**
+     * Sets or corrects the display name an operator wants a person shown as. It is stored as a
+     * display-name override in the audit service's rollup (never in the audit file, and never
+     * rewriting history), and every read — the Users tab and the audit "User" column — prefers it.
+     * A blank value clears the override.
+     */
+    @PutMapping("/users/{key}/display-name")
+    public ResponseEntity<Map<String, Object>> setDisplayName(
+            @RequestHeader(value = KEY_HEADER, required = false) String key,
+            @PathVariable("key") String userKey,
+            @RequestBody(required = false) Map<String, String> body) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        String displayName = body == null ? null : body.get("displayName");
+        boolean updated = audit.setDisplayName(userKey, displayName);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("updated", updated);
+        if (!updated) {
+            out.put("note", "No user rollup matched that key.");
+        } else {
+            log.info("[admin] display name updated for a user rollup (cleared={})",
+                    displayName == null || displayName.isBlank());
+        }
+        return ResponseEntity.ok(out);
+    }
+
+    /**
+     * Revokes <b>every live session belonging to one person</b> — all registry entries whose
+     * identity key matches. Each is revoked at AWS first (best-effort) and then ended locally, so a
+     * person signed in from two browsers is fully signed out with one action. Per-session revoke
+     * ({@link #revoke}) remains for the identity-less "pending logins" section.
+     */
+    @PostMapping("/users/{key}/revoke")
+    public ResponseEntity<Map<String, Object>> revokeUser(
+            @RequestHeader(value = KEY_HEADER, required = false) String key,
+            @PathVariable("key") String userKey) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+
+        SsoSessionRegistry registry = ssoRegistry.getIfAvailable();
+        if (registry == null) {
+            out.put("revoked", 0);
+            out.put("note", "AWS SSO registry is not available in this deployment");
+            return ResponseEntity.ok(out);
+        }
+
+        int revoked = 0;
+        for (ActiveUserInfo active : registry.listActive()) {
+            String k = activeKey(active);
+            if (k == null || !k.equals(userKey)) continue;
+            String id = active.sessionId();
+            if (id == null) continue;
+            revokeAtAws(registry, id);
+            registry.end(id);
+            revoked++;
+        }
+        out.put("revoked", revoked);
+        if (revoked == 0) {
+            out.put("note", "No live sessions matched that user.");
+        } else {
+            log.info("[admin] revoked {} live session(s) for one user", revoked);
+        }
+        return ResponseEntity.ok(out);
+    }
+
+    /** Best-effort AWS-side RevokeToken for a session, before its local state is dropped. */
+    private void revokeAtAws(SsoSessionRegistry registry, String sessionId) {
+        if (sessionId == null) return;
+        AwsSsoLoginService svc = ssoLogin.getIfAvailable();
+        if (svc == null) return;
+        SsoSessionState state = registry.get(sessionId);
+        // Non-fatal by contract: revokeAwsToken logs and returns false rather than throwing.
+        svc.revokeAwsToken(state);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────
 
     private List<ActiveUserInfo> activeUsers() {
@@ -387,17 +516,22 @@ public class AdminController {
     }
 
     /**
-     * The registry key for an active session. A session with no identity yet keys on its masked id,
-     * matching what {@link AuditEntry#key()} does for identity-less events.
+     * The registry key for an active session, or {@code null} when the session has no identity yet.
+     * A null key is what routes such a session into the "pending logins" section instead of a person
+     * row: only someone we can name counts as a user.
      */
     private static String activeKey(ActiveUserInfo active) {
-        String k = AdminAuditService.identityKey(active.identity());
-        if (k != null) return k;
-        String masked = AdminAuditService.maskSession(active.sessionId());
-        return masked == null ? null : "session:" + masked;
+        return AdminAuditService.identityKey(active.identity());
     }
 
     private static long asLong(Object value) {
         return (value instanceof Number n) ? n.longValue() : 0L;
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) return v;
+        }
+        return null;
     }
 }

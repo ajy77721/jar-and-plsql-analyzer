@@ -351,7 +351,7 @@
                         style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
                         onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
                     <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.5;margin-top:6px">
-                        Your AWS access portal URL, e.g. https://d-xxxxxxxxxx.awsapps.com/start.<br>
+                        Your AWS access portal URL — usually prefilled, only change if instructed.<br>
                         Saved in this browser for next time.
                     </div>
                     <button id="awsSsoStartBtn" onclick="awsSsoContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
@@ -390,9 +390,18 @@
                     <input id="awsSsoRegion" type="text" value="ap-south-1"
                         style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
                         onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
-                    <button id="awsSsoConnectBtn" onclick="awsSsoConnect()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
-                        Use this bucket
-                    </button>
+                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-top:14px;margin-bottom:6px">Display name (optional)</label>
+                    <input id="awsSsoDisplayName" type="text" placeholder="How you want to be shown, e.g. Ajay"
+                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;outline:none"
+                        onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                    <div style="display:flex;gap:10px;margin-top:16px">
+                        <button id="awsSsoTestBtn" onclick="awsSsoTestBucket()" style="flex:1;background:var(--sidebar-hover);border:1px solid var(--sidebar-border);color:var(--sidebar-text);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                            Test access
+                        </button>
+                        <button id="awsSsoConnectBtn" onclick="awsSsoConnect()" style="flex:2;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                            Use this bucket
+                        </button>
+                    </div>
                 </div>
 
             </div>
@@ -1160,6 +1169,7 @@
 
     let _awsSsoPollId = null;    // setInterval handle for /api/auth/aws/poll
     let _awsSsoSession = null;   // last known session from /api/auth/aws/session or /connect
+    let _awsSsoDefaultStartUrl = '';  // server-configured portal URL (session.defaultStartUrl), for prefill
     let _awsSsoAutoOpened = false;  // auto-open the login modal at most once per page load
 
     function setAwsSsoPill(session) {
@@ -1170,7 +1180,7 @@
                 // Never render token material — only name/email/account/role/bucket.
                 // Identity Center id_tokens often carry no email/name claims — then the SSO role
                 // is the most human-meaningful identifier available.
-                const who = session.name || session.email || session.accountName
+                const who = session.displayName || session.name || session.email || session.accountName
                     || (session.role ? session.role + ' (' + (session.account || 'SSO') + ')' : '?');
                 el.textContent = 'AWS: ' + who;
                 el.style.background = 'var(--badge-green-bg)';
@@ -1204,6 +1214,7 @@
             const d = await fetch('/api/auth/aws/session').then(r => r.ok ? r.json() : null).catch(() => null);
             if (!d) return;
             _awsSsoSession = d.connected ? d : null;
+            _awsSsoDefaultStartUrl = d.defaultStartUrl || '';
             setAwsSsoPill(d);
             awsSsoFillTargets(_awsSsoSession);
             // No session yet -> prompt for login once, on first resolution only. Later
@@ -1285,7 +1296,7 @@
         const el = document.getElementById('awsSsoIdentity');
         if (!el) return;
         if (!session || !session.connected) { el.style.display = 'none'; return; }
-        const name = session.name || session.email || session.accountName;
+        const name = session.displayName || session.name || session.email || session.accountName;
         const role = session.role;
         // When no personal claims exist, lead with the role — never a bare "unknown".
         el.textContent = name
@@ -1303,6 +1314,9 @@
         if (session && session.connected) {
             if (session.bucket) bucketEl.value = session.bucket;
             if (session.region) regionEl.value = session.region;
+            // Reflect any display name already set, so re-opening the modal shows the current choice.
+            const dnEl = document.getElementById('awsSsoDisplayName');
+            if (dnEl && session.displayName) dnEl.value = session.displayName;
         } else {
             // No live session: prefer the last bucket/region this browser connected with,
             // then whatever the field already holds, then the built-in defaults.
@@ -1353,11 +1367,12 @@
         if (!m) return;
         m.style.display = 'flex';
         awsSsoClearErrors();
-        // Start URL is remembered per browser, like the other page-local prefs.
+        // Start URL prefill: a value this browser saved wins (the user may use a different portal),
+        // then the server-configured default, else left empty for the user to type.
         const input = document.getElementById('awsSsoStartUrl');
         if (input) {
             const saved = localStorage.getItem(AWS_SSO_START_URL_KEY);
-            if (saved) input.value = saved;
+            input.value = saved || _awsSsoDefaultStartUrl || '';
         }
         awsSsoFillTargets(_awsSsoSession);
         // A live session means there is nothing to authorise — go straight to the S3 target.
@@ -1455,12 +1470,44 @@
         }
     }
 
-    // Step 3: bind the assumed role to a bucket/region.
-    async function awsSsoConnect() {
+    // Step 3: dry-run the read/upload/write probe without committing. Leaves step 3 and the
+    // session's connected target untouched; only the badges and any error are (re)rendered.
+    async function awsSsoTestBucket() {
         const bucketEl = document.getElementById('awsSsoBucket');
         const regionEl = document.getElementById('awsSsoRegion');
         const bucket = ((bucketEl && bucketEl.value) || '').trim();
         const region = ((regionEl && regionEl.value) || '').trim();
+        if (!bucket || !region) { awsSsoShowError(3, 'Bucket and region are both required'); return; }
+        const btn = document.getElementById('awsSsoTestBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
+        awsSsoClearErrors();
+        try {
+            const res = await fetch('/api/auth/aws/test-bucket', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bucket: bucket, region: region })
+            });
+            const d = await res.json().catch(() => ({}));
+            // A failed probe is a normal reply ({ok:false} + breakdown), not a transport error.
+            awsSsoRenderCapabilities(d.capabilities);
+            if (!res.ok || d.ok === false) {
+                awsSsoShowError(3, d.error || 'Access test failed — see the badges above.');
+            }
+        } catch (e) {
+            awsSsoShowError(3, 'Access test failed: ' + e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Test access'; }
+        }
+    }
+
+    // Step 3: bind the assumed role to a bucket/region.
+    async function awsSsoConnect() {
+        const bucketEl = document.getElementById('awsSsoBucket');
+        const regionEl = document.getElementById('awsSsoRegion');
+        const dnEl = document.getElementById('awsSsoDisplayName');
+        const bucket = ((bucketEl && bucketEl.value) || '').trim();
+        const region = ((regionEl && regionEl.value) || '').trim();
+        const displayName = ((dnEl && dnEl.value) || '').trim();
         if (!bucket || !region) { awsSsoShowError(3, 'Bucket and region are both required'); return; }
         const btn = document.getElementById('awsSsoConnectBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
@@ -1469,7 +1516,7 @@
             const res = await fetch('/api/auth/aws/connect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bucket: bucket, region: region })
+                body: JSON.stringify({ bucket: bucket, region: region, displayName: displayName })
             });
             const d = await res.json().catch(() => ({}));
             if (!res.ok || d.ok === false) {
@@ -1486,6 +1533,7 @@
                 // always does) — so the pill can show the person without a second round trip.
                 name: d.name,
                 email: d.email,
+                displayName: d.displayName,
                 accountName: d.accountName,
                 accountId: d.accountId,
                 role: d.role,

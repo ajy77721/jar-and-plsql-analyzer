@@ -22,7 +22,7 @@ steps:
   pull: if-not-exists
   image: plugins/slack
   settings:
-    channel: <your-team-channel>
+    channel: amp-analyzer
     template: "*Staging*: building (<{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}>) by {{build.author}} from `{{build.branch}}`\n"
   environment:
     SLACK_WEBHOOK:
@@ -128,7 +128,7 @@ steps:
   pull: if-not-exists
   image: plugins/slack
   settings:
-    channel: <your-team-channel>
+    channel: amp-analyzer
     template: "{{#success build.status}}\n  ✅ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> deployed in {{since build.started}}\n{{else}}\n  ❌ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> failed {{build.link}}\n{{/success}}\n"
   environment:
     SLACK_WEBHOOK:

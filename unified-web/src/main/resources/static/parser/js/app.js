@@ -1037,15 +1037,30 @@ PA.trace = {
         var callLine = n.callLineNumber || 0;
         var sf = n.sourceFile || '';
 
+        // Each row is a 5-column CSS grid (see css/trace.css) so the sticky header built in
+        // `_render` lines up with it and its grips can drive the same `--trc-*` width variables.
+        // The cells keep every class the old flat span list used, so nothing that styled a badge
+        // moved. Grouping by cell is what gives the proc chain and the @line refs their own,
+        // separately resizable columns instead of competing for one flex line.
         var html = '<div class="trace-row" data-depth="' + n._depth + '">';
+        // 1 — depth / step / depth bar
+        html += '<span class="trace-cell tc-step">';
         html += '<span class="ct-depth-badge" data-tip="Call depth ' + n._depth + '">L' + n._depth + '</span>';
         html += '<span class="trace-step" style="color:' + colorObj.fg + '">' + (i + 1) + '</span>';
         html += '<span class="trace-bar" style="width:' + barWidth + 'px;background:' + colorObj.bg + ';margin-left:' + (n._depth * 8) + 'px"></span>';
+        html += '</span>';
+        // 2 — owner schema
+        html += '<span class="trace-cell tc-schema">';
         if (schema) html += '<span class="ct-schema-badge" style="background:' + colorObj.bg + ';color:' + colorObj.fg + '" data-tip="Owner schema">' + PA.esc(schema) + '</span>';
+        html += '</span>';
+        // 3 — procedure chain
+        html += '<span class="trace-cell tc-name">';
         if (n.readable === false) html += '<span class="ct-lock" data-tip="Encrypted/wrapped">&#128274;</span>';
         html += '<span class="trace-name" data-tip="Click to view source" onclick="PA.sourceView.openModal(\'' + PA.escJs(n.id || '') + '\'); event.stopPropagation();">' + PA.esc(fullName) + '</span>';
         if (n._count > 1) html += '<span class="trace-count-badge" data-tip="Called ' + n._count + ' times in the trace">&times;' + n._count + '</span>';
-        html += '<span class="trace-info">';
+        html += '</span>';
+        // 4 — source body / call-site @line references
+        html += '<span class="trace-cell tc-info"><span class="trace-info">';
         if (startL > 0) {
             var bodyLabel = (endL > 0 && endL !== startL) ? ('L' + startL + '-' + endL) : ('L' + startL);
             html += '<span class="ct-line" data-tip="Open source at line" onclick="PA.sourceView.openAtLine(\'' + PA.escJs(sf) + '\', ' + startL + '); event.stopPropagation();">' + bodyLabel + '</span>';
@@ -1053,6 +1068,9 @@ PA.trace = {
         if (callLine > 0 && n._parentSourceFile) {
             html += '<span class="ct-call-line" data-tip="Called at line ' + callLine + '" onclick="PA.sourceView.openAtLine(\'' + PA.escJs(n._parentSourceFile) + '\', ' + callLine + '); event.stopPropagation();">@' + callLine + '</span>';
         }
+        html += '</span></span>';
+        // 5 — call type / truncation
+        html += '<span class="trace-cell tc-type">';
         // Same badge Hierarchy renders on the same node (callGraph.js) — the branch was cut here.
         if (n.childrenTruncated) {
             var _om = n.omittedChildCount || 0;
@@ -1062,7 +1080,8 @@ PA.trace = {
         }
         if (n.circular) html += '<span class="ct-call-badge CIRCULAR">CIRCULAR</span>';
         else if (callType) html += '<span class="ct-call-badge ' + PA.escAttr(callType) + '">' + PA.esc(callType) + '</span>';
-        html += '</span></div>';
+        html += '</span>';
+        html += '</div>';
         return html;
     },
     _render: function() {
@@ -1086,9 +1105,22 @@ PA.trace = {
                 : '';
         }
         if (nodes.length === 0) { container.innerHTML = '<div class="empty-msg">No calls match the filter.</div>'; return; }
-        container.innerHTML = '<div id="traceRows"></div>';
+        // Sticky, resizable header + the rows inside a horizontal scroller. One column per cell
+        // the row renderer emits; the grips are attached by PA.tblResize.enhanceGrid, which reads
+        // the var/default/min off each header cell.
+        container.innerHTML = '<div class="tbl-scroll"><div class="trace-grid" id="traceGrid">'
+            + '<div class="trace-head" id="trace-head">'
+            + '<div class="trace-hcell" data-col="0" data-var="--trc-step" data-default="150" data-min="80">Step</div>'
+            + '<div class="trace-hcell" data-col="1" data-var="--trc-schema" data-default="130" data-min="70">Schema</div>'
+            + '<div class="trace-hcell" data-col="2" data-var="--trc-name" data-default="340" data-min="140">Procedure</div>'
+            + '<div class="trace-hcell" data-col="3" data-var="--trc-info" data-default="220" data-min="100">Source / Calls</div>'
+            + '<div class="trace-hcell" data-col="4" data-var="--trc-type" data-default="120" data-min="80">Type</div>'
+            + '</div><div id="traceRows"></div></div></div>';
         PA.trace._rendered = 0;
         PA.trace._renderBatch();
+        if (PA.tblResize && PA.tblResize.enhanceGrid) {
+            PA.tblResize.enhanceGrid(document.getElementById('trace-head'), 'trace');
+        }
     },
     _renderBatch: function() {
         var rowsContainer = document.getElementById('traceRows');

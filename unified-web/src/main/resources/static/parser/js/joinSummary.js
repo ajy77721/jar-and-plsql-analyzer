@@ -7,6 +7,10 @@ PA.joinSummary = {
     _currentView: 'table',
     _jcWeights: null,
     _jcThresholds: null,
+    /** Bumped on every load(); a slow earlier fetch must not overwrite a newer render. */
+    _loadToken: 0,
+    /** Bumped on every render of #jqContainer (load() and loadQueryOnly() share that panel). */
+    _jqToken: 0,
 
     async _loadConfig() {
         if (PA.joinSummary._jcWeights) return;
@@ -20,32 +24,72 @@ PA.joinSummary = {
     },
 
     async load() {
-        await PA.joinSummary._loadConfig();
-        var raw = PA.joins.data;
-        if (!raw || !raw.length) {
-            raw = await PA.api.getJoinOperations();
+        var jsC = document.getElementById('jsContainer');
+        var jqC = document.getElementById('jqContainer');
+        var token = ++PA.joinSummary._loadToken;
+        var jqToken = ++PA.joinSummary._jqToken;
+        if (jsC) jsC.innerHTML = '<div class="empty-msg">Loading join summary...</div>';
+        if (jqC) jqC.innerHTML = '<div class="empty-msg">Loading join summary...</div>';
+        try {
+            await PA.joinSummary._loadConfig();
+            var raw = PA.joins.data;
+            if (!raw || !raw.length) {
+                raw = await PA.api.getJoinOperations();
+                // PA.api returns the PA.FAILED sentinel on a non-ok response instead of throwing.
+                if (PA.failed && PA.failed(raw)) {
+                    if (token !== PA.joinSummary._loadToken) return;
+                    var failMsg = '<div class="empty-msg">Failed to load join summary</div>';
+                    if (jsC) jsC.innerHTML = failMsg;
+                    if (jqC) jqC.innerHTML = failMsg;
+                    return;
+                }
+            }
+            if (token !== PA.joinSummary._loadToken || jqToken !== PA.joinSummary._jqToken) return;
+            PA.joinSummary._nodeCache = PA.joins._nodeCache || {};
+            PA.joinSummary.data = PA.joinSummary._buildItems(raw);
+            PA.joinSummary.queryData = PA.joinSummary._buildQueryItems(raw);
+        } catch (e) {
+            if (token !== PA.joinSummary._loadToken || jqToken !== PA.joinSummary._jqToken) return;
+            var errMsg = '<div class="empty-msg">Failed to load join summary: ' + PA.esc(e.message || e) + '</div>';
+            if (jsC) jsC.innerHTML = errMsg;
+            if (jqC) jqC.innerHTML = errMsg;
+            return;
         }
-        PA.joinSummary._nodeCache = PA.joins._nodeCache || {};
-        PA.joinSummary.data = PA.joinSummary._buildItems(raw);
-        PA.joinSummary.queryData = PA.joinSummary._buildQueryItems(raw);
         PA.joinSummary._initTable();
         PA.joinSummary._initQueryTable();
         PA.joinSummary.applyScope();
     },
 
     async loadQueryOnly() {
-        var raw = PA.joins.data;
-        PA.joinSummary._nodeCache = PA.joins._nodeCache || {};
-        if (raw && raw.length) {
-            // The plain Joins tab already holds the full array — reuse it and fold it locally
-            // rather than pay a second round trip for the same data.
-            await PA.joinSummary._loadConfig();
-            PA.joinSummary.queryData = PA.joinSummary._buildQueryItems(raw);
-        } else {
-            // UI-013 §60/§62/§64: nothing else on the page holds the raw join array yet, so this
-            // is the one branch where computing the fold server-side (JoinQuerySummary) genuinely
-            // avoids a full, unpaged `/joins` fetch — the server sends back only the grouped rows.
-            PA.joinSummary.queryData = await PA.api.getJoinQuerySummary();
+        var container = document.getElementById('jqContainer');
+        var token = ++PA.joinSummary._jqToken;
+        if (container) container.innerHTML = '<div class="empty-msg">Loading join summary...</div>';
+        try {
+            var raw = PA.joins.data;
+            PA.joinSummary._nodeCache = PA.joins._nodeCache || {};
+            if (raw && raw.length) {
+                // The plain Joins tab already holds the full array — reuse it and fold it locally
+                // rather than pay a second round trip for the same data.
+                await PA.joinSummary._loadConfig();
+                if (token !== PA.joinSummary._jqToken) return;
+                PA.joinSummary.queryData = PA.joinSummary._buildQueryItems(raw);
+            } else {
+                // UI-013 §60/§62/§64: nothing else on the page holds the raw join array yet, so this
+                // is the one branch where computing the fold server-side (JoinQuerySummary) genuinely
+                // avoids a full, unpaged `/joins` fetch — the server sends back only the grouped rows.
+                var q = await PA.api.getJoinQuerySummary();
+                if (token !== PA.joinSummary._jqToken) return;
+                // PA.api returns the PA.FAILED sentinel on a non-ok response instead of throwing.
+                if (PA.failed && PA.failed(q)) {
+                    if (container) container.innerHTML = '<div class="empty-msg">Failed to load join summary</div>';
+                    return;
+                }
+                PA.joinSummary.queryData = q;
+            }
+        } catch (e) {
+            if (token !== PA.joinSummary._jqToken) return;
+            if (container) container.innerHTML = '<div class="empty-msg">Failed to load join summary: ' + PA.esc(e.message || e) + '</div>';
+            return;
         }
         PA.joinSummary._initQueryTable();
         PA.joinSummary._applyScopeQueryOnly();

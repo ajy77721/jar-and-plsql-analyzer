@@ -17,9 +17,27 @@ window.PA = window.PA || {};
 PA.sequences = {
     data: [],
     _activeOps: new Set(),
+    /** Bumped on every load(); a slow earlier fetch must not overwrite a newer render. */
+    _loadToken: 0,
 
     async load() {
-        PA.sequences.data = await PA.api.getSequenceOperations();
+        var container = document.getElementById('seqContainer');
+        var token = ++PA.sequences._loadToken;
+        if (container) container.innerHTML = '<div class="empty-msg">Loading sequences...</div>';
+        try {
+            var data = await PA.api.getSequenceOperations();
+            if (token !== PA.sequences._loadToken) return;
+            // PA.api returns the PA.FAILED sentinel on a non-ok response instead of throwing.
+            if (PA.failed && PA.failed(data)) {
+                if (container) container.innerHTML = '<div class="empty-msg">Failed to load sequences</div>';
+                return;
+            }
+            PA.sequences.data = data;
+        } catch (e) {
+            if (token !== PA.sequences._loadToken) return;
+            if (container) container.innerHTML = '<div class="empty-msg">Failed to load sequences: ' + PA.esc(e.message || e) + '</div>';
+            return;
+        }
         PA.sequences._initOpPills();
         PA.sequences._initTable();
         PA.sequences.applyScope();

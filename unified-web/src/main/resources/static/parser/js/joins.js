@@ -17,9 +17,27 @@ window.PA = window.PA || {};
 PA.joins = {
     data: [],
     _nodeCache: {},
+    /** Bumped on every load(); a slow earlier fetch must not overwrite a newer render. */
+    _loadToken: 0,
 
     async load() {
-        PA.joins.data = await PA.api.getJoinOperations();
+        var container = document.getElementById('joinContainer');
+        var token = ++PA.joins._loadToken;
+        if (container) container.innerHTML = '<div class="empty-msg">Loading joins...</div>';
+        try {
+            var data = await PA.api.getJoinOperations();
+            if (token !== PA.joins._loadToken) return;
+            // PA.api returns the PA.FAILED sentinel on a non-ok response instead of throwing.
+            if (PA.failed && PA.failed(data)) {
+                if (container) container.innerHTML = '<div class="empty-msg">Failed to load joins</div>';
+                return;
+            }
+            PA.joins.data = data;
+        } catch (e) {
+            if (token !== PA.joins._loadToken) return;
+            if (container) container.innerHTML = '<div class="empty-msg">Failed to load joins: ' + PA.esc(e.message || e) + '</div>';
+            return;
+        }
         PA.joins._initTypePills();
         PA.joins._initTable();
         PA.joins.applyScope();

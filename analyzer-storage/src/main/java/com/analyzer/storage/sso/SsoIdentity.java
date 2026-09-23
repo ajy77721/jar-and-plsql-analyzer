@@ -24,7 +24,28 @@ package com.analyzer.storage.sso;
  * @param accountId   the AWS account the session resolved to; non-null once logged in
  * @param accountName a human name for that account, or {@code null} when AWS did not supply one
  * @param roleName    the permission-set role the session uses; non-null once logged in
+ * @param displayName a name the person (or an admin) chose to be shown as, overriding the AWS-
+ *                    derived {@code name} for every rendering; {@code null} when none was set.
+ *                    It is display-only and never participates in identity keys, so setting it
+ *                    cannot fork a user's audit rollup.
  */
 public record SsoIdentity(String name, String email,
-                          String accountId, String accountName, String roleName) {
+                          String accountId, String accountName, String roleName,
+                          String displayName) {
+
+    /**
+     * The name to render for this identity: the chosen {@code displayName} when set, otherwise the
+     * AWS-derived {@code name}. Every surface that shows a person — the home pill, the SSO modal,
+     * the admin Users tab and the audit "User" column — uses this rather than {@link #name()} so a
+     * display-name override takes effect everywhere at once.
+     */
+    public String shownName() {
+        return (displayName != null && !displayName.isBlank()) ? displayName.trim() : name;
+    }
+
+    /** A copy of this identity carrying a different display name; {@code null} clears the override. */
+    public SsoIdentity withDisplayName(String displayName) {
+        String v = (displayName == null || displayName.isBlank()) ? null : displayName.trim();
+        return new SsoIdentity(name, email, accountId, accountName, roleName, v);
+    }
 }

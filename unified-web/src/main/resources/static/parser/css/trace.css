@@ -1,10 +1,53 @@
+/* Explore → Trace (flat call trace).
+ *
+ * Each row is a 5-column CSS grid: Step | Schema | Procedure | Source/Calls | Type. The column
+ * widths are the `--trc-*` variables set on #traceGrid — js/tableResize.js drives them from the
+ * grips on the header cells, and the header (`.trace-head`) and every row (`.trace-row`) share
+ * the same template so they stay aligned.
+ *
+ * Fixed px columns + the row wrapper's overflow-x (see .tbl-scroll in css/ui-polish.css) is the
+ * fix for the reported squeeze: a long schema-qualified proc chain and its `@line` call-site refs
+ * each get their own column, and when the columns together exceed the panel the Trace scrolls
+ * sideways instead of crushing them. Dragging the Procedure grip wider (and it stays widened via
+ * localStorage) is how the full chain is read. */
+
+.trace-grid { width: max-content; min-width: 100%; }
+
+.trace-head, .trace-row {
+    display: grid;
+    grid-template-columns:
+        var(--trc-step, 150px)
+        var(--trc-schema, 130px)
+        var(--trc-name, 340px)
+        var(--trc-info, 220px)
+        var(--trc-type, 120px);
+}
+
+.trace-head {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--bg-top-bar); border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+}
+.trace-hcell {
+    position: relative; padding: 6px 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+}
+
 .trace-row {
-    display: flex; align-items: center; padding: 5px 12px;
+    align-items: center; padding: 5px 0;
     font-size: 12px; border-bottom: 1px solid var(--border);
-    cursor: pointer; gap: 8px; min-height: 30px; transition: background var(--transition);
+    cursor: pointer; min-height: 30px; transition: background var(--transition);
 }
 .trace-row:hover { background: var(--bg-hover); }
 .trace-row.active { background: var(--bg-hover); }
+
+.trace-cell {
+    display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 8px;
+}
+.trace-cell.tc-step { overflow: hidden; }
+.trace-cell.tc-info { padding-right: 12px; }
+
 .trace-depth-bar { height: 100%; flex-shrink: 0; }
 .trace-step {
     width: 30px; min-width: 30px; text-align: right; padding-right: 8px;
@@ -14,7 +57,7 @@
 .trace-name {
     font-family: var(--font-mono); font-weight: 600; font-size: 12px;
     color: var(--text); cursor: pointer; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap;
+    text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
 .trace-name:hover { color: var(--accent); text-decoration: underline; }
-.trace-info { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.trace-info { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }

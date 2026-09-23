@@ -1,13 +1,17 @@
 package com.analyzer.admin;
 
+import com.analyzer.storage.sso.AwsSsoLoginService;
 import com.analyzer.storage.sso.SsoAuditEvent;
 import com.analyzer.storage.sso.SsoIdentity;
+import com.analyzer.storage.sso.SsoSessionRegistry;
+import com.analyzer.storage.sso.SsoSessionState;
 import com.analyzer.storage.sso.SsoStoreSwapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -21,11 +25,15 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 /**
@@ -56,6 +64,19 @@ import java.util.stream.Stream;
  * sweep, so they can arrive concurrently. The tail is guarded by a single monitor — the writes are
  * cheap and rare enough that a lock is clearer than a lock-free structure — while the per-user
  * rollups are a {@link ConcurrentHashMap} of internally synchronised values.
+ *
+ * <h2>Retention policy — the last 48 hours only</h2>
+ *
+ * <p>Audit history is trimmed to the last {@link #RETENTION_MS 48 hours}. The trim runs once at
+ * startup and then lazily at most once an hour, piggybacked on the append path: the file is
+ * rewritten atomically (tmp+move) without the expired lines, and the same lines are dropped from the
+ * in-memory tail and the rollups it feeds. {@link #MAX_TAIL} still bounds memory independently.
+ *
+ * <p><b>Cleaning a record set also revokes any still-live session it belonged to.</b> When a purge
+ * drops the records of a session that is still present in the {@link SsoSessionRegistry}, that
+ * session is ended — AWS-side {@code RevokeToken} first (best-effort), then
+ * {@link SsoSessionRegistry#end} — so a stale browser cannot keep using credentials whose audit
+ * trail has been erased. That {@code LOGOUT} is itself recorded and ages out on the same 48h clock.
  */
 @Service
 public class AdminAuditService {
@@ -64,6 +85,12 @@ public class AdminAuditService {
 
     /** How many recent events are kept in memory for API reads (and restored at startup). */
     public static final int MAX_TAIL = 5000;
+
+    /** Audit history retention: records older than this are purged. */
+    public static final long RETENTION_MS = TimeUnit.HOURS.toMillis(48);
+
+    /** Purges are guarded lazily on the append path; at most this often. */
+    private static final long PURGE_INTERVAL_MS = TimeUnit.HOURS.toMillis(1);
 
     /** Written under {data}/admin/. */
     private static final String AUDIT_DIR = "admin";
@@ -83,8 +110,25 @@ public class AdminAuditService {
 
     private final ConcurrentHashMap<String, UserRollup> rollups = new ConcurrentHashMap<>();
 
-    public AdminAuditService(@Value("${app.data-dir:data}") String dataDir) {
+    /**
+     * Admin-set display-name corrections, keyed by rollup key. Held apart from the rollups so a
+     * retention rebuild (which reconstructs rollups from the surviving tail) never drops them.
+     */
+    private final ConcurrentHashMap<String, String> displayNames = new ConcurrentHashMap<>();
+
+    /** Epoch millis of the last purge, so the O(n) trim is amortised. */
+    private final AtomicLong lastPurgeEpochMs = new AtomicLong(System.currentTimeMillis());
+
+    /** Lazily resolved so this bean can be constructed without eager registry/service wiring. */
+    private final ObjectProvider<SsoSessionRegistry> registryProvider;
+    private final ObjectProvider<AwsSsoLoginService> loginServiceProvider;
+
+    public AdminAuditService(@Value("${app.data-dir:data}") String dataDir,
+                             ObjectProvider<SsoSessionRegistry> registryProvider,
+                             ObjectProvider<AwsSsoLoginService> loginServiceProvider) {
         this.dataDir = (dataDir == null || dataDir.isBlank()) ? "data" : dataDir.trim();
+        this.registryProvider = registryProvider;
+        this.loginServiceProvider = loginServiceProvider;
     }
 
     /** Absolute path of the audit log; created lazily on first append. */
@@ -108,6 +152,8 @@ public class AdminAuditService {
             while (tail.size() > MAX_TAIL) tail.removeFirst();
         }
         rollupFor(entry.key()).record(entry);
+        // Lazy retention: at most once an hour, on the same path every event already takes.
+        purgeIfDue(false);
     }
 
     /**
@@ -147,6 +193,9 @@ public class AdminAuditService {
         for (AuditEntry entry : loaded) rollupFor(entry.key()).record(entry);
         if (malformed > 0) log.warn("[admin-audit] skipped {} malformed line(s) in {}", malformed, path);
         log.info("[admin-audit] restored {} recent event(s) from {}", loaded.size(), path);
+        // Enforce retention once at startup, so a long downtime's worth of expired records does not
+        // linger until the first new event arrives.
+        purgeIfDue(true);
     }
 
     private void appendLine(AuditEntry entry) {
@@ -283,6 +332,7 @@ public class AdminAuditService {
             tail.clear();
         }
         rollups.clear();
+        displayNames.clear();
     }
 
     /**
@@ -297,6 +347,7 @@ public class AdminAuditService {
     public boolean forget(String key) {
         if (key == null || key.isBlank()) return false;
         boolean removed = rollups.remove(key) != null;
+        removed |= displayNames.remove(key) != null;
 
         synchronized (tailLock) {
             removed |= tail.removeIf(e -> key.equals(e.key()));
@@ -334,6 +385,141 @@ public class AdminAuditService {
         return removed;
     }
 
+    // ── display-name overrides ──────────────────────────────────────────────────
+
+    /** The admin-set display name for a rollup key, or {@code null} when none is set. */
+    public String displayNameFor(String key) {
+        return key == null ? null : displayNames.get(key);
+    }
+
+    /**
+     * Sets — or, with a blank value, clears — the admin display-name override for a known user
+     * rollup. Stored apart from the rollups so it survives a retention rebuild.
+     *
+     * @return false when the key names no known user, so the caller can answer "not found"
+     */
+    public boolean setDisplayName(String key, String displayName) {
+        if (key == null || key.isBlank()) return false;
+        if (rollups.get(key) == null) return false;
+        if (displayName == null || displayName.isBlank()) displayNames.remove(key);
+        else displayNames.put(key, displayName.trim());
+        return true;
+    }
+
+    // ── retention ───────────────────────────────────────────────────────────────
+
+    /**
+     * Runs the 48h trim if due (or always when {@code force}). Single-flight: a losing thread simply
+     * returns, because a concurrent purge already covers the same window.
+     */
+    private void purgeIfDue(boolean force) {
+        long now = System.currentTimeMillis();
+        long last = lastPurgeEpochMs.get();
+        if (!force && now - last < PURGE_INTERVAL_MS) return;
+        if (!lastPurgeEpochMs.compareAndSet(last, now)) return;
+        try {
+            purgeOlderThan(now - RETENTION_MS);
+        } catch (RuntimeException e) {
+            log.warn("[admin-audit] retention purge failed ({}); will retry later", e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Drops every record older than {@code cutoffMs} from the file, the tail and the rollups, then
+     * revokes any still-live session whose records were fully cleaned.
+     */
+    private void purgeOlderThan(long cutoffMs) {
+        Path path = auditPath();
+        Set<String> purgedSessions = new HashSet<>();
+        int removed = 0;
+        synchronized (tailLock) {
+            // File first, rewritten atomically. Malformed lines belong to no identifiable record
+            // and cannot be aged, so they are preserved verbatim, as in forget().
+            if (Files.isRegularFile(path)) {
+                List<String> kept = new ArrayList<>();
+                try (Stream<String> lines = Files.lines(path, StandardCharsets.UTF_8)) {
+                    Iterator<String> it = lines.iterator();
+                    while (it.hasNext()) {
+                        String line = it.next();
+                        if (line.isBlank()) continue;
+                        AuditEntry e = parse(line);
+                        if (e != null && expired(e, cutoffMs)) {
+                            if (e.sessionId() != null) purgedSessions.add(e.sessionId());
+                            removed++;
+                            continue;
+                        }
+                        kept.add(line);
+                    }
+                    if (removed > 0) writeAtomically(path, kept);
+                } catch (IOException ex) {
+                    log.warn("[admin-audit] retention read of {} failed: {}", path, ex.getMessage());
+                }
+            }
+
+            Iterator<AuditEntry> it = tail.iterator();
+            while (it.hasNext()) {
+                AuditEntry e = it.next();
+                if (expired(e, cutoffMs)) {
+                    if (e.sessionId() != null) purgedSessions.add(e.sessionId());
+                    it.remove();
+                    removed++;
+                }
+            }
+
+            // Rebuild rollups from the surviving tail — the same source they were first built from —
+            // so a user whose only records expired disappears. Display-name overrides live apart and
+            // are re-applied by the read side, not lost here.
+            rollups.clear();
+            Set<String> survivors = new HashSet<>();
+            for (AuditEntry e : tail) {
+                rollupFor(e.key()).record(e);
+                if (e.sessionId() != null) survivors.add(e.sessionId());
+            }
+            // A session is only "cleaned" when none of its records survive; otherwise an active
+            // session whose old LOGIN aged out but whose CONNECT is recent would be wrongly revoked.
+            purgedSessions.removeAll(survivors);
+        }
+
+        if (removed > 0) {
+            log.info("[admin-audit] retention removed {} record(s) older than {}h",
+                    removed, RETENTION_MS / 3_600_000L);
+        }
+        // Outside the lock and best-effort: revoke the fully-cleaned sessions that are still live.
+        revokeCleanedSessions(purgedSessions);
+    }
+
+    private void revokeCleanedSessions(Set<String> sessionIds) {
+        if (sessionIds == null || sessionIds.isEmpty()) return;
+        SsoSessionRegistry registry = registryProvider.getIfAvailable();
+        if (registry == null) return;
+        AwsSsoLoginService login = loginServiceProvider.getIfAvailable();
+        for (String sessionId : sessionIds) {
+            if (sessionId == null) continue;
+            SsoSessionState state = registry.get(sessionId);
+            if (state == null || !state.loggedIn()) continue; // not live: nothing to revoke
+            if (login != null) login.revokeAwsToken(state);
+            // The LOGOUT it publishes is itself retained for the same 48h window.
+            registry.end(sessionId);
+            log.info("[admin-audit] revoked a live session whose audit records aged out");
+        }
+    }
+
+    private static boolean expired(AuditEntry e, long cutoffMs) {
+        return e.timestampEpochMs() > 0 && e.timestampEpochMs() < cutoffMs;
+    }
+
+    /** Writes {@code lines} to {@code path} via a sibling temp file and an atomic move. */
+    private void writeAtomically(Path path, List<String> lines) throws IOException {
+        Path tmp = path.resolveSibling(path.getFileName() + ".retention.tmp");
+        Files.write(tmp, lines, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+        try {
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException atomicUnsupported) {
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
     // ── shared helpers ──────────────────────────────────────────────────────────
 
     /**
@@ -343,7 +529,7 @@ public class AdminAuditService {
      */
     public static String identityKey(SsoIdentity identity) {
         if (identity == null) return null;
-        return identityKey(identity.name(), identity.email(), identity.accountId());
+        return identityKey(identity.shownName(), identity.email(), identity.accountId());
     }
 
     public static String identityKey(String name, String email, String accountId) {
@@ -387,7 +573,10 @@ public class AdminAuditService {
             return new AuditEntry(
                     event.type(),
                     event.sessionId(),
-                    id == null ? null : id.name(),
+                    // The name the person chose to be shown as, when they set one; else the
+                    // AWS-derived name. This is what the admin Users tab and audit "User" column
+                    // render, so a display-name override reaches the audit trail too.
+                    id == null ? null : id.shownName(),
                     id == null ? null : id.email(),
                     id == null ? null : id.accountId(),
                     id == null ? null : id.accountName(),

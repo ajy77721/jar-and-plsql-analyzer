@@ -97,7 +97,7 @@ class DirectFileIoGateTest {
         // archive: it must survive a store being unreachable (an admin investigating a denial needs
         // it regardless of S3 health), and the admin-portal privacy rule says identity metadata
         // stays inside the data tree, never in shared storage.
-        ALLOWED.put("unified-web/AdminAuditService", 12);
+        ALLOWED.put("unified-web/AdminAuditService", 17);
         // Reads the local log directory in order to EMPTY it: it ships each rolled log into the
         // store and deletes the local copy. The local reads are the mechanism by which logs stop
         // being local, so they are the point rather than an exception to it. The live log must stay

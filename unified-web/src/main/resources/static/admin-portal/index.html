@@ -258,6 +258,27 @@
                 </table>
             </div>
             <div id="users-empty" class="empty" hidden>No users have been seen yet.</div>
+
+            <!-- Sessions that began a login but resolved no identity: not people, so they are not
+                 user rows. Collapsed and listed separately, with per-session revoke. -->
+            <details id="pending-wrap" style="margin-top:18px" hidden>
+                <summary id="pending-summary" style="cursor:pointer;font-size:13px;font-weight:600;padding:6px 0">
+                    Pending logins (0)
+                </summary>
+                <div class="table-scroll" style="margin-top:10px">
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>Session (masked)</th>
+                            <th>Bucket / Region</th>
+                            <th>Last activity</th>
+                            <th>Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody id="pending-body"></tbody>
+                    </table>
+                </div>
+            </details>
         </section>
 
         <!-- Audit -->
@@ -483,13 +504,19 @@
     async function loadUsers() {
         try {
             var data = await api('/api/admin/users');
-            renderUsers((data && data.users) || []);
+            renderUsers((data && data.users) || [], (data && data.pendingLogins) || []);
         } catch (e) {
             if (e && e.message !== 'forbidden') toast(e.message, true);
         }
     }
 
-    function renderUsers(users) {
+    // The username chain used everywhere a person is named: the admin display-name correction wins,
+    // then the Identity-Store-derived name, then email, then the account id. Never a raw session.
+    function usernameOf(u) {
+        return u.displayName || u.name || u.email || u.accountId || u.key;
+    }
+
+    function renderUsers(users, pendingLogins) {
         var body = $('users-body');
         body.textContent = '';
         $('users-empty').hidden = users.length > 0;
@@ -497,7 +524,9 @@
         users.forEach(function (u) {
             var tr = document.createElement('tr');
 
-            var nameCell = td(u.name || u.key);
+            // Bold first column: whom the admin is about to act on.
+            var nameCell = td(usernameOf(u));
+            nameCell.style.fontWeight = '700';
             tr.appendChild(nameCell);
             tr.appendChild(td(u.email));
             tr.appendChild(td((textOr(u.accountName) + ' / ' + textOr(u.roleName)), 'muted'));
@@ -522,42 +551,114 @@
 
             var activeCell = el('td', 'nowrap');
             activeCell.appendChild(el('span', 'dot' + (u.currentlyActive ? ' on' : '')));
-            activeCell.appendChild(el('span', 'muted', u.currentlyActive ? ' active' : ' offline'));
+            var sessions = u.sessionCount || 0;
+            activeCell.appendChild(el('span', 'muted', u.currentlyActive
+                ? ' active' + (sessions > 1 ? ' (' + sessions + ' sessions)' : '')
+                : ' offline'));
             tr.appendChild(activeCell);
 
             var actions = el('td');
-            var wrap = el('div', 'row-actions');
+            var actionWrap = el('div', 'row-actions');
+            var edit = el('button', 'btn small', 'Edit name');
+            edit.type = 'button';
+            edit.addEventListener('click', function () { editDisplayName(u); });
             var revoke = el('button', 'btn danger small', 'Revoke session');
             revoke.type = 'button';
-            revoke.disabled = !u.currentlyActive || !u.sessionIdMasked;
-            revoke.addEventListener('click', function () {
-                confirmRevoke(u);
-            });
+            // A person-level revoke ends ALL of their live sessions (AWS revoke + registry end).
+            revoke.disabled = !u.currentlyActive;
+            revoke.addEventListener('click', function () { confirmRevokeUser(u); });
             var forget = el('button', 'btn small', 'Forget user');
             forget.type = 'button';
-            forget.addEventListener('click', function () {
-                confirmForget(u);
-            });
-            wrap.appendChild(revoke);
-            wrap.appendChild(forget);
-            actions.appendChild(wrap);
+            forget.addEventListener('click', function () { confirmForget(u); });
+            actionWrap.appendChild(edit);
+            actionWrap.appendChild(revoke);
+            actionWrap.appendChild(forget);
+            actions.appendChild(actionWrap);
             tr.appendChild(actions);
 
             body.appendChild(tr);
         });
 
         $('users-meta').textContent = users.length + ' user' + (users.length === 1 ? '' : 's');
+        renderPending(pendingLogins);
     }
 
-    async function confirmRevoke(u) {
-        var who = u.name || u.email || u.key;
-        if (!window.confirm('Revoke the active AWS SSO session for ' + who + '?\n\n'
-                + 'They will be signed out and must authenticate again.')) return;
+    // Sessions that began a login but have no identity yet — shown separately, never as user rows.
+    function renderPending(pending) {
+        var wrap = $('pending-wrap');
+        var body = $('pending-body');
+        body.textContent = '';
+        if (!pending || !pending.length) { wrap.hidden = true; return; }
+        wrap.hidden = false;
+        $('pending-summary').textContent = 'Pending logins (' + pending.length + ')';
+
+        pending.forEach(function (p) {
+            var tr = document.createElement('tr');
+            tr.appendChild(td(p.sessionIdMasked, 'mono'));
+            tr.appendChild(td(textOr(p.bucket) + ' / ' + textOr(p.region), 'mono'));
+            tr.appendChild(td(fmtTime(p.lastActivityEpochMs), 'nowrap muted'));
+
+            var actions = el('td');
+            var actionWrap = el('div', 'row-actions');
+            var revoke = el('button', 'btn danger small', 'Revoke session');
+            revoke.type = 'button';
+            revoke.disabled = !p.sessionIdMasked;
+            revoke.addEventListener('click', function () { confirmRevokeSession(p); });
+            actionWrap.appendChild(revoke);
+            actions.appendChild(actionWrap);
+            tr.appendChild(actions);
+            body.appendChild(tr);
+        });
+    }
+
+    // Set or correct the name a person is shown as. Stored as a display-name override in the audit
+    // rollup; history is never rewritten, only the label this portal renders.
+    async function editDisplayName(u) {
+        var current = usernameOf(u);
+        var next = window.prompt('Display name for ' + current + '\n\n'
+                + 'Shown as their username in this portal and in the audit history. '
+                + 'Leave blank to clear it.', u.displayName || '');
+        if (next === null) return;
         try {
-            var res = await api('/api/admin/sessions/' + encodeURIComponent(u.sessionIdMasked) + '/revoke',
+            var res = await api('/api/admin/users/' + encodeURIComponent(u.key) + '/display-name',
+                    { method: 'PUT', body: { displayName: next } });
+            if (res && res.updated === false) toast('No user rollup matched; nothing changed.', true);
+            else toast('Display name updated.');
+            loadUsers();
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    async function confirmRevokeUser(u) {
+        var who = usernameOf(u);
+        var n = u.sessionCount || 0;
+        if (!window.confirm('Revoke ' + n + ' active AWS SSO session' + (n === 1 ? '' : 's')
+                + ' for ' + who + '?\n\n'
+                + 'All of their sessions are ended at AWS and locally; they must authenticate again.')) return;
+        try {
+            var res = await api('/api/admin/users/' + encodeURIComponent(u.key) + '/revoke',
                     { method: 'POST' });
             if (res && res.revoked) {
-                toast('Session revoked for ' + who + '.');
+                toast('Revoked ' + res.revoked + ' session(s) for ' + who + '.');
+            } else {
+                toast((res && res.note) ? res.note : 'No sessions revoked.', true);
+            }
+            loadUsers();
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    // Per-session revoke, used only for identity-less pending logins.
+    async function confirmRevokeSession(p) {
+        if (!window.confirm('Revoke the pending AWS SSO session ' + p.sessionIdMasked + '?\n\n'
+                + 'It will be ended at AWS and locally.')) return;
+        try {
+            var res = await api('/api/admin/sessions/' + encodeURIComponent(p.sessionIdMasked) + '/revoke',
+                    { method: 'POST' });
+            if (res && res.revoked) {
+                toast('Session revoked.');
             } else {
                 toast((res && res.note) ? res.note : 'Session could not be revoked.', true);
             }
@@ -568,7 +669,7 @@
     }
 
     async function confirmForget(u) {
-        var who = u.name || u.email || u.key;
+        var who = usernameOf(u);
         if (!window.confirm('Forget ' + who + '?\n\n'
                 + 'Their rollup is removed and all of their audit lines are deleted from the audit log. '
                 + 'This cannot be undone.')) return;
@@ -611,7 +712,9 @@
             typeCell.appendChild(typeBadge(e.type));
             tr.appendChild(typeCell);
 
-            tr.appendChild(td(e.name || e.email || e.accountId));
+            // Username chain for history: a current display-name correction > the email/name the
+            // event was recorded with > its account id. The stored line itself is never rewritten.
+            tr.appendChild(td(e.user || e.displayName || e.name || e.email || e.accountId));
             tr.appendChild(td(textOr(e.accountId) + ' / ' + textOr(e.role), 'muted'));
             tr.appendChild(td(textOr(e.bucket) + ' / ' + textOr(e.region), 'mono'));
 

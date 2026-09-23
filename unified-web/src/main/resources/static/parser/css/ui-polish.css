@@ -297,3 +297,51 @@
     white-space: nowrap;
     pointer-events: none;
 }
+
+/* (5) Resizable columns + horizontal scroll — js/tableResize.js.
+ * Every PA.tf grid is wrapped in .tbl-scroll and gets table-layout:fixed with an explicit
+ * <colgroup>; the min-width set inline from the column widths is what makes a wide chain scroll
+ * instead of squeezing its neighbours. */
+.tbl-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+.to-table.tbl-fixed { table-layout: fixed; }
+/* A fixed-layout cell can't grow its column, so long unbroken identifiers (proc chains, file
+ * paths) wrap instead of spilling across the next column. Pairs with the existing
+ * overflow-wrap:anywhere rule above. */
+.to-table.tbl-fixed td, .to-table.tbl-fixed th { overflow-wrap: anywhere; }
+
+/* The drag grip: 7px wide, straddling the header cell's right border. */
+.tbl-grip {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    width: 8px;
+    height: 100%;
+    z-index: 5;
+    cursor: col-resize;
+    user-select: none;
+    touch-action: none;
+}
+.tbl-grip::after {
+    content: "";
+    position: absolute;
+    top: 15%;
+    bottom: 15%;
+    left: 3px;
+    width: 2px;
+    background: var(--border);
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.to-table th:hover > .tbl-grip::after,
+.trace-hcell:hover > .tbl-grip::after,
+.tbl-grip:hover::after,
+.tbl-grip.active::after { opacity: 1; background: var(--accent); }
+
+/* While a drag is in progress: keep the col-resize cursor and stop the drag selecting text. */
+body.tbl-resizing { cursor: col-resize; }
+body.tbl-resizing * { user-select: none !important; }

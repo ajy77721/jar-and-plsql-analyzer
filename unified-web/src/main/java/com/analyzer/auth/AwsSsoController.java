@@ -7,6 +7,7 @@ import com.analyzer.storage.sso.SsoSessionState;
 import com.analyzer.storage.sso.SsoStoreSwapper;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
+import org.springframework.beans.factory.annotation.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
@@ -43,13 +44,13 @@ import java.util.Map;
  *        intervalSeconds, expiresAt }
  * POST /api/auth/aws/poll
  *   -> { status:"pending"|"complete"|"expired"|"none", accountId?, accountName?, roleName? }
- * POST /api/auth/aws/connect { "bucket": "...", "region": "..." }   (both optional)
- *   -> success: { ok:true, bucket, region, name, email, accountId, accountName, roleName,
- *                 account, role, capabilities:{ read, upload, write } }
+ * POST /api/auth/aws/connect { "bucket": "...", "region": "...", "displayName": "..." }  (all optional)
+ *   -> success: { ok:true, bucket, region, name, email, displayName, accountId, accountName,
+ *                 roleName, account, role, capabilities:{ read, upload, write } }
  *   -> failure: { ok:false, error, capabilities:{ read, upload, write } }
  *      (nothing was built or swapped for this user; their previous target, if any, stays active)
  * GET  /api/auth/aws/session
- *   -> { connected, name, email, account, role, accountId, accountName, roleName,
+ *   -> { connected, name, email, displayName, account, role, accountId, accountName, roleName,
  *        bucket, region, capabilities:{ read, upload, write } | null }
  * POST /api/auth/aws/logout
  *   -> { ok:true }
@@ -78,6 +79,14 @@ public class AwsSsoController {
     private final AwsSsoLoginService loginService;
     private final SsoStoreSwapper storeSwapper;
     private final SsoSessionRegistry registry;
+
+    /**
+     * Configured Identity Center portal URL, prefilled into the login modal so a deployed user does
+     * not have to type it. A public URL, never a token — safe to return from {@code /session}.
+     * Blank when unset, in which case the UI falls back to its own default.
+     */
+    @Value("${app.storage.sso.start-url:}")
+    private String startUrlProperty;
 
     public AwsSsoController(AwsSsoLoginService loginService, SsoStoreSwapper storeSwapper,
                             SsoSessionRegistry registry) {
@@ -158,6 +167,14 @@ public class AwsSsoController {
         }
         String bucket = body == null ? null : body.get("bucket");
         String region = body == null ? null : body.get("region");
+        String displayName = body == null ? null : body.get("displayName");
+        // A user-chosen display name — the always-available fallback when AWS provides no real
+        // identity — is applied BEFORE the swap builds, so the CONNECT audit event the swapper
+        // publishes carries it and every later read of this identity shows it. Blank leaves any
+        // existing override untouched.
+        if (displayName != null && !displayName.isBlank() && state.identity() != null) {
+            state.identity(state.identity().withDisplayName(displayName));
+        }
         try {
             SsoStoreSwapper.ConnectResult result = storeSwapper.connect(sessionId, bucket, region);
             Map<String, Object> capabilities = capabilitiesMap(result.capabilities());
@@ -179,8 +196,9 @@ public class AwsSsoController {
             out.put("ok", true);
             out.put("bucket", result.bucket());
             out.put("region", result.region());
-            out.put("name", identity == null ? null : identity.name());
+            out.put("name", identity == null ? null : identity.shownName());
             out.put("email", identity == null ? null : identity.email());
+            out.put("displayName", identity == null ? null : identity.displayName());
             out.put("accountId", accountId);
             out.put("accountName", identity == null ? null : identity.accountName());
             out.put("roleName", roleName);
@@ -194,6 +212,44 @@ public class AwsSsoController {
         } catch (RuntimeException e) {
             log.warn("[aws-sso] connect failed ({})", e.getClass().getSimpleName());
             return error("Could not connect S3 storage: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Dry-run the bucket capability probe for the caller's session: the same Read/Upload/Write
+     * checks {@code /connect} performs, but nothing is built, swapped or recorded. Lets the modal
+     * offer "Test access" before the user commits to a target. Requires a completed login, exactly
+     * like {@code /connect}.
+     *
+     * <pre>
+     * POST /api/auth/aws/test-bucket { "bucket": "...", "region": "..." }
+     *   -> { ok:true, capabilities:{ read, upload, write, ok, error } }
+     * </pre>
+     * A failed probe is a normal, non-error reply: {@code ok:false} with the capability breakdown,
+     * so the UI can name the missing permission rather than say "failed".
+     */
+    @PostMapping("/test-bucket")
+    public Map<String, Object> testBucket(@RequestBody(required = false) Map<String, String> body,
+                                          HttpServletRequest req) {
+        SsoSessionState state = registry.get(sessionId(req));
+        if (state == null || !state.loggedIn()) {
+            return error("Log in with AWS SSO before testing S3 access.");
+        }
+        String bucket = body == null ? null : body.get("bucket");
+        String region = body == null ? null : body.get("region");
+        try {
+            SsoStoreSwapper.Capabilities caps =
+                    storeSwapper.testCapabilities(state.sessionId(), bucket, region);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", caps != null && caps.ok());
+            out.put("capabilities", capabilitiesMap(caps));
+            if (caps != null && !caps.ok()) out.put("error", caps.error());
+            return out;
+        } catch (IllegalArgumentException e) {
+            return error(e.getMessage());
+        } catch (RuntimeException e) {
+            log.warn("[aws-sso] test-bucket failed ({})", e.getClass().getSimpleName());
+            return error("Could not test S3 access: " + e.getMessage());
         }
     }
 
@@ -213,8 +269,9 @@ public class AwsSsoController {
         String roleName = identity == null ? null : identity.roleName();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("connected", state != null && state.loggedIn());
-        out.put("name", identity == null ? null : identity.name());
+        out.put("name", identity == null ? null : identity.shownName());
         out.put("email", identity == null ? null : identity.email());
+        out.put("displayName", identity == null ? null : identity.displayName());
         // Legacy aliases, mirroring /connect: same values under the shorter keys.
         out.put("account", accountId);
         out.put("role", roleName);
@@ -224,6 +281,8 @@ public class AwsSsoController {
         out.put("bucket", state != null && state.bucket() != null ? state.bucket() : storeSwapper.bucket());
         out.put("region", state != null && state.region() != null ? state.region() : storeSwapper.region());
         out.put("capabilities", capabilitiesMap(state == null ? null : state.capabilities()));
+        // Public portal URL for the login modal's prefill (see field javadoc). Not a secret.
+        out.put("defaultStartUrl", startUrlProperty);
         return out;
     }
 
@@ -237,6 +296,9 @@ public class AwsSsoController {
     public Map<String, Object> logout(HttpServletRequest req) {
         String sessionId = sessionId(req);
         if (sessionId != null) {
+            // Revoke at AWS first (best-effort), then drop local state unconditionally: an AWS
+            // failure must never leave a live local session behind.
+            loginService.revokeAwsToken(registry.get(sessionId));
             storeSwapper.forget(sessionId);
             registry.end(sessionId);
         }

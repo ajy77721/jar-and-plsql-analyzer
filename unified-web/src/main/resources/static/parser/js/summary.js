@@ -32,6 +32,7 @@ PA.summary = {
         var procId = effectiveScope === 'full' ? null : PA._currentScopeId();
         var entrySchema = data.entrySchema || data.entryPoint || '';
 
+        if (container) container.innerHTML = '<div class="empty-msg">Loading summary...</div>';
         var stats = await PA.api.getSummaryStats(effectiveScope, procId, entrySchema);
         if (!stats) { container.innerHTML = '<div class="empty-msg">Failed to load summary</div>'; return; }
 

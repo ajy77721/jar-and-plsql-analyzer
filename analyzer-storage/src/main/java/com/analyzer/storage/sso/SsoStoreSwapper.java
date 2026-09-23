@@ -209,6 +209,29 @@ public class SsoStoreSwapper {
         return new ConnectResult(effectiveBucket, effectiveRegion, built, probed);
     }
 
+    /**
+     * Runs the exact probe {@link #connect} gates on — {@code listObjectsV2}, {@code putObject} and
+     * {@code deleteObject} under the reserved probe prefix, signed with this user's credentials —
+     * but <b>builds nothing and swaps nothing</b>. It neither caches stores nor publishes a
+     * CONNECT/SWAP-DENIED audit event, so the user's current target is untouched and no history is
+     * written for a mere test.
+     *
+     * <p>This backs the modal's "Test access" button: the same three capabilities the user is about
+     * to rely on, checked independently of the connect that follows.
+     */
+    public Capabilities testCapabilities(String sessionId, String bucket, String region) {
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new NotAuthenticatedException();
+        }
+        String effectiveBucket = (bucket == null || bucket.isBlank()) ? defaultBucket : bucket.trim();
+        String effectiveRegion = (region == null || region.isBlank()) ? defaultRegion : region.trim();
+        if (effectiveBucket.isBlank()) {
+            throw new IllegalArgumentException(
+                    "A bucket is required to test S3 access. Pass one, or set app.storage.s3.bucket.");
+        }
+        return probe(effectiveBucket, effectiveRegion, credentials.resolveFor(sessionId));
+    }
+
     /** The stores {@code sessionId} connected, or {@code null} when that user has none. */
     public BuiltStores storesFor(String sessionId) {
         return sessionId == null ? null : storesBySession.get(sessionId);
