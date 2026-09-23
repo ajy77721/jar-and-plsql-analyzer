@@ -18,25 +18,6 @@ steps:
   commands:
   - mvn -B -no-transfer-progress package -DskipTests -q
 
-- name: slack-start
-  pull: if-not-exists
-  failure: ignore
-  image: plugins/slack
-  settings:
-    channel: amp-analyzer
-    template: "*Staging*: building (<{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}>) by {{build.author}} from `{{build.branch}}`\n"
-  environment:
-    SLACK_WEBHOOK:
-      from_secret: slack_webhook
-  when:
-    branch:
-    - main
-    event:
-    - push
-    status:
-    - success
-    - failure
-
 - name: build+publish-main-branch
   pull: if-not-exists
   image: plugins/docker
@@ -113,20 +94,5 @@ steps:
   when:
     event:
     - tag
-
-- name: slack-finish
-  pull: if-not-exists
-  failure: ignore
-  image: plugins/slack
-  settings:
-    channel: amp-analyzer
-    template: "{{#success build.status}}\n  ✅ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> deployed in {{since build.started}}\n{{else}}\n  ❌ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> failed {{build.link}}\n{{/success}}\n"
-  environment:
-    SLACK_WEBHOOK:
-      from_secret: slack_webhook
-  when:
-    status:
-    - success
-    - failure
 
 ...
