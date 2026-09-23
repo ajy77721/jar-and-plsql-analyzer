@@ -1,0 +1,80 @@
+.left-panel {
+    width: 280px; min-width: 280px;
+    background: var(--sidebar-bg); color: var(--sidebar-text);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.left-tabs { display: flex; border-bottom: 1px solid var(--sidebar-border); }
+.ltab {
+    flex: 1; padding: 8px 4px; border: none; background: none;
+    color: var(--sidebar-muted); font-size: 11px; cursor: pointer;
+    border-bottom: 2px solid transparent; text-transform: uppercase;
+    font-weight: 700; letter-spacing: 0.5px; transition: all var(--transition);
+}
+.ltab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.ltab:hover { color: var(--sidebar-text); }
+
+.left-filter { padding: 6px 8px; }
+.left-filter .form-input {
+    background: var(--sidebar-hover); border-color: var(--text-muted);
+    color: var(--sidebar-text); font-size: 12px; width: 100%; padding: 7px 10px;
+}
+.left-filter .form-input:focus { border-color: var(--accent); box-shadow: none; }
+.left-filter .form-input::placeholder { color: var(--sidebar-muted); }
+
+.left-content { flex: 1; overflow-y: auto; }
+
+.lp-item {
+    padding: 7px 10px; font-size: 12px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; margin-bottom: 1px;
+    border-radius: var(--radius); margin: 0 4px 1px; transition: background var(--transition);
+}
+.lp-item:hover { background: var(--sidebar-hover); }
+/* Color audit: a solid `--accent` fill reads calm in light mode (muted dark green) but turns
+ * into a fully-saturated neon block in dark mode (bright spring green) — and made the `.lp-icon.P`
+ * icon (pale green bg + green text, designed for a neutral card background) unreadable at ~1.2:1
+ * contrast on top of it, plus needed a per-child override just to keep `.lp-name`/`.lp-badge`
+ * legible. `--sidebar-active-bg`/`--sidebar-active-text` (mongodb-theme.css) are the already-designed
+ * pale-tint alternative for exactly this; switching to them fixes the icon contrast for free since
+ * `.lp-icon.P`'s own colors read fine against a pale/neutral background in both themes. */
+.lp-item.active { background: var(--sidebar-active-bg); color: var(--sidebar-active-text); border-left: 3px solid var(--accent); margin-left: 1px; }
+.lp-item.active .lp-name { color: var(--sidebar-active-text); }
+
+/* Real bug, found live via getBoundingClientRect on actual table cells (not just getComputedStyle
+ * guesses): search.js's results table (#srchContainer, js/search.js's _renderRow) reuses this
+ * SAME class name — `.lp-item` — on its <tr> elements, just for the hover-cursor/row styling. But
+ * `.lp-item` above is `display:flex` (built for the sidebar's own list rows, a completely
+ * different, non-table layout), so every <tr class="lp-item"> in the search table also became
+ * flex — turning every <td> inside it into a flex item (confirmed: computed display on those tds
+ * was "block", not "table-cell"), which ignores the table's own colgroup/table-layout:fixed column
+ * widths entirely and collapses every cell to ~20px. PL/SQL (plsql/css/style.css) and JAR
+ * (jar/style.css) already carry this exact override from when THEIR search tables were first
+ * built — Parser's search.js was ported later (see that file's own header comment) and never got
+ * the matching CSS fix, which is the entire reason PL/SQL/JAR's search results always rendered
+ * correctly while Parser's never did. */
+#srchContainer tr.lp-item { display: table-row; }
+.lp-item.active .lp-badge { color: var(--sidebar-active-text); }
+
+.lp-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: var(--radius-sm);
+    font-size: 9px; font-weight: 700; flex-shrink: 0;
+}
+.lp-icon.P { background: var(--accent-subtle); color: var(--accent-hover); }
+.lp-icon.F { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.lp-icon.T { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.lp-icon.PKG { background: var(--accent-subtle); color: var(--accent); }
+.lp-icon.S { background: var(--badge-teal-bg); color: var(--badge-teal); }
+
+.lp-name {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.1px;
+}
+.lp-badge { font-size: 10px; color: var(--sidebar-muted); flex-shrink: 0; }
+.lp-type-badge { font-size: 8px; padding: 1px 4px; border-radius: var(--radius-sm); flex-shrink: 0; font-weight: 700; }
+.lp-type-badge.INTERNAL { background: var(--badge-green-bg); color: var(--badge-green); }
+.lp-type-badge.EXTERNAL { background: var(--badge-red-bg); color: var(--badge-red); }
+.lp-type-badge.TRIGGER { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.lp-type-badge.DYNAMIC { background: var(--badge-purple-bg); color: var(--badge-purple); }
+
+.lp-item.indent-1 { padding-left: 24px; }
+.lp-item.indent-2 { padding-left: 40px; }

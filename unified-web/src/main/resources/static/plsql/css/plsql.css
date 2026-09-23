@@ -1,0 +1,13 @@
+
+/* The windowed-trace footer. Styled like the pagination bars elsewhere so a truncated view reads
+   as a deliberate control rather than as the end of the data. */
+.trace-more {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-subtle, transparent);
+    font-size: 12px;
+    color: var(--text-muted);
+}

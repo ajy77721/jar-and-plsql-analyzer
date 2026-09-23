@@ -1,0 +1,94 @@
+You are verifying the accuracy of a static bytecode analysis for a Java REST endpoint that uses BOTH MongoDB and Oracle/JPA/JDBC databases.
+The analysis was done by parsing compiled .class files -- it may have false positives or missing detections.
+
+TASK: For each call tree node that has collections and tables/procedures or operations, verify them against the decompiled source code.
+Return ONLY a JSON object with your corrections.
+
+ENDPOINT: {{HTTP_METHOD}} {{FULL_PATH}}
+Controller: {{CONTROLLER_CLASS}}.{{METHOD_NAME}}
+
+{{CHUNK_CONTEXT}}
+
+STATIC ANALYSIS CALL TREE (with decompiled source at each node):
+```json
+{{CALL_TREE_JSON}}
+```
+
+RESPOND WITH ONLY THIS JSON FORMAT (no explanation, no markdown outside the JSON):
+```json
+{
+  "corrections": [
+    {
+      "nodeId": "fully.qualified.ClassName#methodName(descriptor)",
+      "collections": {
+        "added": [{"name": "ENTITY_NAME", "source": "CLAUDE", "operation": "READ|WRITE|UPDATE|DELETE|AGGREGATE|CALL|NONE"}],
+        "removed": ["FALSE_POSITIVE_NAME"],
+        "verified": ["CORRECT_NAME"]
+      },
+      "operationType": "WRITE",
+      "operationTypeReason": "why the operation type should be this"
+    }
+  ],
+  "endpointSummary": {
+    "allCollections": ["ALL_REAL_COLLECTIONS_AND_TABLES_IN_THIS_CHUNK"],
+    "primaryOperation": "READ|WRITE|UPDATE|DELETE|AGGREGATE|CALL|NONE",
+    "crossModuleCalls": ["module-name.jar"],
+    "confidence": 0.95
+  }
+}
+```
+
+RULES:
+- Only include nodes where you found corrections (wrong collections and tables/procedures, wrong operation type, missing collections and tables/procedures)
+- If a node's collections and tables/procedures are all correct, put them in 'verified' (don't repeat as 'added')
+- String literals used as sequence names (e.g. passed to getSequenceId/getNextSequenceValue) are NOT collections and tables/procedures
+- String literals used as log messages or extension handler args are NOT collections and tables/procedures
+- The 'sourceCode' field in each node is REAL decompiled Java code from CFR -- read it carefully
+- Use the exact 'id' field from each node for your corrections (not the 'resolvedFrom' field)
+- The 'resolvedFrom' field shows which interface/abstract class was originally called in bytecode
+- operationType can be: READ, WRITE, UPDATE, DELETE, AGGREGATE, COUNT, CALL (stored procedure), or NONE
+- Include ALL real collections and tables/procedures you see in endpointSummary.allCollections (from this chunk)
+
+CRITICAL FALSE POSITIVE PATTERN -- @Document bean setters (MongoDB):
+- Static analysis attaches collections to nodes via DOCUMENT_ANNOTATION when the class has @Document.
+- If a method ONLY calls setters/getters (setXxx/getXxx/isXxx) on a @Document bean WITHOUT calling
+  repository.save(), mongoTemplate.save/insert/remove(), or any persistence method, then:
+  (a) The collection is a FALSE POSITIVE on that node -- put it in 'removed'
+  (b) The operationType should be 'NONE' (in-memory mutation, not a DB operation)
+- Look at the 'sourceCode' field: if you see only bean.setFoo(...), bean.setBar(...) with no
+  persistence calls, flag it as a false positive.
+- The 'collectionSources' field shows HOW each collection was detected:
+  DOCUMENT_ANNOTATION = from @Document on the bean class (high false positive risk on non-repo nodes)
+  REPOSITORY_MAPPING = from a Spring Data repository (usually correct)
+  STRING_LITERAL = from a string constant matching a collection pattern
+
+CRITICAL FALSE POSITIVE PATTERN -- @Entity bean setters (Oracle/JPA):
+- Static analysis attaches tables to nodes via JPA_TABLE_ANNOTATION when the class has @Entity/@Table.
+- If a method ONLY calls setters/getters on a JPA entity WITHOUT calling
+  entityManager.persist/merge/remove(), repository.save(), or JdbcTemplate operations, then:
+  (a) The table is a FALSE POSITIVE on that node -- put it in 'removed'
+  (b) The operationType should be 'NONE' (in-memory mutation, not a DB operation)
+- The 'collectionSources' field shows detection method:
+  JPA_TABLE_ANNOTATION = from @Entity/@Table on bean class (high false positive risk on non-repo nodes)
+  JPA_REPOSITORY_MAPPING = from Spring Data JPA repository (usually correct)
+  JDBC_TEMPLATE = from JdbcTemplate.query/update with SQL (usually correct)
+  ENTITY_MANAGER = from EntityManager query/persist/merge (usually correct)
+  STORED_PROCEDURE = from stored procedure call detection (verify proc name)
+  CALLABLE_STATEMENT = from JDBC callable statement (verify proc name)
+  DERIVED_QUERY = from Spring Data derived query method name (usually correct)
+
+REAL DATABASE OPERATIONS (check sourceCode for these):
+MongoDB:
+- WRITE: repository.save(), .saveAll(), mongoTemplate.save(), .insert(), .insertAll()
+- UPDATE: repository.save() on existing entity, mongoTemplate.updateFirst(), .updateMulti(), .findAndModify()
+- DELETE: repository.delete(), .deleteAll(), mongoTemplate.remove(), .findAndRemove()
+- READ: repository.find*(), mongoTemplate.find(), .findOne(), .aggregate()
+- AGGREGATE: mongoTemplate.aggregate(), Aggregation.newAggregation()
+
+Oracle/JPA/JDBC:
+- WRITE: entityManager.persist(), repository.save(), jdbcTemplate.update() with INSERT SQL
+- UPDATE: entityManager.merge(), jdbcTemplate.update() with UPDATE SQL
+- DELETE: entityManager.remove(), repository.delete*(), jdbcTemplate.update() with DELETE SQL
+- READ: entityManager.find(), .createQuery(), repository.find*(), jdbcTemplate.query*()
+- CALL: entityManager.createStoredProcedureQuery(), SimpleJdbcCall, Connection.prepareCall(), @Procedure
+- If NONE of these appear in sourceCode, the node likely has operationType NONE.

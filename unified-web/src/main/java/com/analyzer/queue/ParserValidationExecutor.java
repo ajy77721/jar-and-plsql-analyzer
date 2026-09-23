@@ -1,0 +1,100 @@
+package com.analyzer.queue;
+
+import com.plsql.parser.flow.DbConnectionManager;
+import com.plsql.parser.flow.TableValidationService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+
+import com.analyzer.storage.ArtifactEntry;
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+import com.plsqlanalyzer.web.parser.service.AnalysisPaths;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.function.BiConsumer;
+
+/**
+ * Executes table/view/trigger metadata validation as a dedicated queue job.
+ *
+ * Runs AFTER the analysis job completes (wired via QueueJob.followUpJob).
+ * A 15-second initial delay lets Oracle's SQLNET.INBOUND_CONNECT_TIMEOUT window
+ * close after the BFS connection storm, so getAnyConnection() succeeds reliably.
+ */
+@Component
+public class ParserValidationExecutor {
+
+    private static final Logger log = LoggerFactory.getLogger(ParserValidationExecutor.class);
+    private static final long PRE_CONNECT_DELAY_MS = 15_000;
+
+    private final ArtifactStore store;
+
+    public ParserValidationExecutor(@Qualifier("parserArtifactStore") ArtifactStore store) {
+        this.store = store;
+    }
+
+    public void execute(QueueJob job, BiConsumer<QueueJob, String> broadcast) throws Exception {
+        String analysisName = (String) job.metadata.get("analysisName");
+        String configPath   = (String) job.metadata.get("configPath");
+        String outputDir    = (String) job.metadata.get("outputDir");
+
+        if (configPath == null || outputDir == null) {
+            throw new IllegalArgumentException("ParserValidation job missing configPath or outputDir");
+        }
+        if (analysisName == null || analysisName.isBlank()) {
+            throw new IllegalArgumentException("ParserValidation job missing analysisName");
+        }
+
+        progress(job, broadcast, "[1/3] Waiting for Oracle connection pool to stabilise...");
+        try { Thread.sleep(PRE_CONNECT_DELAY_MS); } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        if (job.status == QueueJob.Status.CANCELLED) return;
+
+        progress(job, broadcast, "[2/3] Connecting to Oracle and validating table/view/trigger metadata...");
+
+        // The identity name maps straight to the storage prefix; the outputDir string in the job
+        // metadata is only kept for display.
+        ArtifactKey root = AnalysisPaths.dirKey(analysisName);
+        try (DbConnectionManager connManager = new DbConnectionManager(configPath)) {
+            // Package analysis: validate the merged root index (one combined index.json at root)
+            // Single-proc analysis: validate the proc output dir directly.
+            // Either way we pass the single correct directory — one bulk ALL_OBJECTS query covers all tables.
+            boolean isSql = connManager.isSqlServer();
+            // ONE listing of the subtree, then membership lookups — never a stat per candidate,
+            // which costs an HTTP round trip each against an object store.
+            Set<ArtifactKey> present = store.statPrefix(root).keySet();
+            if (present.contains(root.resolve("api", "tables", "index.json"))) {
+                if (isSql) com.plsql.parser.flow.SqlServerTableEnricher.enrich(connManager, store, List.of(root));
+                else       TableValidationService.validateMultiple(connManager, store, List.of(root));
+            } else {
+                // Fallback: scan for proc subdirs that each have their own index
+                List<ArtifactKey> procDirs = new ArrayList<>();
+                try (var stream = store.list(root, false)) {
+                    stream.filter(ArtifactEntry::directory)
+                          .map(ArtifactEntry::key)
+                          .filter(d -> present.contains(d.resolve("api", "tables", "index.json")))
+                          .forEach(procDirs::add);
+                }
+                if (!procDirs.isEmpty()) {
+                    if (isSql) com.plsql.parser.flow.SqlServerTableEnricher.enrich(connManager, store, procDirs);
+                    else       TableValidationService.validateMultiple(connManager, store, procDirs);
+                } else {
+                    log.warn("[ParserValidation] No api/tables/index.json found under {}", root);
+                }
+            }
+        }
+
+        progress(job, broadcast, "[3/3] Metadata validation complete for: " + analysisName);
+    }
+
+    private void progress(QueueJob job, BiConsumer<QueueJob, String> broadcast, String message) {
+        job.updateProgress(message);
+        broadcast.accept(job, "job-progress");
+    }
+}

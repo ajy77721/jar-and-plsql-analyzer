@@ -1,0 +1,974 @@
+# JAR / WAR Analyzer -- Complete User Manual
+
+This document is the authoritative reference for every piece of UI functionality in the JAR Analyzer tool. It covers JAR and WAR file support, the sidebar, top bar, JAR header controls, all three main tabs (Code Structure, Endpoint Flows, Summary), export capabilities, and the AI chat system.
+
+---
+
+## Table of Contents
+
+1. [Sidebar](#1-sidebar)
+   - [JAR List](#11-jar-list)
+   - [Upload Section](#12-upload-section)
+   - [Claude Progress Indicator](#13-claude-progress-indicator)
+2. [Top Bar](#2-top-bar)
+3. [JAR / WAR Header (When a File Is Selected)](#3-jar--war-header-when-a-file-is-selected)
+4. [WAR File Support](#4-war-file-support)
+5. [Tab 1: Code Structure](#5-tab-1-code-structure)
+   - [Package View](#51-package-view)
+   - [Project View](#52-project-view)
+   - [Visual Overview](#53-visual-overview)
+   - [Class Detail (Expanded)](#54-class-detail-expanded)
+   - [Code Structure Toolbar](#55-code-structure-toolbar)
+   - [Code Panel (Right Side)](#56-code-panel-right-side)
+   - [Resource Files](#57-resource-files)
+   - [Bundled Libraries](#58-bundled-libraries)
+   - [JAR Dependencies](#59-jar-dependencies)
+6. [Tab 2: Endpoint Flows](#6-tab-2-endpoint-flows)
+   - [Left Pane -- Endpoint List](#61-left-pane----endpoint-list)
+   - [Right Pane -- Endpoint Detail](#62-right-pane----endpoint-detail)
+7. [Tab 3: Summary](#7-tab-3-summary)
+   - [7.1 Endpoint Report](#71-endpoint-report)
+   - [7.2 Collection Analysis](#72-collection-analysis)
+   - [7.3 External Dependencies](#73-external-dependencies)
+   - [7.4 Distributed Transactions](#74-distributed-transactions)
+   - [7.5 Batch Jobs](#75-batch-jobs)
+   - [7.6 Scheduled Jobs](#76-scheduled-jobs)
+   - [7.7 Aggregation Flows](#77-aggregation-flows)
+   - [7.8 Dynamic Flows](#78-dynamic-flows)
+   - [7.9 Verticalisation](#79-verticalisation)
+   - [7.10 Claude Insights](#710-claude-insights)
+   - [7.11 Claude Corrections](#711-claude-corrections)
+   - [7.12 Correction Log Browser](#712-correction-log-browser)
+   - [7.13 MongoDB Catalog Verification](#713-mongodb-catalog-verification)
+8. [Export](#8-export)
+9. [Chat](#9-chat)
+
+---
+
+## 1. Sidebar
+
+The sidebar is the persistent left panel visible at all times. It contains the list of uploaded JARs, the upload controls, and the Claude progress indicator.
+
+### 1.1 JAR List
+
+Each entry in the JAR list represents one uploaded and analyzed JAR file. Entries are displayed as rows with the following information:
+
+| Element | Description |
+|---|---|
+| **Project / JAR Name** | The display name of the uploaded JAR. Clicking the name selects this JAR and loads its analysis into the main content area. |
+| **Class Count** | Numeric badge showing the total number of Java classes found in the JAR. |
+| **Endpoint Count** | Numeric badge showing the total number of HTTP endpoints detected. |
+| **AI Badge** | Status indicator for Claude enrichment. Possible values: `IDLE` (no Claude scan started), `RUNNING` (Claude scan in progress), `COMPLETE` (Claude scan finished successfully), `FAILED` (Claude scan encountered an error). |
+| **Corrected Badge** | Shows `C` when Claude corrections have been applied once, or `C(N)` (e.g., `C(2)`) when multiple correction rounds have been applied. Only visible after a Claude scan has produced corrections. |
+| **Relative Date** | Displays how long ago the JAR was uploaded (e.g., "2 hours ago", "3 days ago"). |
+| **Delete Button (x)** | A small "x" button at the far right of the entry. Clicking it removes the JAR and all its associated analysis data permanently. A confirmation may be required. |
+
+### 1.2 Upload Section
+
+The upload section sits below the JAR list and provides controls for adding new JARs to the analyzer.
+
+| Control | Description |
+|---|---|
+| **Upload Button** | Opens a file input dialog. Accepts `.jar` and `.war` files up to **2 GB** in size. After selecting a file, analysis begins automatically based on the selected mode. WAR files are automatically detected and processed with `WarParserService`, which extracts application classes from `WEB-INF/classes/` and bundled libraries from `WEB-INF/lib/`. |
+| **Analysis Mode Toggle** | A two-option toggle switch: **Static** and **Claude**. In **Static** mode, only static bytecode analysis is performed (decompilation, class inspection, endpoint detection). In **Claude** mode, static analysis is performed first, followed by AI-powered enrichment that adds business context, corrections, and insights. |
+| **Source Project Path** | A text input field that appears **only when Claude mode is selected**. Enter the absolute filesystem path to the original source project. This helps Claude correlate decompiled bytecode with the original source code for higher-quality analysis. |
+
+### 1.3 Claude Progress Indicator
+
+When one or more Claude scans are active, a progress section appears in the sidebar below the upload controls.
+
+- Displays the name of each JAR currently being scanned by Claude.
+- Each active scan shows a **progress bar** indicating completion percentage.
+- Multiple concurrent scans are listed individually.
+- The indicator disappears when no scans are running.
+
+---
+
+## 2. Top Bar
+
+The top bar spans the full width of the main content area and provides global controls.
+
+| Button | Description |
+|---|---|
+| **Sessions** | Opens a full-screen overlay listing all Claude sessions (both currently running and previously completed). Each session entry shows its status, the associated JAR, start time, and duration. Use this to monitor or review Claude enrichment activity across all JARs. |
+| **Logs** | Opens a log viewer panel that displays application-level log messages. Useful for debugging upload failures, analysis errors, or Claude communication issues. |
+| **Analysis Status** | Toggles the visibility of the progress log panel. When visible, this panel streams real-time progress messages during JAR analysis (e.g., "Decompiling classes...", "Detecting endpoints...", "Building call chains..."). Click again to hide. |
+| **Search** (press `/`) | Opens the **Global Search** overlay scoped to the currently selected JAR. Layout is a fixed 4-segment stack: a search textbar (with case-sensitive / whole-word / regex toggles), a dedicated pagination bar row, and a fixed-header/scrollable results table below. Results are rendered with dedicated `.srch-*` CSS classes so they never collide with the Summary tab's own table styling. Not present on the `/war/` page. |
+| **Chat Toggle** | Switches the chat interface between **New** (floating chatbox) and **Classic** (session-based panel) modes. See the [Chat](#8-chat) section for details. |
+
+---
+
+## 3. JAR Header (When a JAR Is Selected)
+
+When you click a JAR in the sidebar, a header section appears at the top of the main content area with the following elements.
+
+### Title and Stats Badges
+
+| Element | Description |
+|---|---|
+| **JAR Title** | The name of the selected JAR displayed prominently. |
+| **Classes Badge** | Total number of Java classes in the JAR. |
+| **Endpoints Badge** | Total number of HTTP endpoints detected. |
+| **File Size Badge** | The size of the uploaded JAR file (e.g., "45.2 MB"). |
+| **Date Badge** | The date and time the JAR was uploaded. |
+
+### Mode Badge
+
+A label indicating which data view is currently active:
+
+| Badge | Meaning |
+|---|---|
+| **STATIC** | Showing results from static bytecode analysis only. |
+| **CORRECTED** | Showing results that include Claude's corrections and enrichments merged on top of the static analysis. |
+| **Previous** | Showing results from an earlier Claude scan (before the most recent correction round). |
+
+### Mode Toggle Buttons
+
+| Button | Action |
+|---|---|
+| **View Corrected** | Switches to the corrected data view. Only enabled when Claude corrections exist for this JAR. |
+| **View Static** | Switches back to the raw static analysis data, ignoring any Claude corrections. |
+| **View Previous** | Switches to data from a prior Claude correction round (useful for comparing before/after). |
+
+### Claude Button
+
+| State | Display | Action |
+|---|---|---|
+| No Claude scan has ever run | **Enable Claude** button | Initiates the first Claude enrichment scan for this JAR. |
+| A previous Claude scan completed | **Re-scan Claude** button | Starts a new Claude enrichment scan (useful after corrections or to improve results). |
+| Claude scan currently running | Button is **hidden**; a **progress bar** is shown instead | No action available -- wait for the scan to complete. |
+
+### Connections Button
+
+The **Connections** button appears in the JAR/WAR header whenever the analyzer has detected database connection details inside the archive's bundled config files.
+
+Clicking it opens a styled modal popup (not a browser `alert`) with the following layout:
+
+- One **color-coded section per database type** detected:
+  - **MongoDB** — green header, shows URI/host details
+  - **Oracle** — red header, shows JDBC URL or TNS connection info
+  - **PostgreSQL** — blue header, shows `spring.datasource.url` and related properties
+- Each section shows the **connection details** extracted from the config file, with passwords replaced by `****`.
+- Each entry indicates **which config file** inside the archive the information was extracted from (e.g., `application.properties`, `application.yml`).
+
+The modal is dismissed by clicking the **×** button in the top-right corner, by clicking anywhere outside the modal panel, or by pressing **Escape**.
+
+---
+
+## 4. WAR File Support
+
+WAR (Web Application Archive) files have their **own dedicated page at `/war/`** — a separate tool card on the Home Dashboard from the JAR Analyzer, with its own REST endpoints (`/api/war/wars/...`, mirroring `/api/jar/jars/...`) and its own storage root (`data/jar/war/{normalizedWarKey}/...`, distinct from a plain JAR's `data/jar/{normalizedJarKey}/...`). Under the hood, the `/war/` page loads almost the entire JAR Analyzer JS bundle as-is (Code Structure, Endpoint Flows, Summary sub-tabs, chat, export) and adds only a small WAR-specific API client (`war/js/api.js`) and a thin overrides file (`war/js/app-overrides.js`) layered on top — so all features below apply identically to WAR uploads unless noted otherwise.
+
+### What is a WAR?
+
+A WAR file is the standard packaging format for Java web applications deployed to servlet containers (Tomcat, Jetty, JBoss, etc.). Its internal structure differs from a JAR:
+
+```
+myapp.war
+  WEB-INF/
+    classes/          ← compiled application classes (the main code)
+    lib/              ← bundled dependency JARs (Spring, Hibernate, etc.)
+    web.xml           ← optional deployment descriptor
+  META-INF/
+  index.jsp / static assets / etc.
+```
+
+### How to Upload a WAR
+
+Open `/war/` from its own tool card on the Home Dashboard, then use the **Upload Button** in the sidebar and select a `.war` file — the same upload control style as the JAR page. The analyzer routes it through `WarParserService` instead of `JarParserService`.
+
+### How WAR Analysis Works
+
+The WAR parser performs the following steps automatically:
+
+| Step | What Happens |
+|---|---|
+| **1. Extract application classes** | All `.class` files under `WEB-INF/classes/` are parsed via ASM to extract `ClassInfo`, `MethodInfo`, `FieldInfo`, and invocation data. |
+| **2. Detect base package** | The analyzer scans all class packages and identifies the dominant two-segment prefix (e.g., `com.example`) as the application's base package. |
+| **3. Filter bundled JARs** | Each JAR in `WEB-INF/lib/` is checked: if it contains classes matching the base package, it is treated as an application-owned module and parsed. Pure third-party libraries (Spring, Hibernate, etc.) are excluded from the call graph. |
+| **4. Merge class maps** | Application classes from `WEB-INF/classes/` and application-origin bundled JARs are merged into a single class map. |
+| **5. Standard pipeline** | From this point the analysis is identical to JAR analysis: call graph construction, endpoint detection, Spring DI dispatch resolution, Claude enrichment (if enabled). |
+
+### WAR vs JAR — What's the Same
+
+- All Summary sub-tabs (Endpoint Report, Collection Analysis, Dynamic Flows, etc.)
+- All dispatch types (QUALIFIED, HEURISTIC, AMBIGUOUS, LIST\<T\>, RECURSIVE, etc.)
+- All three call-trace views (Flat Trace, Node Navigator, Interactive Explorer)
+- Code Structure tab (Package View, Project View, Visual Overview)
+- Dispatch-aware navigation links in the decompile code view
+- Claude enrichment, corrections, and chat
+- Excel and JSON export
+
+### WAR vs JAR — Key Differences
+
+| Aspect | JAR | WAR |
+|---|---|---|
+| Application classes location | Root of archive | `WEB-INF/classes/` |
+| Bundled libraries | Root JARs in classpath | `WEB-INF/lib/*.jar` |
+| Library filtering | All JARs parsed (configurable) | Only app-origin JARs parsed |
+| Display name | JAR filename | WAR filename |
+
+### WAR Data Storage
+
+WAR analysis data is stored under a **`jar/war/` key root** — one level deeper than plain JAR data — using the same per-app layout otherwise:
+
+```
+data/jar/war/myapp-1.0.0-SNAPSHOT/
+  stored.jar            ← the uploaded .war file (stored as .jar extension internally)
+  analysis.json         ← analysis result
+  analysis_corrected.json
+  corrections/
+  claude/
+  chat/
+```
+
+This distinct key root exists so the WAR analysis list endpoint (`GET /api/war/wars`) only enumerates WAR entries, never JAR ones — the two lists were briefly conflated by a hardcoded key-prefix bug in `PersistenceService.listJarsFromStore()`, since fixed by deriving the prefix from each store's own `keyRoot()` instead of assuming a single-segment `"jar"` root.
+
+---
+
+## 5. Tab 1: Code Structure
+
+The Code Structure tab provides a navigable view of all classes, fields, methods, and invocations found in the JAR or WAR. It has three distinct view modes selectable via sub-tabs at the top.
+
+### 5.1 Package View
+
+This is the **default view mode**. Classes are grouped by their Java package.
+
+- **Main Application Classes** appear first, grouped under their respective packages.
+- **Internal Dependencies** appear below in a separate section, organized by dependency JAR module name. These are classes pulled in from libraries bundled inside the analyzed JAR.
+- Each package group is collapsible. Click a package name to expand or collapse its class list.
+- Each class entry shows its fully qualified name and annotations (e.g., `@RestController`, `@Service`).
+
+### 5.2 Project View
+
+An IntelliJ-style folder hierarchy that mirrors the expected source project structure.
+
+- The tree starts from `src/main/java` and descends through the package directory structure (e.g., `src/main/java/com/example/domain/ClassName.java`).
+- **Single-child path collapsing**: When a directory has only one subdirectory, the path is collapsed into a single node (e.g., `com/example/domain` instead of three separate levels). This reduces visual clutter.
+- Clicking a `.java` leaf node selects that class and opens it in the code panel.
+
+### 5.3 Visual Overview
+
+A card-based grid layout that groups classes by Spring stereotype annotation.
+
+| Group | Contents |
+|---|---|
+| **@RestController** | All classes annotated with `@RestController` or `@Controller`. |
+| **@Service** | All classes annotated with `@Service`. |
+| **@Repository** | All classes annotated with `@Repository`. |
+| **@Component** | All classes annotated with `@Component` or other Spring-managed beans. |
+
+Each card displays the class name and a brief summary (annotation, package). Clicking a card selects the class.
+
+### 5.4 Class Detail (Expanded)
+
+When a class is expanded (in Package or Project view), the following sections are displayed:
+
+#### Fields
+
+Each field shows:
+
+| Column | Description |
+|---|---|
+| **Annotations** | Any annotations on the field (e.g., `@Autowired`, `@Value("${...}")`). |
+| **Type** | The Java type of the field (e.g., `String`, `List<Order>`, `OrderRepository`). |
+
+#### Methods
+
+Each method shows:
+
+| Column | Description |
+|---|---|
+| **Signature** | The full method signature (name + parameter list). |
+| **Parameters** | Each parameter's type and name. |
+| **Return Type** | The return type of the method. |
+| **Annotations** | Method-level annotations (e.g., `@GetMapping("/api/orders")`, `@Transactional`). |
+
+#### Invocations (Lazy-Loaded)
+
+Method invocations are loaded on demand (lazy) to keep the initial render fast.
+
+- Expand a method to see all **outgoing method calls** made within that method body.
+- Each invocation shows the target class and method name.
+- Invocations are the building blocks of the call chains shown in the Endpoint Flows tab.
+
+### 5.5 Code Structure Toolbar
+
+The toolbar sits above the tree/grid area and provides the following controls:
+
+| Control | Description |
+|---|---|
+| **Search Box** | A text input that filters the visible classes, methods, and annotations in real time. Type a class name, method name, or annotation to narrow the view. Matching is case-insensitive and applies across all three view modes. |
+| **Expand All** | Expands every collapsible node in the current view, showing all packages, classes, fields, methods, and invocations. |
+| **Collapse All** | Collapses every node back to the top-level grouping. |
+| **Back Button** | Navigates to the previously viewed class (browser-style history). |
+| **Forward Button** | Navigates forward in the history stack (available after using Back). |
+| **History** | Opens a dropdown showing the full navigation history. Click any entry to jump directly to that class. |
+| **JAR Source Filter Bar** | Filters the tree to show only classes from specific source JARs (relevant when the analyzed JAR bundles multiple dependency JARs). Select one or more source JARs to narrow the view. |
+
+### 5.6 Code Panel (Right Side)
+
+The right side of the Code Structure tab displays a read-only code viewer with interactive dispatch navigation.
+
+- When a **class** is selected, the full decompiled Java source code for that class is displayed.
+- When a **method** is selected, the code panel scrolls to and highlights the relevant method within the class source.
+- Syntax highlighting is applied for Java keywords, types, strings, annotations, and comments.
+
+#### Dispatch-Aware Navigation Links
+
+Method calls on Spring-injected fields are rendered as interactive links based on how the call was resolved:
+
+| Link Style | When Shown | Click Action |
+|---|---|---|
+| **Green underline** (QUALIFIED) | Field resolved via `@Qualifier`, `@Named`, or custom qualifier annotation to exactly one implementation | Navigates directly to that implementation class and method |
+| **Indigo underline** (HEURISTIC) | Field resolved by field-name heuristic to one implementation | Navigates directly to that implementation |
+| **Orange underline** (AMBIGUOUS) | Multiple implementations exist and could not be narrowed | Opens an implementation picker — select which class to navigate to |
+| **Standard blue link** | Concrete class method (non-interface call) | Navigates directly to the target class and method |
+
+Hovering over any dispatch link shows a tooltip with the resolution type and matched class name (e.g., `✓ QUALIFIED: TrendAnalysisStrategy.analyze()`).
+
+#### Search
+
+A search bar at the top of the code panel supports case-sensitive and case-insensitive text search within the displayed source. Use navigation arrows to jump between matches.
+
+### 5.7 Resource Files
+
+A **Resource Files** section appears in the Code Structure left panel, below the class tree. It lists every resource file extracted from the JAR or WAR during analysis. This section is present for both JAR and WAR uploads.
+
+#### What Files Are Shown
+
+The following file types are extracted and listed (maximum 50 files, up to 200 KB each):
+
+| Extension(s) | Icon | Notes |
+|---|---|---|
+| `.properties` | 📄 | Spring and Java property files |
+| `.yml`, `.yaml` | 📋 | YAML configuration files |
+| `.json` | 📊 | JSON configuration or data files |
+| `.xml` | 📝 | XML descriptors and Spring context files |
+| `.sql` | 🗄️ | SQL schema and migration scripts |
+| `.conf`, `.txt`, JavaScript, HTML, and other non-binary resources | 📃 | Generic configuration and plain-text files |
+
+Binary files and `.class` files are always skipped. Maven metadata files (under `META-INF/maven/`) are excluded. The extraction rules differ slightly by archive type:
+
+- **JAR files** — resources are extracted from the root of the archive and from any recognized resource path. Files under `META-INF/maven/` are excluded.
+- **WAR files** — only resources found under `WEB-INF/classes/` are extracted. Resources bundled inside the nested JARs in `WEB-INF/lib/` are not included here; those files are accessible through the Bundled Libraries section (see [5.8](#58-bundled-libraries)).
+
+Files are grouped by type in the panel, with the appropriate icon displayed next to each file name.
+
+#### Viewing a Resource File
+
+Click any file name in the Resource Files section to load its content into the right panel. Content is fetched on demand from the backend — only the selected file is transferred, not all files at once.
+
+#### Where Files Are Stored
+
+Extracted resource files are stored in the JAR's analysis directory at:
+
+```
+data/jar/{normalizedKey}/resources/{filename}
+```
+
+They are accessible via the REST endpoints:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jar/jars/{id}/resources` | List all extracted resource files |
+| GET | `/api/jar/jars/{id}/resources/{filename:.+}` | Fetch the content of a specific resource file |
+
+### 5.8 Bundled Libraries
+
+A **Bundled Libraries** section appears in the Code Structure left panel, below the Resource Files section. It lists every JAR bundled inside the analyzed archive. This section is present for both JAR and WAR uploads.
+
+#### What Is Shown
+
+The analyzer scans the following locations depending on the archive type:
+
+| Archive Type | Bundled JARs Location |
+|---|---|
+| Spring Boot fat JAR | `BOOT-INF/lib/` |
+| WAR | `WEB-INF/lib/` |
+
+Up to **100 bundled JARs** are listed. Each entry is a collapsible node. Expanding a node reveals:
+
+- **MANIFEST.MF** — if the bundled JAR contains a manifest file, it is listed as the first item and can be clicked to view its content in the right panel.
+- **Resource files** — up to 10 resource files found inside that bundled JAR (same type filter as section 5.7) are listed below the manifest. Click any file to view its content on demand.
+
+#### Viewing Bundled Library Files
+
+Clicking any item (manifest or resource file) inside a bundled library node loads its content into the right code panel, the same way as for top-level resource files.
+
+#### REST Endpoint
+
+The bundled library list is served by:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jar/jars/{id}/bundled-jars` | List all bundled JARs with their manifest and resource file entries |
+
+### 5.9 JAR Dependencies
+
+A **JAR Dependencies** section appears in the Code Structure left panel, below the Bundled Libraries section. It identifies which bundled JARs the application's own code actually calls into at runtime. This section is present for both JAR and WAR uploads.
+
+#### How It Works
+
+During analysis, the engine builds a **class-to-JAR index** mapping every class found inside the bundled JARs to its containing JAR file. It then cross-references this index against the invocation data collected from the application's own classes. Only JARs where at least one application class makes a method call into a class from that JAR appear in this section.
+
+#### What Is Shown
+
+The section header displays the total count of libraries actually referenced: **"🔗 JAR Dependencies (N libs used)"**.
+
+Each entry shows:
+
+- The bundled JAR name (e.g., `spring-data-mongodb-3.4.1.jar`)
+- The list of application classes that invoke methods from that JAR
+
+#### Navigating to a Calling Class
+
+Clicking any application class name in the JAR Dependencies list navigates directly to that class in the Code Structure tree, selecting it and loading its decompiled source in the right panel.
+
+#### REST Endpoint
+
+The dependency map is served by:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jar/jars/{id}/jar-dep-map` | Get the map of bundled JAR → application classes that call into it |
+
+---
+
+## 6. Tab 2: Endpoint Flows
+
+The Endpoint Flows tab provides a detailed view of every detected HTTP endpoint and its downstream call chain.
+
+### 6.1 Left Pane -- Endpoint List
+
+The left pane shows all endpoints grouped by their controller class.
+
+#### Grouping
+
+- Endpoints are grouped under their parent controller class name.
+- Each group header shows the controller name and the **count** of endpoints in that controller.
+- Groups are collapsible.
+
+#### Filter Search
+
+A search input at the top of the left pane filters across:
+
+- HTTP method (GET, POST, PUT, DELETE, PATCH)
+- URL path
+- Method name
+- Controller class name
+
+Filtering is case-insensitive and updates the visible list in real time.
+
+#### Endpoint Entry
+
+Each endpoint entry displays:
+
+| Element | Description |
+|---|---|
+| **HTTP Method Badge** | A colored badge indicating the HTTP method. Color coding: `GET` = green, `POST` = blue, `PUT` = orange, `DELETE` = red. Other methods use neutral colors. |
+| **Full Path** | The complete URL path for the endpoint (e.g., `/api/v1/orders/{id}`). |
+| **Method Signature** | The Java method name and parameter types (e.g., `getOrderById(Long id)`). |
+| **Return Type** | The Java return type (e.g., `ResponseEntity<OrderDTO>`). |
+
+Click an endpoint to load its detail in the right pane.
+
+### 6.2 Right Pane -- Endpoint Detail
+
+When an endpoint is selected, the right pane displays a comprehensive breakdown of its execution flow.
+
+#### Header
+
+| Element | Description |
+|---|---|
+| **HTTP Method** | The HTTP method (same colored badge as the list). |
+| **Full Path** | The complete URL path. |
+| **Method Signature** | The full Java method signature. |
+
+#### Call Chain
+
+A visual flowchart showing the execution path from the controller entry point through services down to repositories.
+
+- Displayed as a horizontal or vertical chain of connected nodes.
+- Each node shows the class name with a **stereotype chip** (e.g., `@RestController`, `@Service`, `@Repository`).
+- Nodes are connected by **arrows** indicating the direction of the call.
+- The chain follows the pattern: **Controller --> Service --> Repository** (with as many intermediate layers as the actual code has).
+
+#### Collections
+
+Lists the MongoDB collections accessed during this endpoint's execution.
+
+| Badge | Meaning |
+|---|---|
+| **DATA** | The collection is used as a primary data store (reads/writes business entities). |
+| **VIEW** | The collection is a MongoDB view (read-only, derived from another collection). |
+
+#### Operation Flow Table
+
+A detailed step-by-step table of every method call in the endpoint's execution chain.
+
+| Column | Description |
+|---|---|
+| **#** | Step number in the execution sequence (1, 2, 3, ...). |
+| **Stereotype Label** | The Spring stereotype of the class containing this method, shown as a badge (e.g., `[CONTROLLER]`, `[SERVICE]`, `[REPOSITORY]`). |
+| **ClassName.methodName** | The fully qualified method reference. **Clickable** -- clicking navigates to the Code Structure tab and highlights that method. |
+| **Description** | A human-readable description of what this step does (generated by static analysis or Claude enrichment). |
+| **Params** | The parameters accepted by this method. |
+| **Returns** | The return type of this method. |
+| **Dispatch Badge** | Indicates how the method call was resolved during static analysis. See the table below. |
+| **Recursive Indicator** | Shown when the method call is detected as recursive (calls itself directly or indirectly). |
+
+##### Dispatch Badge Values
+
+| Badge | Color | Meaning |
+|---|---|---|
+| **QUALIFIED** | Green | The call target was resolved with full certainty via `@Qualifier` or `@Named` annotation on the injected field. The exact bean name matched one implementation. |
+| **HEURISTIC** | Indigo | Resolved via field-name heuristic — the injected field name contained a substring matching exactly one implementation class name (e.g. field `trendStrategy` matched `TrendAnalysisStrategy`). |
+| **AMBIGUOUS** | Orange | Multiple implementations exist and none of the narrowing strategies (Qualifier, custom annotation, field name) could select one. The UI shows an implementation picker. |
+| **LIST\<T\>** | Cyan | The field is injected as `List<Interface>`, meaning all implementations are run at runtime. All are shown as children; each can be individually traced. |
+| **DYNAMIC** | Amber | Resolved through general dynamic dispatch. Multiple implementations may be invoked at runtime. |
+| **↺ RECURSIVE** | Red | The method call creates a back-edge in the call graph (direct or indirect self-call). Traversal stops here to prevent infinite recursion. |
+| **IFACE ONLY** | Red | Only the interface declaration was found; no concrete implementation was located in the analyzed JAR. |
+| **@PRIMARY** | Purple | Resolved using Spring's `@Primary` annotation to select among multiple candidates. |
+| **DEFAULT method** | Grey | The method is a Java 8+ default method on an interface — no concrete class overrides it; the interface body provides the implementation. |
+
+#### Breadcrumb Navigation
+
+| Button | Action |
+|---|---|
+| **Back** | Returns to the previous endpoint detail viewed. |
+| **Next** | Advances to the next endpoint in the navigation history. |
+| **Root** | Jumps back to the root endpoint (the first one viewed in the current navigation chain). |
+
+#### Call Trace Views
+
+Three overlays are available for in-depth call tree exploration. Buttons for each appear in the endpoint detail header.
+
+**Flat Trace (Dynatrace-style)**
+
+Opens a hierarchical flat tree showing every method call in the endpoint's execution path, indented by call depth. Each row shows:
+- Spring stereotype badge (CTRL, SVC, REPO, CMP)
+- Class and method name (clickable — opens Code view)
+- Return type and parameters
+- Module badge for cross-module calls
+- Dispatch badge (QUALIFIED, ↺ RECURSIVE, AMBIGUOUS, etc.)
+- Collection badges for database accesses
+- Descendant collection count for intermediate nodes
+
+**Node Navigator**
+
+Steps through every node in the call tree one at a time (like a debugger). Controls:
+- **Back / Next** buttons to walk forward and backward through all nodes
+- Breadcrumb trail showing the path to the current node
+- Per-node detail card: stereotype, depth, child count, return type, annotations, SQL statements, and decompiled source code (loaded on demand from the backend)
+
+**Interactive Explorer (Drill-Down)**
+
+A breadcrumb-driven drill-down navigator. Start at the endpoint root, then click any child method to drill into it. Features:
+- **Dispatch legend** shown once above the children list — summarises all dispatch types present
+- Per-child dispatch badge and `via InterfaceName` tag for interface calls
+- **Implementation picker** for AMBIGUOUS and LIST\<T\> children — click a specific implementation button to drill into that branch
+- Full detail card for the current node: stats (total nodes in scope, collections, direct calls, external calls), annotations, SQL statements, all collections in scope
+- Recursive nodes marked with `↺` in breadcrumbs; clicking one shows the back-edge detail and cycle path
+
+---
+
+## 7. Tab 3: Summary
+
+The Summary tab contains **11 sub-tabs**, each providing a different analytical perspective on the JAR's contents. Click a sub-tab name to switch views.
+
+> **Decompile modal — dispatch navigation links:** When you click a method name anywhere to open the decompile popup, the modal renders colored dispatch navigation links identical to the Code Structure tab. Concrete `@Service` field calls (e.g. `this.someService.doWork()`) are fully clickable and navigate directly to the implementation. Interface dispatch shows QUALIFIED / HEURISTIC / AMBIGUOUS links as described in [Section 5.6](#56-code-panel-right-side). Multiple clickable calls on the same source line are each independently navigable.
+
+### 7.1 Endpoint Report
+
+**Sub-tab label:** Endpoint Report (default sub-tab when Summary is opened)
+
+A card-based list of all HTTP endpoints with rich metadata.
+
+#### Card Contents
+
+Each endpoint card displays:
+
+| Element | Description |
+|---|---|
+| **HTTP Method Badge** | Colored badge (GET/POST/PUT/DELETE). |
+| **Path** | The full URL path for the endpoint. |
+| **Method Signature** | The Java method name and parameters. |
+| **Collections** | Number of MongoDB collections accessed. |
+| **Views** | Number of MongoDB views accessed. |
+| **DB Ops** | Total number of database operations performed. |
+| **Internal Calls** | Number of calls to methods within the same JAR. |
+| **External Calls** | Number of calls to methods in external libraries. |
+| **LOC** | Lines of code in the endpoint's full call chain. |
+| **Size** | A categorical size label: `S` (Small), `M` (Medium), `L` (Large), `XL` (Extra Large), based on the combined complexity metrics. |
+| **Domain Badge** | The business domain this endpoint belongs to (e.g., "Orders", "Payments", "Users"). |
+| **Performance Badge** | An estimated performance classification based on the number of DB operations, external calls, and chain depth. |
+
+#### Sorting
+
+Click any sort option to reorder the endpoint cards. Available sort fields:
+
+| Sort Field | Description |
+|---|---|
+| **Path** | Alphabetical by URL path. |
+| **Domain** | Grouped by business domain. |
+| **Collections** | By number of collections accessed (descending). |
+| **DB Ops** | By number of database operations (descending). |
+| **External** | By number of external calls (descending). |
+| **LOC** | By lines of code (descending). |
+| **Size** | By size category (XL > L > M > S). |
+
+#### Filters
+
+Two levels of filtering are available:
+
+**Domain Pills**: Quick-filter buttons at the top of the card list. Each pill represents a detected domain. Click one or more to show only endpoints in those domains. Click again to deselect.
+
+**Advanced Filters Panel**: Expand this panel to access granular filtering controls.
+
+| Filter Type | Controls |
+|---|---|
+| **Range Sliders** | Adjustable min/max sliders for: Collections, Views, DB Ops, Internal Calls, External Calls, Methods, LOC. Drag handles to set the desired range. |
+| **HTTP Method Pills** | Toggle pills for GET, POST, PUT, DELETE, PATCH. Select one or more to filter by HTTP method. |
+| **Size Pills** | Toggle pills for S, M, L, XL. Select one or more to filter by endpoint size. |
+| **Performance Pills** | Toggle pills for performance categories. |
+| **Operations Filter** | Toggle pills for database operation types: `READ`, `WRITE`, `UPDATE`, `DELETE`, `AGGREGATE`. Select to show only endpoints that perform the chosen operation types. |
+
+#### Pagination
+
+- Results are paginated at **25 endpoints per page**.
+- Page navigation controls appear at the bottom of the card list (Previous / Next / page numbers).
+
+### 7.2 Collection Analysis
+
+A tabular view of all MongoDB collections and views detected across the JAR.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Collection Name** | The MongoDB collection name. Accompanied by a badge: `DATA` for standard collections, `VIEW` for MongoDB views. |
+| **Domain** | The business domain this collection belongs to. |
+| **Type** | The collection type (e.g., standard collection, capped collection, view). |
+| **Read Ops** | Number of read operations detected against this collection. |
+| **Write Ops** | Number of write operations detected against this collection. |
+| **Agg Ops** | Number of aggregation pipeline operations detected against this collection. |
+| **Detected Via** | How the collection reference was discovered (e.g., annotation, query string, template method). |
+| **Complexity** | An assessed complexity level for this collection's usage patterns. |
+| **Verification** | A status indicating whether the collection was confirmed to exist in the database. Values: `IN_DB` (confirmed present), `NOT_IN_DB` (not found in the database), `NEED_REVIEW` (could not be automatically verified). |
+
+#### View Toggle
+
+- **Hierarchical View**: Groups collections under their owning domain, with expandable domain sections.
+- **Flat Table View**: Shows all collections in a single flat table without grouping.
+
+Toggle between these two layouts using the view switch control above the table.
+
+### 7.3 External Dependencies
+
+A table listing all external library and module dependencies detected in the endpoint call chains.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Module Name** | The name of the external module or library (e.g., `spring-data-mongodb`, `commons-lang3`). |
+| **Domain** | The business domain(s) that use this dependency. |
+| **Call Count** | Total number of method calls made to this module across all endpoints. |
+| **Called By** | The classes that invoke methods on this module. **Expandable** -- click to see the full list of calling classes and methods. |
+| **Type** | Classification of the dependency: `Library` (third-party library), `Internal` (another module within the same organization), `External` (external service call). |
+
+#### Module Expansion
+
+Click the expand arrow on any module row to see a detailed list of all methods called within that module, along with the callers for each method.
+
+### 7.4 Distributed Transactions
+
+A table identifying endpoints that participate in or require distributed transaction handling.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Endpoint Name** | The endpoint's path and method. **Clickable** -- navigates to the Endpoint Flows detail for this endpoint. |
+| **Domain** | The business domain of the endpoint. |
+| **Transaction Requirement** | The assessed transaction need: `REQUIRED` (the endpoint modifies multiple data sources and requires distributed transaction coordination), `ADVISORY` (the endpoint touches multiple sources but may not strictly require distributed transactions), `NONE` (no distributed transaction concern detected). |
+
+### 7.5 Batch Jobs
+
+A table of detected batch processing jobs (e.g., Spring Batch jobs).
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Batch Name** | The name or identifier of the batch job. |
+| **Primary Domain** | The main business domain this batch job operates in. |
+| **Touches Domains** | Badge pills showing all business domains this batch job interacts with. Multiple badges indicate cross-domain batch processing. |
+| **Collections** | The MongoDB collections accessed by this batch job. |
+| **Methods** | The number of methods involved in the batch job's execution chain. |
+| **Size** | Categorical size: `S` (Small), `M` (Medium), `L` (Large), `XL` (Extra Large). |
+
+### 7.6 Scheduled Jobs
+
+A table of methods annotated with scheduling annotations (`@Scheduled`, etc.).
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Method Name** | The scheduled method's name. |
+| **Class** | The class containing the scheduled method. |
+| **Schedule Expression** | The scheduling configuration. This can be a **cron** expression (e.g., `0 0 2 * * ?` for 2 AM daily), a **fixedRate** value (e.g., `fixedRate=60000` for every 60 seconds), or a **fixedDelay** value (e.g., `fixedDelay=30000` for 30 seconds after completion). |
+| **Domain** | The business domain this job belongs to. |
+| **Collections** | MongoDB collections accessed during execution. |
+| **Methods** | Number of methods in the execution chain. |
+
+#### Grouping
+
+Scheduled jobs are grouped by their **execution pattern** (e.g., all cron-based jobs together, all fixedRate jobs together, all fixedDelay jobs together) for easier scanning.
+
+### 7.7 Aggregation Flows
+
+A table of MongoDB aggregation pipelines detected in the codebase.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Pipeline ID** | A unique identifier for the aggregation pipeline. |
+| **Collections** | The MongoDB collections involved, including any collections joined via `$lookup` stages. |
+| **Pipeline Stages** | The total count of stages in the pipeline, plus the types of stages used (e.g., `$match`, `$group`, `$project`, `$lookup`, `$unwind`). |
+| **Called From** | The method and class that executes this aggregation pipeline. |
+| **Complexity** | An assessed complexity level for the pipeline. |
+| **$Lookup Joins** | The number of `$lookup` (join) stages in the pipeline. |
+| **Dynamic** | `Yes` if the pipeline is built dynamically at runtime (e.g., conditional stages), `No` if it is static. |
+
+#### Pipeline Expansion
+
+Click the expand arrow on any row to see the **full pipeline structure** -- every stage listed in execution order with its parameters.
+
+- **Cross-domain `$lookup` stages** are highlighted in **red** to flag potential domain boundary violations.
+
+#### Filters
+
+| Filter | Description |
+|---|---|
+| **Collection** | Filter pipelines by the collections they access. |
+| **Pipeline Stage** | Filter pipelines that include specific stage types (e.g., show only pipelines using `$lookup`). |
+| **Complexity** | Filter by complexity level. |
+
+### 7.8 Dynamic Flows
+
+A table of method calls resolved through dynamic dispatch (polymorphism, interfaces, abstract classes), plus two additional categories surfaced from real bytecode data: **REFLECTION** and **third-party dependency** calls.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Dispatch Type** | How the dynamic call was resolved (e.g., interface polymorphism, abstract class, factory pattern). |
+| **Target Class** | The declared type (interface or abstract class) of the call target. |
+| **Implementations Found** | The number of concrete implementations discovered in the JAR for this target type. |
+| **Confidence** | The confidence level of the resolution (how certain the analyzer is that it identified the correct implementation). |
+| **Called From** | The method and class that makes this dynamic call. |
+| **Collections Touched** | MongoDB collections that may be accessed depending on which implementation is invoked. |
+| **Risk Level** | An assessed risk level for this dynamic dispatch point. Higher risk indicates more uncertainty about runtime behavior. |
+
+#### REFLECTION Category
+
+Rows tagged `REFLECTION` come from a real, resolved bytecode invocation of `java.lang.reflect.Method.invoke`, `Class.forName`, `Class.newInstance`, `Constructor.newInstance`, etc. — not a string-literal scan. These calls are flagged as **"fully opaque, manual review required"**: the target class/method cannot be determined by static analysis at all.
+
+#### Third-Party Dependency Category
+
+Rows tagged as a third-party dependency identify real calls into external library classes (e.g. `org.springframework.web.multipart.MultipartFile`, `org.slf4j.Logger`) that were excluded from further call-tree recursion. JDK-core packages (`java.*`, `javax.*`, `jakarta.*`, `sun.*`, `jdk.*`, `com.sun.*`) are deliberately excluded from this category so it reflects genuine third-party framework/library usage, not JDK noise. This is additive to, and narrower in scope than, the [External Dependencies](#73-external-dependencies) sub-tab, which tracks cross-module and outbound-HTTP calls rather than specific third-party library classes.
+
+### 7.9 Verticalisation
+
+The Verticalisation sub-tab analyzes cross-domain coupling to support domain-driven design and microservice extraction. It is divided into two sections.
+
+#### Section A: Bean Crossing
+
+Identifies Spring beans that are called across domain boundaries.
+
+| Column | Description |
+|---|---|
+| **Target Bean** | The Spring bean being called from another domain. |
+| **Stereotype** | The Spring stereotype of the target bean (e.g., `@Service`, `@Repository`). |
+| **Source Module** | The module where the calling code resides. |
+| **Source Domain** | The business domain of the caller. |
+| **Call Count** | How many times this cross-domain call occurs. |
+| **Caller Endpoints** | The HTTP endpoints whose call chains include this cross-domain invocation. |
+| **Recommendation** | The suggested refactoring approach. Typically `REST_API` -- recommending that the cross-domain call be replaced with a REST API call to maintain domain isolation. |
+
+#### Section B: Data Crossing
+
+Identifies MongoDB collections that are accessed by multiple domains.
+
+| Column | Description |
+|---|---|
+| **Collection** | The MongoDB collection name. |
+| **Type** | The collection type (DATA or VIEW). |
+| **Owner Domain** | The primary domain that owns this collection. |
+| **Accessed By Domains** | All domains that access this collection (including the owner). |
+| **Access Type** | The type of access performed by non-owner domains (e.g., read-only, read-write). |
+| **Endpoints** | The HTTP endpoints that access this collection across domain boundaries. |
+| **Recommendation** | The suggested approach for resolving the data coupling (e.g., replicate data, create an API, introduce an event). |
+
+### 7.10 Claude Insights
+
+Available only after a Claude enrichment scan has completed. Displays AI-generated business analysis for each endpoint.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Endpoint Name** | The endpoint path and method. |
+| **Business Process** | A Claude-generated description of the business process this endpoint implements (e.g., "Order placement with inventory reservation and payment processing"). |
+| **Risk Flags** | Identified risks such as missing error handling, potential data inconsistency, performance bottlenecks, or security concerns. |
+| **Migration Difficulty** | A numeric score from **1** (trivial) to **5** (extremely complex) assessing how difficult it would be to migrate this endpoint to a new architecture. |
+| **Key Insights** | Notable observations about the endpoint's implementation, patterns, or anti-patterns. |
+| **Recommendations** | Suggested improvements, refactoring opportunities, or migration strategies. |
+
+### 7.11 Claude Corrections
+
+Available only after a Claude enrichment scan has completed. Shows a per-endpoint summary of what Claude changed compared to the static analysis.
+
+#### Table Columns
+
+| Column | Description |
+|---|---|
+| **Endpoint Name** | The endpoint path and method. |
+| **Added Count** | Number of items (call chain steps, collections, etc.) that Claude added to the endpoint's analysis that were missed by static analysis. |
+| **Removed Count** | Number of items that Claude removed from the endpoint's analysis (false positives from static analysis). |
+| **Verified Count** | Number of items from the static analysis that Claude confirmed as correct. |
+| **Verified %** | The percentage of static analysis items that Claude verified as accurate. A higher percentage indicates the static analysis was largely correct for this endpoint. |
+
+### 7.12 Correction Log Browser
+
+Available after a Claude correction scan has run. Provides a file-level view of every log file produced by the Claude correction pipeline.
+
+- Lists all log files by endpoint name.
+- Click any entry to view the raw log content (JSON fragments, Claude output, merge decisions).
+- Useful for debugging unexpected corrections or understanding why a specific endpoint changed.
+
+---
+
+### 7.13 MongoDB Catalog Verification
+
+When connected to a live MongoDB instance, the analyzer can verify whether detected collection names actually exist in the database.
+
+#### How to Trigger
+
+Click **Fetch Catalog** in the JAR header. This calls `POST /api/jar/jars/{id}/fetch-catalog` which uses `MongoCatalogService` to connect to MongoDB and retrieve collection metadata.
+
+#### Configuration
+
+MongoDB connection details are not stored in `plsql-config.yaml`. Instead, the driver uses the connection string provided at the time of the catalog fetch request. Timeouts are controlled by:
+
+| Property | Default | Description |
+|---|---|---|
+| `mongo.timeout.connect` | `30s` | Connection timeout |
+| `mongo.timeout.server-selection` | `30s` | Server selection timeout |
+
+#### Verification Status in Collection Analysis
+
+After a successful catalog fetch, the **Verification** column in the Collection Analysis sub-tab updates:
+
+| Status | Meaning |
+|---|---|
+| **IN_DB** | Collection name was found in the live MongoDB database |
+| **NOT_IN_DB** | Collection name was NOT found — likely a naming mismatch or the collection is environment-specific |
+| **NEED_REVIEW** | Catalog data was not available; cannot auto-verify |
+
+---
+
+## 8. Export
+
+The Export feature downloads analysis results for offline use or integration with other tools.
+
+### Accessing Export
+
+- The **Export** button is in the **Summary tab** toolbar area.
+- Clicking it opens the Export modal dialog.
+- All report data (Collections, Distributed Transactions, Batch Jobs, Views) is automatically built before the modal opens, even if those tabs have not been visited yet.
+
+### Export Scope
+
+The export modal supports three scopes:
+
+| Scope | How to Trigger | What Is Exported |
+|---|---|---|
+| **Full Project** | Click Export button from the main Summary bar | All endpoints, all collections, all reports |
+| **Single Endpoint** | Click the export icon on an individual endpoint card | Only data for that one endpoint and its collections |
+| **Single Collection** | Click the export icon in the Collection Analysis sub-tab | Only data for that collection and the endpoints that use it |
+
+### Available Formats
+
+| Format | Description |
+|---|---|
+| **JSON** | Structured JSON file. Suitable for programmatic consumption. |
+| **CSV** | Flat table format. Opens in any spreadsheet application. |
+| **Excel (.xlsx) — Backend** | Multi-sheet workbook generated by Apache POI on the server. Full color, styling, and formatting. |
+| **Excel (.xlsx) — Browser** | Multi-sheet workbook generated in the browser by xlsx-js-style. No server required. |
+
+### Exportable Sections
+
+Select any combination of sections using the checkboxes in the modal. Each section becomes a separate sheet in Excel or a top-level key in JSON/CSV.
+
+| Section | Contents |
+|---|---|
+| **Endpoint Report** | All endpoint paths, HTTP methods, call chains, collection counts, domain, LOC, and metrics. |
+| **Collection Analysis** | All MongoDB collections and views with operation counts and verification status. |
+| **Distributed Transactions** | Endpoints that write to multiple domains with transaction requirement assessment. |
+| **Batch Jobs** | Detected batch jobs with domains, collections, and size rating. |
+| **Views Analysis** | MongoDB views detected with owning domain and usage endpoints. |
+| **External Dependencies** | Cross-module JAR dependencies with call counts and calling classes. |
+
+### Filename
+
+The modal pre-fills a filename based on the JAR name and export scope (e.g., `myapp_full_report.xlsx`). The name is editable before downloading.
+
+---
+
+## 9. Chat
+
+The Chat feature provides an AI-powered conversational interface for asking questions about the analyzed JAR.
+
+### Floating Chatbox (New Mode)
+
+- A **floating action button (FAB)** appears in the **bottom-right corner** of the screen.
+- Clicking the FAB opens a chat popover window.
+- Type questions about the current JAR's analysis in natural language (e.g., "Which endpoints write to the orders collection?", "What are the most complex endpoints?", "Explain the call chain for POST /api/orders").
+- The AI responds with answers drawn from the analysis data.
+- The chatbox can be minimized back to the FAB by clicking the close/minimize button.
+
+### Classic Chat Panel (Classic Mode)
+
+- The Classic chat panel is a **session-based** chat interface that opens as a dedicated side panel.
+- Each chat session is persisted and can be revisited.
+- Supports longer, more detailed conversations with full context retention within a session.
+- Previous sessions can be viewed and continued.
+
+### Chat Toggle
+
+- Use the **Chat toggle** in the **top bar** to switch between **New** (floating chatbox) and **Classic** (session-based panel) modes.
+- Your preference persists across page reloads.
+
+### Chat Context and Scope
+
+The floating chatbox is **scoped to the currently selected JAR**. All messages and the AI's answers are tied to that JAR's analysis data. Switching to a different JAR opens a fresh conversation context for that JAR.
+
+- Chat history is **persisted to disk** at `data/jar/{jarKey}/chat/`. Conversations survive application restarts.
+- The AI draws on the full analysis data for the selected JAR: endpoints, call trees, collections, domains, and Claude enrichment results if available.
+- Chat history can be cleared via `DELETE /api/jars/{id}/chat/history`.
+
+### Classic Chat Session Management
+
+In Classic mode, sessions are managed via the **Sessions** button in the top bar or via `GET /api/chat/sessions`. Each session:
+- Has a unique ID and persists until explicitly deleted.
+- Supports multi-turn conversations with full context retention.
+- Can be converted to a downloadable **report** via `GET /api/chat/sessions/{id}/report`.
+
+---
+
+*End of JAR Analyzer User Manual.*

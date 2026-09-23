@@ -1,0 +1,184 @@
+package com.plsqlanalyzer.web.parser.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import com.analyzer.storage.ArtifactKey;
+
+import java.io.IOException;
+import java.io.InputStream;
+
+import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.*;
+
+/** Index-facet reads: getIndex + getProcedures + getNodeDetail (package-enrichment logic). */
+class IndexFacetReader {
+
+    private final StaticAnalysisReader r;
+
+    IndexFacetReader(StaticAnalysisReader r) {
+        this.r = r;
+    }
+
+    /** Streams a JSON document out of the store. */
+    private JsonNode readTree(ArtifactKey key) throws IOException {
+        try (InputStream in = r.openRead(key)) {
+            return r.mapper.readTree(in);
+        }
+    }
+
+    JsonNode getIndex(String name) throws IOException {
+        ObjectMapper mapper = r.mapper;
+        JsonNode raw = readTree(r.resolveKey(name, "api/index.json"));
+        // For package analyses, enrich nodes with detailFile, sourceFile, line info, counts
+        if (raw.has("_packageAnalysis") && raw.get("_packageAnalysis").asBoolean()
+                && raw.has("nodes") && raw.get("nodes").isArray()) {
+            boolean needsEnrich = false;
+            for (JsonNode n : raw.get("nodes")) {
+                if (!n.has("detailFile") || !n.has("sourceFile") || !n.has("counts")) { needsEnrich = true; break; }
+            }
+            if (needsEnrich) {
+                ObjectNode copy = raw.deepCopy();
+                ArrayNode enriched = mapper.createArrayNode();
+                for (JsonNode n : raw.get("nodes")) {
+                    String subFolder = textOrNull(n, "subfolderName");
+                    String detailFile = textOrNull(n, "detailFile");
+                    String sourceFile = textOrNull(n, "sourceFile");
+                    int lineStart = intOrDefault(n, "lineStart", 0);
+                    int lineEnd = intOrDefault(n, "lineEnd", 0);
+                    int depth = intOrDefault(n, "depth", 0);
+                    JsonNode counts = n.get("counts");
+
+                    if (subFolder != null && (detailFile == null || sourceFile == null || counts == null)) {
+                        try {
+                            JsonNode subIdx = readTree(CoreFileReader.subKey(name, subFolder, "api/index.json"));
+                            JsonNode subNodes = subIdx.get("nodes");
+                            if (subNodes != null && subNodes.isArray()) {
+                                for (JsonNode sn : subNodes) {
+                                    int d = sn.has("depth") ? sn.get("depth").asInt() : -1;
+                                    if (d == 0) {
+                                        if (detailFile == null) detailFile = textOrNull(sn, "detailFile");
+                                        if (sourceFile == null) sourceFile = textOrNull(sn, "sourceFile");
+                                        if (lineStart == 0) lineStart = intOrDefault(sn, "lineStart", 0);
+                                        if (lineEnd == 0) lineEnd = intOrDefault(sn, "lineEnd", 0);
+                                        if (counts == null) counts = sn.get("counts");
+                                        break;
+                                    }
+                                }
+                                if (detailFile == null && subNodes.size() > 0) {
+                                    detailFile = textOrNull(subNodes.get(0), "detailFile");
+                                }
+                            }
+                        } catch (IOException ignored) {}
+                    }
+
+                    ObjectNode nc = n.deepCopy();
+                    if (detailFile != null) nc.put("detailFile", detailFile);
+                    if (sourceFile != null) nc.put("sourceFile", sourceFile);
+                    if (lineStart > 0) nc.put("lineStart", lineStart);
+                    if (lineEnd > 0) nc.put("lineEnd", lineEnd);
+                    nc.put("depth", depth);
+                    if (counts != null) nc.set("counts", counts);
+                    enriched.add(nc);
+                }
+                copy.set("nodes", enriched);
+                return copy;
+            }
+        }
+        return raw;
+    }
+
+    JsonNode getNodeDetail(String name, String fileName) throws IOException {
+        ObjectMapper mapper = r.mapper;
+        // fileName comes from a REST path variable and becomes a key segment: guard traversal
+        // explicitly, since there is no base path left to compare against.
+        if (fileName == null || fileName.isBlank() || fileName.contains("..")
+                || fileName.contains("/") || fileName.contains("\\")) {
+            throw new IOException("Invalid node file name: " + fileName);
+        }
+        ArtifactKey file = r.resolveKey(name, "api/nodes/" + fileName);
+        if (r.store().exists(file)) return readTree(file);
+
+        // Package analysis: the node file lives in a proc subfolder
+        JsonNode index;
+        try { index = r.getIndex(name); } catch (IOException e) { index = mapper.createObjectNode(); }
+        if (!index.has("_packageAnalysis") || !index.get("_packageAnalysis").asBoolean()) {
+            throw new IOException("Node file not found: " + file);
+        }
+
+        for (ArtifactKey sub : CoreFileReader.subFolders(r.store(), AnalysisPaths.dirKey(name))) {
+            ArtifactKey candidate = sub.resolve("api").resolve("nodes").resolve(fileName);
+            if (r.store().exists(candidate)) return readTree(candidate);
+        }
+        throw new IOException("Node file not found in any subfolder: " + fileName);
+    }
+
+    /**
+     * MID-002 — {@code /index} without its {@code nodes} array, which measured at 53.1% of the
+     * response on this project's own largest analysis. {@code /procedures} already serves that same
+     * array (paged, searchable via {@code q}), so a client fetches it there instead of on every
+     * analysis load whether or not the sidebar is ever opened.
+     *
+     * <p>A field-reference copy, not {@code deepCopy()}: {@code deepCopy()} would clone the array
+     * being dropped before discarding it, which is the exact eager-materialisation shape this row
+     * exists to remove. Every other field on this document is a scalar or a small nested object, so
+     * sharing references for them costs nothing {@link #getIndex} isn't already paying.
+     */
+    JsonNode getIndexWithoutNodes(String name) throws IOException {
+        JsonNode full = r.getIndex(name);
+        if (full == null || !full.has("nodes")) return full;
+        ObjectMapper mapper = r.mapper;
+        ObjectNode copy = mapper.createObjectNode();
+        full.fields().forEachRemaining(e -> {
+            if (!"nodes".equals(e.getKey())) copy.set(e.getKey(), e.getValue());
+        });
+        return copy;
+    }
+
+    JsonNode getProcedures(String name) throws IOException {
+        ObjectMapper mapper = r.mapper;
+        JsonNode index = r.getIndex(name);
+        JsonNode nodes = index.get("nodes");
+        if (nodes == null || !nodes.isArray()) return mapper.createArrayNode();
+
+        // For package analyses, inject detailFile into nodes that don't have it
+        if (index.has("_packageAnalysis") && index.get("_packageAnalysis").asBoolean()) {
+            ArrayNode enriched = mapper.createArrayNode();
+            for (JsonNode n : nodes) {
+                if (n.has("detailFile")) { enriched.add(n); continue; }
+                // Look up the detailFile from the proc's own subfolder index
+                String subFolder = textOrNull(n, "subfolderName");
+                String detailFile = null;
+                if (subFolder != null) {
+                    try {
+                        JsonNode subIdx = r.getIndex(name + "/" + subFolder);
+                        JsonNode subNodes = subIdx.get("nodes");
+                        if (subNodes != null && subNodes.isArray()) {
+                            for (JsonNode sn : subNodes) {
+                                int d = sn.has("depth") ? sn.get("depth").asInt() : -1;
+                                if (d == 0) {
+                                    detailFile = textOrNull(sn, "detailFile");
+                                    if (detailFile != null) break;
+                                }
+                            }
+                            if (detailFile == null && subNodes.size() > 0) {
+                                detailFile = textOrNull(subNodes.get(0), "detailFile");
+                            }
+                        }
+                    } catch (IOException ignored) {}
+                }
+                if (detailFile != null) {
+                    ObjectNode copy = n.deepCopy();
+                    copy.put("detailFile", detailFile);
+                    enriched.add(copy);
+                } else {
+                    enriched.add(n);
+                }
+            }
+            return enriched;
+        }
+
+        return nodes;
+    }
+}

@@ -1,0 +1,299 @@
+/* ============================================================================
+ * UI polish for all parser list/table views (.to-table is the shared class).
+ * Addresses: (1) too much whitespace/sparse, (2) low text contrast,
+ * (3) column layout/truncation, (4) long cells not readable.
+ * Loaded last so it overrides per-view styles.
+ * ========================================================================== */
+
+/* (1) Density — tighter rows so more data fits and gaps shrink */
+.to-table th { padding: 6px 10px !important; line-height: 1.3; }
+.to-table td { padding: 5px 10px !important; line-height: 1.4; vertical-align: top; }
+.to-table { font-size: 12px; }
+
+/* Readability — zebra striping + clearer hover */
+.to-table tbody tr:nth-child(even) > td { background: var(--bg-hover); }
+.to-table tbody tr:hover > td,
+.to-table tr.to-row:hover td { background: var(--accent-subtle) !important; }
+
+/* (2) Contrast — line numbers / muted meta were too faint on white */
+.to-detail-line, .to-table .muted, .to-table td small { color: var(--text-secondary) !important; }
+.to-detail-proc { color: var(--accent); font-weight: 600; }
+
+/* (3) Column layout — long values wrap instead of overflowing or forcing wide gaps */
+.to-table td { overflow-wrap: anywhere; word-break: normal; }
+/* keep short identifier-ish columns from wrapping awkwardly */
+.to-table td.nowrap, .to-table th.nowrap { white-space: nowrap; }
+
+/* (4) Long cells — SQL / big text: monospace, wrapped, height-capped with scroll
+ * so one huge statement can't create a giant sparse row. */
+.sql-cell {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow: auto;
+    background: var(--bg-top-bar);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    margin: 2px 0;
+}
+
+/* Dynamic SQL cell: scrollable code block with a floating copy button. */
+.dyn-sql-wrap { position: relative; }
+.dyn-sql-code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre;
+    max-height: 220px;
+    overflow: auto;
+    background: var(--bg-top-bar);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 28px 6px 8px;
+    margin: 2px 0;
+}
+.dyn-sql-copy {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    font-size: 10px;
+    padding: 1px 6px;
+    opacity: 0.65;
+    z-index: 1;
+}
+.dyn-sql-copy:hover { opacity: 1; }
+.dyn-pager-top { margin-bottom: 6px; }
+
+/* Empty-state + count labels a touch clearer */
+.empty-msg { color: var(--text-secondary); padding: 16px; font-style: italic; }
+
+/* ── Inner scrolling for expandable / long panels ──────────────────────────
+ * Long lists (e.g. "Access Details (96)") were expanding the whole row and
+ * pushing the page; cap them and scroll internally instead. */
+/* Single fixed-size scroll box for the detail panel injected below a clicked
+ * table row (Access Details / Cursors / Joins / Complexity / Exception Handlers
+ * all share .to-detail). ONE scroller here — no nested per-section scrollbars. */
+.to-detail {
+    max-height: 380px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* keep the box a stable size so the page below doesn't jump on expand */
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-top-bar);
+    padding: 8px 10px;
+    margin: 2px 0 4px;
+}
+/* per-table detail view sections + join/usage lists elsewhere */
+.td-section, .td-access-list, .join-access-list, .usage-list { max-height: 46vh; overflow-y: auto; }
+/* modals (source popup, table popup, etc.) must not exceed the viewport */
+.src-modal-panel, .upload-modal-panel, .modal-panel, .cg-modal-panel {
+    max-height: 88vh; overflow: auto;
+}
+.src-modal-body, .modal-body { max-height: 72vh; overflow: auto; }
+/* Fullscreen source modal: the 72vh cap above was written for the normal-size modal
+ * (90vw x 85vh) and never accounted for cm-fullscreen (100vw x 100vh) growing the
+ * panel — so going fullscreen widened the panel (no width cap exists) but the inner
+ * scrollable code area stayed pinned at 72vh, i.e. WIDTH changed but HEIGHT did not.
+ * Let the code area fill the fullscreen panel's own flex height instead of the
+ * viewport-relative cap meant for the normal modal size. */
+.src-modal.cm-fullscreen .src-modal-body { max-height: none; }
+
+/* ── Perf-summary (analysis history) toolbar + datasource column + scroll ──── */
+.ps-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin: 10px 0 6px;
+}
+.ps-toolbar-title { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+.ps-toolbar-controls { display: flex; gap: 8px; margin-left: auto; }
+.ps-filter-select, .ps-filter-input {
+    font-size: 12px; padding: 4px 8px; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); background: var(--bg-card); color: var(--text-primary);
+}
+.ps-filter-input { min-width: 220px; }
+.ps-filter-select:focus, .ps-filter-input:focus { outline: none; border-color: var(--accent); }
+
+/* Datasource dialect badge */
+.ps-ds-badge {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .3px;
+    padding: 2px 8px; border-radius: var(--radius-lg); white-space: nowrap;
+}
+
+/* Scrollable table body — header stays visible, rows scroll internally */
+.ps-table-scroll { max-height: 60vh; overflow: auto; }
+.ps-table-scroll thead th {
+    position: sticky; top: 0; z-index: 1; background: var(--bg-secondary, var(--bg));
+}
+.ps-pager { margin-top: 8px; border-radius: var(--radius-sm); }
+
+/* Analysis History filter row (datasource + project dropdowns) */
+.home-filter-row { display: flex; gap: 8px; margin: 6px 0 4px; flex-wrap: wrap; }
+.home-filter-row .ps-filter-select { min-width: 150px; }
+/* datasource badge on history cards */
+.hc-env-badge.ds { background: var(--accent-subtle); color: var(--accent); font-weight: 700; }
+
+/* ── Floating FABs, shrunk to 40px so the bottom-left row (sidebar-toggle / help / theme)
+ * fits inside the 280px sidebar and never crosses into the main content. Matches the shared
+ * cluster layout (sidebar-toggle.css / help.css / mongodb-theme.css / chatbox.css):
+ * bottom-left = sidebar-toggle, help, theme; top-right = export, log (log-fab.css /
+ * .global-export-fab); bottom-right = chatbot, alone. TASK-REGISTRY §274 moved export+log
+ * from bottom-right to top-right and pulled chatbot out of the bottom-left row into
+ * bottom-right on its own, per explicit user direction.
+ * (!important — shared FAB CSS loads later.) */
+.sidebar-toggle-btn, .help-btn, .mdb-theme-toggle--floating {
+    bottom: 16px !important;
+    width: 40px !important;
+    height: 40px !important;
+    font-size: 16px !important;
+}
+.sidebar-toggle-btn               { left: 18px !important; }
+.help-btn                        { left: 66px !important; }
+.mdb-theme-toggle--floating      { left: 114px !important; }
+.chat-fab, .cbx-fab              {
+    bottom: 16px !important;
+    right: 18px !important;
+    width: 40px !important;
+    height: 40px !important;
+    font-size: 16px !important;
+}
+/* TASK-REGISTRY §275 — top no longer hardcoded: shared/floating-fab-position.js measures the
+   real topbar/detail-header per loaded procedure and drives --fab-top-offset at runtime. The
+   54px here is only the pre-measurement/no-header fallback (kept so there's no flash-of-wrong-
+   position before the script's first paint on this page). */
+.log-fab                         { top: var(--fab-top-offset, 54px) !important; width: 40px !important; height: 40px !important; font-size: 16px !important; right: 18px !important; }
+.global-export-fab               { top: var(--fab-top-offset, 54px) !important; right: 66px !important; height: 40px !important; }
+
+/* ── Parser-page fixes for the shared floating/inline buttons ───────────────
+ * 1. shared/sidebar-toggle.js deliberately gives the toggle a borrowed `help-btn` class (to
+ *    inherit its circular style). This page's own `.help-btn` rule (left: 66px !important,
+ *    above) then ALSO matches the toggle and pins it onto the real Help button — two buttons
+ *    stacked at x=66. The two-class selector out-specifies that rule and pins the toggle back
+ *    to its own slot.
+ * 2. shared/api-activity-panel.css spaces the API-activity button for the jar/home cluster
+ *    (left: 196px, bottom: 28px). This page's cluster is tighter (48px pitch, bottom: 16px),
+ *    so the button floated one slot too far right AND 12px too high — visibly out of the row.
+ *    Give it the next slot in THIS page's pitch and the shared baseline.
+ * 3. The Export button and log FAB are inline in .topbar-actions here (fab-inline reparenting),
+ *    but the shared CSS still sizes them as 40px FABs — twice the height of the 19px .btn-sm
+ *    they share the row with — so they bulged out of the bar. Shrink them to the row's scale. */
+.sidebar-toggle-btn.help-btn     { left: 18px !important; }
+.api-activity-btn                { left: 162px !important; bottom: 16px !important; width: 40px !important; height: 40px !important; }
+.topbar-actions .global-export-fab,
+.topbar-actions .log-fab         { height: 22px !important; padding: 2px 10px !important; font-size: 11px !important; border-radius: 11px !important; }
+.topbar-actions .log-fab         { width: 22px !important; padding: 2px !important; }
+.topbar-actions .log-fab svg     { width: 13px; height: 13px; }
+/* Keep the procedure list clear of the FAB rows (no overlap). */
+.left-panel-list { padding-bottom: 64px; }
+
+/* ── Minimized source modal: collapse to a small title bar (bottom-right), and
+ * make the backdrop non-blocking so the rest of the app stays usable. ──────── */
+.src-modal.cm-minimized {
+    position: fixed !important;
+    top: auto !important; left: auto !important; bottom: 16px; right: 16px;
+    width: 340px !important; height: auto !important;
+    min-height: 0 !important; max-height: none !important;
+    transform: none !important; resize: none;
+}
+.src-modal.cm-minimized .cm-body,
+.src-modal.cm-minimized .cm-info-bar,
+.src-modal.cm-minimized .cm-breadcrumb,
+.src-modal.cm-minimized .cm-search-bar { display: none !important; }
+.src-modal-overlay:has(.cm-minimized) { background: transparent !important; pointer-events: none !important; }
+.src-modal-overlay:has(.cm-minimized) .src-modal { pointer-events: auto !important; box-shadow: var(--shadow-lg); }
+
+/* ── Prompt Manager: contrast fixes (the base styles used a dark hover bg on the
+ * light parser UI → text was invisible) + grouped section titles. ─────────── */
+.pm-item { color: var(--text-primary, var(--text)); }
+.pm-item:hover  { background: var(--accent-subtle) !important; color: var(--text-primary, var(--text)); }
+.pm-item.active { background: var(--accent-subtle) !important; color: var(--text-primary, var(--text)); }
+.pm-col-title, .pm-item-name { color: var(--text-primary, var(--text)); }
+.pm-lbl { color: var(--text-secondary); }
+/* editors: dark text on white, visible selection */
+.pm-ta, #pmTemplateText, #pmCtxContext, #pmCtxAppend, #pmCtxTemplateText,
+#pmGlobalContext, #pmGlobalAppend {
+    color: var(--text-primary, var(--text)) !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+}
+.pm-ta::selection, .pm-ta *::selection { background: var(--accent); color: var(--text-inverse); }
+/* grouped section headers (Database Prompts / Java Prompts / Other) */
+.pm-group-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--text-secondary); padding: 8px 10px 4px; background: var(--bg-secondary, var(--bg));
+    position: sticky; top: 0; z-index: 1;
+}
+
+/* ── Prompt Manager + Analysis Context modals ──────────────────────────── */
+.pm-body { display: flex; gap: 14px; padding: 14px; overflow: auto; }
+.pm-col-list { width: 240px; flex: none; display: flex; flex-direction: column; min-height: 0; }
+.pm-col-edit { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.pm-col-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.pm-list { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.pm-item { display: flex; align-items: center; gap: 6px; padding: 7px 10px; cursor: pointer;
+    font-size: 12px; border-bottom: 1px solid var(--border); }
+.pm-item:hover { background: var(--bg-alt, var(--blue)); }
+.pm-item.active { background: var(--bg-alt, var(--blue)); border-left: 3px solid var(--accent, var(--accent)); }
+.pm-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-badge { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-inverse);
+    background: var(--accent, var(--accent)); border-radius: var(--radius-sm); padding: 1px 6px; }
+.pm-lbl { display: block; font-size: 11px; color: var(--text-muted); margin: 8px 0 3px; }
+.pm-ta { width: 100%; min-height: 90px; resize: vertical; font-family: ui-monospace, monospace;
+    font-size: 12px; line-height: 1.5; box-sizing: border-box; }
+.pm-ta-tall { min-height: 200px; }
+.pm-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.pm-status { font-size: 11px; color: var(--text-muted); }
+.pm-extras { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.pm-ctx-body { display: flex; flex-direction: column; padding: 14px; overflow: auto; }
+.pm-dialect { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+.pm-ctx-actions { margin-top: 12px; }
+
+/* ── Make Root control (call-tree rows) — always visible, high contrast ── */
+.ct-makeroot {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+    padding: 1px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-inverse);
+    background: var(--accent);              /* solid blue — visible on any row bg */
+    border: 1px solid var(--blue);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity .12s ease, background .12s ease;
+    white-space: nowrap;
+}
+.ct-row:hover .ct-makeroot { opacity: 1; }
+.ct-makeroot:hover { background: var(--blue); color: var(--text-inverse); }
+
+/* ── "Analysis Root" revert button (call-tree toolbar) ── */
+.btn-analysis-root {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 700;
+    color: var(--text-inverse) !important;
+    background: var(--orange) !important;   /* orange — stands out from the blue action buttons */
+    border: 1px solid var(--badge-orange) !important;
+}
+.btn-analysis-root:hover { filter: brightness(1.07); }
+
+/* §280 — Parser's own copy of the "keep typing…" hint (jar/style.css, plsql/css/style.css both
+ * already have this; Parser's Global Search port needs the same class). */
+.search-hint-active { border-color: var(--accent) !important; position: relative; }
+.search-hint-active::after {
+    content: "keep typing…";
+    position: absolute;
+    left: 0; top: calc(100% + 4px);
+    font-size: 10px;
+    color: var(--text-muted);
+    font-style: italic;
+    white-space: nowrap;
+    pointer-events: none;
+}

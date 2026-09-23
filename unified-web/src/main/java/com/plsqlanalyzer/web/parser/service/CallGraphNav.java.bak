@@ -1,0 +1,277 @@
+package com.plsqlanalyzer.web.parser.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import java.util.*;
+
+import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.*;
+
+/** Call-graph traversal + node-id resolution helpers. */
+class CallGraphNav {
+
+    /** One expanded call-site occurrence (a deduped edge split per recorded call line). */
+    private static final class Occurrence {
+        final String toId;
+        final JsonNode edge;
+        /** Call-site line in the PARENT's source; {@link Integer#MAX_VALUE} when unrecorded. */
+        final int line;
+        Occurrence(String toId, JsonNode edge, int line) {
+            this.toId = toId; this.edge = edge; this.line = line;
+        }
+    }
+
+    /** First recorded call line on an edge, or {@link Integer#MAX_VALUE} if none/invalid. */
+    private static int callLineOf(JsonNode edge) {
+        JsonNode lines = edge == null ? null : edge.get("lines");
+        if (lines != null && lines.isArray() && !lines.isEmpty()) {
+            int v = lines.get(0).asInt(0);
+            if (v > 0) return v;
+        }
+        return Integer.MAX_VALUE;
+    }
+
+    private final ObjectMapper mapper;
+
+    CallGraphNav(ObjectMapper mapper) {
+        this.mapper = mapper;
+    }
+
+    /** Schema portion of a "SCHEMA$NAME" node id, or "" if none. */
+    static String schemaFromNodeId(String nodeId) {
+        if (nodeId == null) return "";
+        int idx = nodeId.indexOf('$');
+        return idx > 0 ? nodeId.substring(0, idx) : "";
+    }
+
+    /**
+     * The ONE INTERNAL/EXTERNAL rule, shared by the downward call tree
+     * ({@link #buildCallTreeNode}, behind Explore &gt; Hierarchy/Trace) and the upward caller list
+     * ({@code CallTreeFacetReader#getCallers}, behind Explore &gt; References "Called By" and the
+     * source viewer's "Called By" panel).
+     *
+     * <p>These two used to classify the SAME edge with two different rules: the tree compared
+     * schemas with {@code equalsIgnoreCase} and fell back to node metadata / the {@code SCHEMA$NAME}
+     * id prefix when the edge carried no schema, while the caller list compared with
+     * case-sensitive {@code equals} and took its "from" schema from node metadata while taking
+     * "to" from the edge. Real data makes that disagree constantly: the Postgres/SQL Server
+     * crawlers record {@code fromSchema:"ERP"} but {@code toSchema:"erp"} (835 of 1011 Postgres
+     * edges, 273 of 337 SQL Server edges), so every one of those edges read INTERNAL going down
+     * and EXTERNAL coming back up. Same edge, same analysis, two answers. One method now.
+     *
+     * @param edge      the call edge (may carry fromSchema/toSchema/fromNodeId/toNodeId)
+     * @param toMeta    index metadata for the callee, or null
+     * @param toFullId  resolved callee node id, used for the {@code SCHEMA$NAME} prefix fallback
+     */
+    static String classifyCall(JsonNode edge, JsonNode toMeta, String toFullId) {
+        String fromSchema = textOrNull(edge, "fromSchema");
+        if (fromSchema == null || fromSchema.isBlank()) {
+            fromSchema = schemaFromNodeId(textOrNull(edge, "fromNodeId"));
+        }
+        String toSchema = textOrNull(edge, "toSchema");
+        if (toSchema == null || toSchema.isBlank()) {
+            toSchema = toMeta != null ? textOrDefault(toMeta, "schema", "") : "";
+        }
+        if (toSchema == null || toSchema.isBlank()) {
+            toSchema = schemaFromNodeId(toFullId);
+        }
+        boolean sameSchema = fromSchema != null && !fromSchema.isBlank()
+                && fromSchema.equalsIgnoreCase(toSchema);
+        return sameSchema ? "INTERNAL" : "EXTERNAL";
+    }
+
+    String resolveToFullId(String id, Map<String, String> shortToFull, Set<String> knownFullIds) {
+        if (id == null) return null;
+        if (knownFullIds.contains(id)) return id;
+        String mapped = shortToFull.get(id);
+        if (mapped != null && knownFullIds.contains(mapped)) return mapped;
+        for (String fullId : knownFullIds) {
+            if (fullId.startsWith(id + "_") || fullId.startsWith(id + "$")) return fullId;
+        }
+        return id;
+    }
+
+    /**
+     * MID-006 (real fix — UI-019/§141) — the node cap this class was believed to already have.
+     * {@code ParserAnalysisReader.MAX_CALL_TREE_NODES}/{@code TreeBudget} implemented this same cap
+     * years ago, but on a class never wired into the live reader chain
+     * ({@code AnalysisReaderFactory} never returns it — confirmed by grep, zero references outside
+     * its own file and two stale comments) — so {@code CallTreeCapTest} passed against dead code
+     * while this class, the one every real request actually reaches
+     * ({@code AnalysisService.getCallTree} → {@code StaticAnalysisReader}/{@code
+     * ClaudeAnalysisReader} → {@code CallTreeFacetReader} → here), recursed with no bound at all.
+     * The cycle guard below only breaks a <b>direct</b> cycle (`visited` is added/removed around
+     * each recursive call), so the same node reached by two different call paths is rebuilt in
+     * full, once per path — the identical shape to the JAR call-tree explosion already measured
+     * elsewhere in this registry (one endpoint, 300,167,238 nodes, from a source graph that looked
+     * equally harmless). Today's 52-procedure PL/SQL corpus tops out at 277 nodes for its worst
+     * root, which is why this went unnoticed here too.
+     */
+    static final int MAX_CALL_TREE_NODES = 2000;
+
+    /** Shared across one call to {@code getCallTree}, so the whole tree is capped, not each branch. */
+    static final class TreeBudget {
+        int left = MAX_CALL_TREE_NODES;
+        boolean truncated;
+    }
+
+    ObjectNode buildCallTreeNode(
+            String nodeId,
+            Map<String, JsonNode> nodeMetadata,
+            Map<String, List<JsonNode>> adjacency,
+            Map<String, String> shortToFull,
+            Set<String> visited,
+            JsonNode incomingEdge,
+            int depth,
+            TreeBudget budget) {
+        return buildCallTreeNode(nodeId, nodeMetadata, adjacency, shortToFull, visited, incomingEdge,
+                depth, budget, null);
+    }
+
+    /**
+     * UI-019 (§142) — {@code maxDepth} is the per-level lazy fetch this row has asked for since it
+     * was written: {@code null} means the pre-existing behaviour (recurse to the node-count budget,
+     * unbounded by depth); a real value stops recursion once {@code depth >= maxDepth} and marks the
+     * node {@code moreChildren}/{@code childCount} instead of building its subtree — the same
+     * "say so, don't just stop" convention {@code childrenTruncated} already uses for the node-count
+     * budget, so a client reading this tree cannot mistake "no more children" for "not fetched yet".
+     * A node cut here is not the same as {@code circular} or the node-count truncation: those two
+     * mean the data will never be fetched (a cycle, or the budget is spent); {@code moreChildren}
+     * means exactly the opposite — ask again, rooted at this node, for the next slice.
+     */
+    ObjectNode buildCallTreeNode(
+            String nodeId,
+            Map<String, JsonNode> nodeMetadata,
+            Map<String, List<JsonNode>> adjacency,
+            Map<String, String> shortToFull,
+            Set<String> visited,
+            JsonNode incomingEdge,
+            int depth,
+            TreeBudget budget,
+            Integer maxDepth) {
+
+        ObjectNode treeNode = mapper.createObjectNode();
+        String effectiveId = resolveToFullId(nodeId, shortToFull, nodeMetadata.keySet());
+        JsonNode meta = nodeMetadata.get(effectiveId);
+
+        treeNode.put("id", effectiveId);
+        treeNode.put("name", meta != null ? textOrDefault(meta, "name", nodeId) : nodeId);
+        treeNode.put("schemaName", meta != null ? textOrDefault(meta, "schema", "") : "");
+        treeNode.put("packageName", meta != null ? textOrDefault(meta, "packageName", "") : "");
+        treeNode.put("objectType", meta != null ? textOrDefault(meta, "objectType", "") : "");
+        treeNode.put("unitType", meta != null ? textOrDefault(meta, "objectType", "PROCEDURE") : "PROCEDURE");
+        treeNode.put("startLine", meta != null ? intOrDefault(meta, "lineStart", 0) : 0);
+        treeNode.put("endLine", meta != null ? intOrDefault(meta, "lineEnd", 0) : 0);
+        treeNode.put("sourceFile", meta != null ? textOrDefault(meta, "sourceFile", "") : "");
+        boolean readable = meta == null || !meta.has("readable") || meta.get("readable").asBoolean(true);
+        treeNode.put("readable", readable);
+
+        if (incomingEdge != null) {
+            // Prefer schemas on the edge; fall back to node metadata / nodeId prefix
+            // (SCHEMA$NAME). Non-Oracle dialects (no packages) often omit edge schemas,
+            // which previously made every call default to EXTERNAL.
+            // Shared with getCallers so both directions of the same edge agree — see classifyCall.
+            treeNode.put("callType", classifyCall(incomingEdge, meta, effectiveId));
+            JsonNode lines = incomingEdge.get("lines");
+            if (lines != null && lines.isArray() && !lines.isEmpty()) {
+                treeNode.put("callLineNumber", lines.get(0).asInt());
+            } else {
+                treeNode.put("callLineNumber", 0);
+            }
+        } else {
+            treeNode.put("callType", "ROOT");
+            treeNode.put("callLineNumber", 0);
+        }
+
+        if (visited.contains(effectiveId)) {
+            treeNode.put("circular", true);
+            treeNode.set("children", mapper.createArrayNode());
+            return treeNode;
+        }
+
+        visited.add(effectiveId);
+
+        ArrayNode children = mapper.createArrayNode();
+        List<JsonNode> outEdges = adjacency.get(effectiveId);
+        if (outEdges != null && !outEdges.isEmpty()) {
+            // BUG-FIX (repeated-call collapse): call_graph.json's edges are deduplicated by
+            // ChunkedFlowWriter#writeCallGraph — one entry per distinct (from,to,nodeId) key, with
+            // every call-site's line number folded into that entry's own "lines" array (and a
+            // "count" of occurrences). That dedup is correct for the call-graph VIEWER (one visual
+            // edge per from->to pair), but this tree builder was treating each deduped edge as a
+            // single call SITE too, so a procedure called 10 times from the same caller produced
+            // only ONE child node instead of 10 — the exact "only shows once in Trace/Hierarchy"
+            // report. Fix: expand each edge into one call-site occurrence per recorded line (or a
+            // single occurrence if no lines were recorded), each becoming its own child node with
+            // its own callLineNumber, while still expanding/recursing into the target's own body
+            // (the `visited` set below) only once per node — that BFS re-expansion guard is correct
+            // and untouched; only edge/occurrence recording was wrongly collapsed.
+            List<Occurrence> occurrences = new ArrayList<>();
+            for (JsonNode edge : outEdges) {
+                String toId = textOrNull(edge, "toNodeId");
+                if (toId == null) continue;
+                JsonNode linesNode = edge.get("lines");
+                if (linesNode != null && linesNode.isArray() && linesNode.size() > 1) {
+                    for (JsonNode lineVal : linesNode) {
+                        ObjectNode edgeForLine = edge.deepCopy();
+                        ArrayNode oneLine = mapper.createArrayNode();
+                        oneLine.add(lineVal.asInt());
+                        edgeForLine.set("lines", oneLine);
+                        occurrences.add(new Occurrence(toId, edgeForLine, lineVal.asInt(0) > 0
+                                ? lineVal.asInt(0) : Integer.MAX_VALUE));
+                    }
+                } else {
+                    occurrences.add(new Occurrence(toId, edge, callLineOf(edge)));
+                }
+            }
+
+            // BUG-FIX (call order): call_graph.json stores ONE deduped edge per (from,to) pair with
+            // every call site folded into its "lines" array, so the expansion above emits all N
+            // calls to the same target back-to-back — i.e. children came out grouped by callee
+            // NAME, then by line within each group. A call at line 7 therefore rendered *after*
+            // thirty calls that happen at lines 34-263, destroying the real execution sequence.
+            // The stored artifact's dedup is correct for the call-graph viewer (one visual edge per
+            // pair), so the ordering belongs here, at the point the edges are expanded back into
+            // call SITES: sort every occurrence by its own call-site line in the parent's source,
+            // regardless of target identity. Stable sort, so occurrences with no recorded line
+            // (MAX_VALUE) sink to the end in their original edge order rather than claiming line 0
+            // and jumping to the front. This also improves the node-budget cut below, which now
+            // drops the LAST calls in the routine instead of an arbitrary name-grouped tail.
+            occurrences.sort(Comparator.comparingInt(o -> o.line));
+
+            if (maxDepth != null && depth >= maxDepth) {
+                // Real children exist, but this slice stops here — distinct from childrenTruncated
+                // (budget exhausted, never coming) and circular (a cycle, never coming either): this
+                // one means "ask again, rooted at this node, for the next slice."
+                treeNode.put("moreChildren", true);
+                treeNode.put("childCount", occurrences.size());
+            } else {
+                int built = 0;
+                for (Occurrence occ : occurrences) {
+                    if (budget.left <= 0) {
+                        // childrenTruncated / omittedChildCount — the exact pair both call-tree
+                        // renderers (parser/js/callGraph.js, plsql/js/callGraph.js) already read and
+                        // render a badge for. The UI half of MID-006 was built; the live server half
+                        // was the missing piece (see this method's own budget field doc comment).
+                        treeNode.put("childrenTruncated", true);
+                        treeNode.put("omittedChildCount", occurrences.size() - built);
+                        budget.truncated = true;
+                        break;
+                    }
+                    String fullToId = resolveToFullId(occ.toId, shortToFull, nodeMetadata.keySet());
+                    budget.left--;
+                    built++;
+                    ObjectNode child = buildCallTreeNode(fullToId, nodeMetadata, adjacency, shortToFull,
+                            visited, occ.edge, depth + 1, budget, maxDepth);
+                    children.add(child);
+                }
+            }
+        }
+
+        treeNode.set("children", children);
+        visited.remove(effectiveId);
+        return treeNode;
+    }
+}

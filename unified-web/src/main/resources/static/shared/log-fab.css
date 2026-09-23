@@ -1,0 +1,141 @@
+/* Log FAB — part of the shared top-right action cluster (export, log), grouped together
+   opposite the bottom-left cluster (sidebar-toggle, help, theme) and the chatbot (floats
+   alone bottom-right). TASK-REGISTRY §274 moved this cluster from bottom-right to top-right
+   per explicit user direction. */
+.log-fab {
+    position: fixed;
+    /* TASK-REGISTRY §275 — top now driven by shared/floating-fab-position.js (measures the
+       real topbar/detail-header content per page); 60px fallback applies only pre-measurement
+       or on screens with no header container. */
+    top: var(--fab-top-offset, 60px);
+    right: 28px;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--green);
+    color: var(--text-inverse);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 20px var(--focus-ring);
+    transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
+    z-index: 1100;
+}
+
+/* TASK-REGISTRY §276 — see the matching `.fab-inline.global-export-fab` rule in
+ * shared/mongodb-theme.css for why: un-fixes position so this becomes a normal flow child of
+ * whatever header container shared/inline-fab.js reparents it into. */
+.fab-inline.log-fab {
+    position: static;
+    width: 32px;
+    height: 32px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+.log-fab:hover { background: var(--green); color: var(--text-inverse); transform: translateY(-2px); box-shadow: 0 6px 24px var(--focus-ring); }
+.log-fab:active { transform: translateY(0); }
+.log-fab.log-fab-active { background: var(--green); color: var(--text-inverse); }
+
+/* Log overlay */
+.log-fab-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--bg-overlay);
+    z-index: 10000;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 24px;
+}
+.log-fab-panel {
+    width: 100%;
+    max-width: 1200px;
+    height: 60vh;
+    background: var(--sidebar-bg);
+    border-radius: 12px 12px 0 0;
+    display: flex;
+    flex-direction: column;
+    box-shadow: var(--shadow-up);
+    overflow: hidden;
+}
+.log-fab-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--sidebar-bg);
+    border-bottom: 1px solid var(--sidebar-border);
+}
+.log-fab-title {
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--sidebar-text);
+}
+.log-fab-meta {
+    font-size: 11px;
+    color: var(--sidebar-muted);
+    margin-right: auto;
+}
+.log-fab-btn {
+    padding: 4px 10px;
+    background: var(--sidebar-hover);
+    border: 1px solid var(--sidebar-border);
+    border-radius: var(--radius);
+    color: var(--sidebar-text);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.12s;
+}
+.log-fab-btn:hover { background: var(--sidebar-hover); }
+.log-fab-auto-label {
+    font-size: 11px;
+    color: var(--sidebar-muted);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+.log-fab-filter-bar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--sidebar-bg);
+    border-bottom: 1px solid var(--sidebar-border);
+}
+.log-fab-filter {
+    flex: 1;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 12px;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--sidebar-border);
+    color: var(--sidebar-text);
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    outline: none;
+}
+.log-fab-filter::placeholder { color: var(--sidebar-muted); }
+.log-fab-filter:focus { border-color: var(--accent); }
+.log-fab-level-select {
+    background: var(--sidebar-bg);
+    border: 1px solid var(--sidebar-border);
+    color: var(--sidebar-text);
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    width: 100px;
+}
+.log-fab-content {
+    flex: 1;
+    overflow: auto;
+    padding: 12px 16px;
+    margin: 0;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--badge-green);
+    background: var(--sidebar-bg);
+    white-space: pre-wrap;
+    word-break: break-all;
+}

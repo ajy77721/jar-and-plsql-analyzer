@@ -1,0 +1,126 @@
+===OBJECT:analyzerdb.run_order:PROCEDURE===
+CREATE DEFINER=`root`@`localhost` PROCEDURE `run_order`(IN p_order_id INT)
+BEGIN
+    CALL process_order(p_order_id);
+    CALL mgr_chain(1);
+END
+===END===
+===OBJECT:analyzerdb.process_order:PROCEDURE===
+CREATE DEFINER=`root`@`localhost` PROCEDURE `process_order`(IN p_order_id INT)
+BEGIN
+    DECLARE done INT DEFAULT 0;
+    DECLARE v_pid INT;
+    DECLARE v_qty INT;
+    DECLARE v_total DECIMAL(12,2);
+    DECLARE v_sql TEXT;
+    -- explicit cursor with join
+    DECLARE c_lines CURSOR FOR
+        SELECT ol.product_id, ol.qty
+        FROM my_order_line ol JOIN my_product p ON p.id = ol.product_id
+        WHERE ol.order_id = p_order_id;
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+
+    OPEN c_lines;
+    read_loop: LOOP
+        FETCH c_lines INTO v_pid, v_qty;
+        IF done THEN LEAVE read_loop; END IF;
+    END LOOP;
+    CLOSE c_lines;
+
+    CALL add_line(p_order_id, 1, 5);
+    SET v_total = fn_order_total(p_order_id);
+
+    -- dynamic SQL via PREPARE/EXECUTE
+    SET @sql = CONCAT('UPDATE my_order SET total = ', v_total, ', status = ''PRICED'' WHERE id = ', p_order_id);
+    PREPARE stmt FROM @sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+END
+===END===
+===OBJECT:analyzerdb.add_line:PROCEDURE===
+CREATE DEFINER=`root`@`localhost` PROCEDURE `add_line`(IN p_order_id INT, IN p_product_id INT, IN p_qty INT)
+BEGIN
+    DECLARE v_price DECIMAL(10,2);
+    SELECT price INTO v_price FROM my_product WHERE id = p_product_id;
+    INSERT INTO my_order_line(order_id, product_id, qty, line_total)
+    VALUES (p_order_id, p_product_id, p_qty, v_price * p_qty);
+END
+===END===
+===OBJECT:analyzerdb.mgr_chain:PROCEDURE===
+CREATE DEFINER=`root`@`localhost` PROCEDURE `mgr_chain`(IN p_customer_id INT)
+BEGIN
+    WITH RECURSIVE chain AS (
+        SELECT id, name, mgr_id, 1 AS lvl FROM my_customer WHERE id = p_customer_id
+        UNION ALL
+        SELECT c.id, c.name, c.mgr_id, ch.lvl + 1
+        FROM my_customer c JOIN chain ch ON c.id = ch.mgr_id
+    )
+    SELECT * FROM chain;
+END
+===END===
+===OBJECT:analyzerdb.fn_tax:FUNCTION===
+CREATE DEFINER=`root`@`localhost` FUNCTION `fn_tax`(p_amount DECIMAL(12,2)) RETURNS decimal(12,2)
+    DETERMINISTIC
+BEGIN
+    RETURN IFNULL(p_amount,0) * 0.08;
+END
+===END===
+===OBJECT:analyzerdb.fn_order_total:FUNCTION===
+CREATE DEFINER=`root`@`localhost` FUNCTION `fn_order_total`(p_order_id INT) RETURNS decimal(12,2)
+    DETERMINISTIC
+BEGIN
+    DECLARE v_total DECIMAL(12,2);
+    SELECT IFNULL(SUM(ol.qty * p.price),0) INTO v_total
+    FROM my_order_line ol
+    JOIN my_product p ON p.id = ol.product_id
+    WHERE ol.order_id = p_order_id;
+    RETURN v_total + fn_tax(v_total);
+END
+===END===
+===OBJECT:analyzerdb.erp_fn_line_amount:FUNCTION===
+CREATE DEFINER=`root`@`localhost` FUNCTION `erp_fn_line_amount`(p_qty DECIMAL(18,4), p_price DECIMAL(15,4)) RETURNS decimal(18,2)
+    DETERMINISTIC
+BEGIN
+  DECLARE v_gross DECIMAL(18,2);
+  DECLARE v_disc  DECIMAL(6,4);
+  SET v_disc = erp_fn_discount_rate(CAST(p_qty AS SIGNED));
+  SET v_gross = p_qty * p_price;
+  RETURN ROUND(v_gross * (1 - v_disc), 2);
+END
+===END===
+===OBJECT:analyzerdb.erp_usp_explode_bom:PROCEDURE===
+CREATE DEFINER=`root`@`localhost` PROCEDURE `erp_usp_explode_bom`(
+  IN p_wo_id INT,
+  IN p_product_id INT,
+  IN p_qty DECIMAL(18,4),
+  IN p_order_id INT)
+BEGIN
+  -- clear prior requirements
+  DELETE FROM erp_wo_material WHERE wo_id = p_wo_id;
+
+  -- WITH RECURSIVE explosion of multi-level BOM
+  INSERT INTO erp_wo_material (wo_id, component_id, qty_required, qty_issued)
+  WITH RECURSIVE bom_tree AS (
+    SELECT bl.component_id AS component_id,
+           CAST(bl.qty_per * p_qty AS DECIMAL(18,4)) AS ext_qty,
+           1 AS lvl
+      FROM erp_bom b
+      JOIN erp_bom_line bl ON bl.bom_id = b.bom_id
+     WHERE b.product_id = p_product_id
+    UNION ALL
+    SELECT bl.component_id,
+           CAST(bt.ext_qty * bl.qty_per AS DECIMAL(18,4)),
+           bt.lvl + 1
+      FROM bom_tree bt
+      JOIN erp_bom b  ON b.product_id = bt.component_id
+      JOIN erp_bom_line bl ON bl.bom_id = b.bom_id
+     WHERE bt.lvl < 10
+  )
+  SELECT p_wo_id, component_id, SUM(ext_qty), 0
+    FROM bom_tree
+   GROUP BY component_id;
+
+  CALL erp_usp_audit_log('WORKORDER', p_wo_id, 'EXPLODE', CONCAT('product ', p_product_id));
+  CALL erp_usp_issue_materials(p_wo_id, p_order_id);
+END
+===END===

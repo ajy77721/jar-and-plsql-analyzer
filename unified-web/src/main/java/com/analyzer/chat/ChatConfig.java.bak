@@ -1,0 +1,130 @@
+package com.analyzer.chat;
+
+import com.plsqlanalyzer.web.config.ConfigDirService;
+import com.plsqlanalyzer.web.service.ClaudeProcessRunner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+@Configuration
+public class ChatConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(ChatConfig.class);
+
+    /**
+     * Chat's own {@link ClaudeProcessRunner} — deliberately NOT the shared {@code
+     * plsqlClaudeProcessRunner} bean the verification feature uses (see AppConfig.java). The
+     * chatbot is the one place in this app that lets Claude write and run arbitrary scripts on the
+     * user's request, so it gets its own sandboxed working directory and a PreToolUse guard hook
+     * that the verification runner (which never writes/runs anything) does not need and should not
+     * be changed to carry.
+     *
+     * Protection layer, concretely:
+     *   1. Working directory = {@code data/claude-chatbot-workspace}, NOT the app's own repo root
+     *      (which is what an unset working directory silently defaults to via ProcessBuilder). A
+     *      script Claude writes and runs here can only ever touch this sandbox, never the app's
+     *      real source or other data.
+     *   2. {@code allowedTools} adds "Write,Edit" (previously only Read/Grep/Glob/Bash — script
+     *      creation was already technically possible via a Bash heredoc, just not through a tool
+     *      call this hook could see cleanly).
+     *   3. A `.claude/settings.json` dropped into that sandbox wires up
+     *      scripts/claude-hooks/chat-guard.py as a PreToolUse hook — Claude Code CLI auto-loads
+     *      this file from the process's own working directory. The hook inspects every Bash
+     *      command and every Write/Edit's new file content (plus, when a Bash command runs a
+     *      script file, that file's own on-disk content) for destructive patterns — rm -rf, kill,
+     *      DROP/DELETE/TRUNCATE/UPDATE SQL, force-push, chmod 777, pymongo delete/drop/update
+     *      calls, etc. — and denies the tool call outright (exit code 2) if it matches. This is the
+     *      actual enforcement; `allowedTools` alone only gates WHICH tool, never WHAT it does.
+     */
+    @Bean("chatClaudeProcessRunner")
+    public ClaudeProcessRunner chatClaudeProcessRunner(
+            @Qualifier("plsqlClaudeProcessRunner") ClaudeProcessRunner verificationRunner,
+            ConfigDirService configDirService) {
+        ClaudeProcessRunner runner = new ClaudeProcessRunner();
+        // Same auth/env story as the verification runner (local CLI login, or Bedrock if that's
+        // how this deployment is configured) — copied rather than shared so the two stay
+        // independently configurable, but there is no reason for chat to authenticate differently.
+        runner.setAllowedTools("Read,Write,Edit,Grep,Glob,Bash");
+
+        File workspace = ensureChatWorkspace(configDirService);
+        runner.setWorkingDirectory(workspace);
+
+        return runner;
+    }
+
+    private File ensureChatWorkspace(ConfigDirService configDirService) {
+        Path workspace = configDirService.getDataDir().resolve("claude-chatbot-workspace");
+        Path claudeDir = workspace.resolve(".claude");
+        Path outputDir = workspace.resolve("output");
+        try {
+            Files.createDirectories(claudeDir);
+            Files.createDirectories(outputDir);
+
+            // Absolute path to the guard hook — the hook script lives in the repo's own
+            // scripts/claude-hooks/, not inside the sandbox (Claude must not be able to overwrite
+            // its own guardrail by writing into the sandbox it's confined to).
+            Path repoRoot = Path.of("").toAbsolutePath(); // JVM cwd == repo root (see how this app is normally launched)
+            Path hookScript = repoRoot.resolve("scripts/claude-hooks/chat-guard.py").normalize();
+
+            String settingsJson = "{\n"
+                    + "  \"hooks\": {\n"
+                    + "    \"PreToolUse\": [\n"
+                    + "      {\n"
+                    // Read|Glob|Grep added after a real, confirmed leak: the assistant could Read
+                    // an absolute path straight to the app's own DB-credentials config file
+                    // (plaintext passwords) — the sandbox's cwd was never actually enforced as a
+                    // read boundary until chat-guard.py's _is_outside_sandbox check (added for
+                    // exactly this) started being consulted for these three tools too.
+                    + "        \"matcher\": \"Bash|Write|Edit|Read|Glob|Grep\",\n"
+                    + "        \"hooks\": [\n"
+                    // The hook command is a shell command line, run via `sh -c`, so the script
+                    // path itself needs SHELL quoting (not just JSON string escaping) — this repo
+                    // lives under a path containing a space ("new proj"), which without quotes
+                    // splits into two words and makes the interpreter treat the first half as the
+                    // script to run, silently breaking the hook (confirmed live: every single tool
+                    // call was denied because "python3 .../new" failed to parse as a script at
+                    // all, not because anything matched a deny pattern).
+                    + "          { \"type\": \"command\", \"command\": \"python3 " + jsonEscape("\"" + hookScript + "\"") + "\" }\n"
+                    + "        ]\n"
+                    + "      }\n"
+                    + "    ]\n"
+                    + "  }\n"
+                    + "}\n";
+            Files.writeString(claudeDir.resolve("settings.json"), settingsJson, StandardCharsets.UTF_8);
+
+            log.info("Chat sandbox ready: {} (guard hook: {})", workspace, hookScript);
+        } catch (IOException e) {
+            // Fail loud but not fatal-to-boot: chat degrades to whatever the CLI's own default
+            // behavior is for a missing settings file (which is "no hook", i.e. back to
+            // allowedTools-only gating) rather than taking the whole app down over a sandbox dir
+            // that could not be created.
+            log.error("Could not set up chat sandbox/guard hook at {}: {}", workspace, e.getMessage(), e);
+        }
+        return workspace.toFile();
+    }
+
+    private static String jsonEscape(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    @Bean
+    public ChatService chatService(
+            @Qualifier("chatClaudeProcessRunner") ClaudeProcessRunner processRunner,
+            com.analyzer.storage.ArtifactStore store,
+            ConfigDirService configDirService) {
+        // Re-derive the same workspace path chatClaudeProcessRunner() computed (not injected
+        // directly, since ClaudeProcessRunner has no getter for it and adding one would widen that
+        // shared class's API for a single caller) — ChatService needs the path to notice generated
+        // scripts; ensureChatWorkspace() is idempotent, so calling it again here is harmless.
+        File workspace = ensureChatWorkspace(configDirService);
+        return new ChatService(processRunner, store, workspace);
+    }
+}

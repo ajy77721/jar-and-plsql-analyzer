@@ -1,0 +1,3898 @@
+{
+ "used": [
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/endpoints/by-index/{idx}/call-tree",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/summary",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/summary/headers",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/summary/external-calls",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/summary/dynamic-flows",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/summary/aggregation-flows",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/summary/beans",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/classes/tree",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/classes/by-index/{idx}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/claude-enrich-single",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/claude-rescan",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/claude-full-scan",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/claude-correct",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/claude-correct-single",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/catalog",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/war/wars/{id}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/revert-claude",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/versions",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/corrections",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/corrections/{endpoint}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/correction-logs/{endpointName}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/correction-logs",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/correction-logs/file/{fileName}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/run-logs",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/run-logs/{logName}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/kill-sessions",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/sessions",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/sessions/{sessionId}/kill",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{name}/claude-stats",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{name}/claude-stats/{sessionId}",
+   "controller": "WarAnalyzerController.java",
+   "callers": [
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/config/complexity",
+   "controller": "ParserConfigController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/config/join-complexity",
+   "controller": "ParserConfigController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "parser/js/claudeEnrichment.js",
+    "parser/js/claudeSessions.js",
+    "parser/js/history.js",
+    "parser/js/sync.js",
+    "parser/js/txnTrace.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/facets",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/errors",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyze",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/cache/clear",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/cache/by-connection",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/cacheManager.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/cache/clear-connection",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/cacheManager.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/parser/analyses/{name}",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "parser/js/claudeEnrichment.js",
+    "parser/js/claudeSessions.js",
+    "parser/js/history.js",
+    "parser/js/sync.js",
+    "parser/js/txnTrace.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/index",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/node/{file}",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/tables",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "parser/js/txnTrace.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/tables/summary",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/call-graph",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/source/{file}",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/procedures",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/joins",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/joins/summary",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/cursors",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/cursors/summary",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/sequences",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/sequences/summary",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/dynamic-sql",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/dynamic-sql/summary",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/call-tree/{nodeId}",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/call-tree/{nodeId}/callers",
+   "controller": "ParserAnalysisController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/config",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/claude.js"
+   ]
+  },
+  {
+   "verb": "PATCH",
+   "path": "/api/parser/config",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/claude.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/verify",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/progress",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "parser/js/claudeEnrichment.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/progress/stream",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/claudeEnrichment.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/result",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/verification-summary",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/chunks",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/chunks/summary",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/chunks/{id}",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/table-chunks",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/review",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/apply",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/sessions/{sessionId}/kill",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "parser/js/claudeSessions.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/versions",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/versions/load-static",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/versions/load-claude",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/versions/load-prev",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/analyses/{name}/claude/versions/revert",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/claude/status",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/claude/sessions",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/claudeSessions.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/claude/stats",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/claudeSessions.js",
+    "parser/js/home.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/stats",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/claudeSessions.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/stats/{sessionId}",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/claudeSessions.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/parser/claude/sessions/kill-all",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "parser/js/claudeSessions.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/users",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/db/test",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/objects",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js",
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/objects/{username}",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js",
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/source/{username}/{objectName}",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/connections",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/packages/{username}",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/package/{username}/{packageName}",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/find/{objectInput}",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/table-info/{tableName}",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "parser/js/api.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/db/query",
+   "controller": "DatabaseController.java",
+   "callers": [
+    "parser/js/queryRunner.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/export-config",
+   "controller": "ConfigController.java",
+   "callers": [
+    "plsql/js/summary-export-excel.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/projects",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "parser/js/home.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/config/projects",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "parser/js/home.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "PUT",
+   "path": "/api/plsql/config/projects/{name}",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "parser/js/home.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/plsql/config/projects/{name}",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "parser/js/home.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/projects/{projectName}/environments",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/config/projects/{projectName}/environments",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "PUT",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}/connections",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}/connections/test",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}/connections",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "PUT",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}/connections/{connName}",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}/connections/{connName}",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js",
+    "parser/js/config.js",
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/config/test-connection",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/conn-test.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/projects/{projectName}/environments/{envName}/quick-test",
+   "controller": "ConfigController.java",
+   "callers": [
+    "parser/js/app.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/resolve",
+   "controller": "ConfigController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/status",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/verify",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/progress",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/progress/stream",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/result",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/result/{analysisName}",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/chunks",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/chunks/summary",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/chunks/{chunkId}",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/table-chunks",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/sessions",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/sessions/{sessionId}/kill",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/sessions/kill-all",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/claude/versions",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/versions/load-static",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/versions/load-claude",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/versions/load-prev",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/claude/versions/revert",
+   "controller": "ClaudeController.java",
+   "callers": [
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/logs",
+   "controller": "LogController.java",
+   "callers": [
+    "parser/js/logViewer.js",
+    "plsql/js/logViewer.js",
+    "shared/log-fab.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/analysis/analyze",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/analysis/analyze-fast",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/history",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/history/{name}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/plsql/analysis/history/{name}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/history/{name}/connections",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/versions",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/call-graph",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/detail/{procName:.+}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js",
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/call-tree/{procName:.+}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/call-tree/{procName:.+}/callers",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/tables",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/tables/{tableName}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/tables/{tableName}/metadata",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/tables/{tableName}/triggers",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/sequences",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/joins",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/cursors",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/errors",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js",
+    "plsql/js/app.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/procedures",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/source/{owner}/{objectName:.+}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/references/{objectName:.+}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/search",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/prompt-config/templates",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/prompt-config/templates/{name}",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/prompt-config/templates/{name}/reset",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/prompt-config/extras",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/prompt-config/extras",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/prompt-config/analysis/{name}",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/prompt-config/analysis/{name}",
+   "controller": "PromptConfigController.java",
+   "callers": [
+    "parser/js/promptManager.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/chat/config",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-toggle.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/chat/sessions",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/chat/sessions",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/chat/sessions/{id}",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/chat/sessions/{id}/messages",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/chat/sessions/{id}",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/chat/sessions/{id}/messages",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/chat/sessions/{id}/report",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/chat/files/read",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/chat/files/write",
+   "controller": "ChatController.java",
+   "callers": [
+    "shared/chat-api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/config/polling",
+   "controller": "PollingConfigController.java",
+   "callers": [
+    "shared/poll-config.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/sessions/running",
+   "controller": "GlobalSessionsController.java",
+   "callers": [
+    "jar/js/api.js",
+    "war/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/queue/{id}",
+   "controller": "QueueController.java",
+   "callers": [
+    "jar/js/app.js",
+    "jar/js/targeted.js",
+    "parser/js/history.js",
+    "parser/js/perfSummary.js",
+    "plsql/js/api.js",
+    "plsql/js/app.js",
+    "plsql/js/claude.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/queue/{id}/cancel",
+   "controller": "QueueController.java",
+   "callers": [
+    "jar/js/app.js",
+    "parser/js/perfSummary.js",
+    "plsql/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/queue/events",
+   "controller": "QueueController.java",
+   "callers": [
+    "jar/js/app.js",
+    "parser/js/history.js",
+    "plsql/js/app.js",
+    "plsql/js/claude.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/claude-status",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs/{jobId}",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs/{jobId}/status",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs/{jobId}/log",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs/{jobId}/live",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs/{jobId}/instruction",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/conversion/jobs/{jobId}/report",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/conversion/validate",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/conversion/fix",
+   "controller": "ConversionController.java",
+   "callers": [
+    "conversion/index.html (inline)"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/logs",
+   "controller": "LogController.java",
+   "callers": [
+    "jar/js/logviewer.js",
+    "shared/log-fab.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/claude-status",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/flow-analysis.js",
+    "jar/js/summary-claude.js",
+    "jar/js/summary-corrections.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/flow/run",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/flow-analysis.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/flow/status/{runId}",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/flow-analysis.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/flow/report/{runId}",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/flow-analysis.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/flow/history",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/flow-analysis.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/flow/env-profiles",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/flow-analysis.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/flow/test-connection",
+   "controller": "FlowAnalysisController.java",
+   "callers": [
+    "jar/js/flow-analysis.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/decompile",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/codeTree.js",
+    "jar/js/codeTreePanel.js",
+    "jar/js/summary-codeview.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/settings/claude-status",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/claude-progress",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/summary-claude.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/claude-fragments",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/summary-claude.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/claude-fragments/{filename}",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/summary-claude.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/endpoints",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/codeTree.js",
+    "jar/js/summary-trace.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/endpoints/{endpoint}/nodes",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/summary-trace.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/endpoints/{endpoint}/nodes/{nodeId}",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/summary-trace.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/endpoints/{endpoint}/call-tree",
+   "controller": "DecompileController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/domain-config",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/domain-config",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/analyze-targeted",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/targeted.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/codeTree.js",
+    "jar/js/codeTreePanel.js",
+    "jar/js/flow-analysis.js",
+    "jar/js/summary-claude.js",
+    "jar/js/summary-codeview.js",
+    "jar/js/summary-corrections.js",
+    "jar/js/summary-trace.js",
+    "parser/js/sync.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/endpoints/by-index/{idx}/call-tree",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/collections/call-paths",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/header",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/endpoints",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/headers",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/external-calls",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/dynamic-flows",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/aggregation-flows",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/summary/beans",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/classes/tree",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/classes/by-index/{idx}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/export-excel",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/summary-export-excel.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/claude-enrich-single",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/claude-rescan",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/catalog",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/jar/jars/{id}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/codeTree.js",
+    "jar/js/codeTreePanel.js",
+    "jar/js/flow-analysis.js",
+    "jar/js/summary-claude.js",
+    "jar/js/summary-codeview.js",
+    "jar/js/summary-corrections.js",
+    "jar/js/summary-trace.js",
+    "parser/js/sync.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/versions",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/collections",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/revert-claude",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/claude-full-scan",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/claude-correct",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/claude-correct-single",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/connections",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/corrections",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/summary-corrections.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/corrections/{endpoint}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/summary-corrections.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/correction-logs/{endpointName}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/correction-logs",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/correction-logs/file/{fileName}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/run-logs",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/run-logs/{logName}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/kill-sessions",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/sessions",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/sessions/{sessionId}/kill",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{name}/claude-stats",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{name}/claude-stats/{sessionId}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/resources",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/codeTree.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/resources/{filename:.+}",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/codeTree.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/bundled-jars",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js",
+    "jar/js/codeTree.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/bundled-jars/content",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/api.js"
+   ]
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/jar-dep-map",
+   "controller": "AnalyzerController.java",
+   "callers": [
+    "jar/js/codeTree.js"
+   ]
+  }
+ ],
+ "unused": [
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/analyze-local",
+   "controller": "WarAnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/fetch-catalog",
+   "controller": "WarAnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/war/wars/{id}/collections",
+   "controller": "WarAnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/reanalyze-all",
+   "controller": "WarAnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/{id}/reanalyze",
+   "controller": "WarAnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/war/wars/export-excel",
+   "controller": "WarAnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/resolver/{type}",
+   "controller": "ParserAnalysisController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/table-joins",
+   "controller": "TableDetailController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/table-joins/summary",
+   "controller": "TableDetailController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/table-columns",
+   "controller": "TableDetailController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/table-columns/summary",
+   "controller": "TableDetailController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/entities/tables/{table}/nodes",
+   "controller": "PlsqlEntityQueryController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/entities/nodes/{nodeId}",
+   "controller": "PlsqlEntityQueryController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/entities/nodes/{nodeId}/edges",
+   "controller": "PlsqlEntityQueryController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/parser/analyses/{name}/claude/call-log",
+   "controller": "ClaudeController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/db/cached-source",
+   "controller": "DatabaseController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/dir",
+   "controller": "ConfigController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/config/schemas",
+   "controller": "ConfigController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/docs/{id}",
+   "controller": "DocsController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/jobs",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/analysis/jobs/{jobId}",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/plsql/analysis/jobs/{jobId}/cancel",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/plsql/source/file",
+   "controller": "SourceController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/sessions/summary",
+   "controller": "GlobalSessionsController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/sessions/claude-stats",
+   "controller": "GlobalSessionsController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/auth/login",
+   "controller": "AuthController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/auth/logout",
+   "controller": "AuthController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/auth/status",
+   "controller": "AuthController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/queue/reorder",
+   "controller": "QueueController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/external-links",
+   "controller": "ExternalApiLinkController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/external-links/pending",
+   "controller": "ExternalApiLinkController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/external-links/resolve",
+   "controller": "ExternalApiLinkController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/conversion/convert",
+   "controller": "ConversionController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jars/{id}/chat",
+   "controller": "ChatboxController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jars/{id}/chat/history",
+   "controller": "ChatboxController.java",
+   "callers": []
+  },
+  {
+   "verb": "DELETE",
+   "path": "/api/jars/{id}/chat/history",
+   "controller": "ChatboxController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/{id}/flow/result/{runId}",
+   "controller": "FlowAnalysisController.java",
+   "callers": []
+  },
+  {
+   "verb": "GET",
+   "path": "/api/jar/jars/settings/claude-test",
+   "controller": "DecompileController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/analyze-local",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/fetch-catalog",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/reanalyze-all",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  },
+  {
+   "verb": "POST",
+   "path": "/api/jar/jars/{id}/reanalyze",
+   "controller": "AnalyzerController.java",
+   "callers": []
+  }
+ ],
+ "unbounded": [
+  [
+   "jar/js/callGraph.js",
+   114
+  ],
+  [
+   "jar/js/summary-tables.js",
+   745
+  ],
+  [
+   "jar/js/summary-tables.js",
+   1364
+  ],
+  [
+   "jar/js/summary-tables.js",
+   1380
+  ],
+  [
+   "jar/js/summary-tables.js",
+   1382
+  ],
+  [
+   "jar/js/endpointList.js",
+   119
+  ],
+  [
+   "jar/js/endpointList.js",
+   139
+  ],
+  [
+   "jar/js/endpointList.js",
+   146
+  ],
+  [
+   "jar/js/endpointList.js",
+   155
+  ],
+  [
+   "jar/js/codeTreePanel.js",
+   58
+  ],
+  [
+   "jar/js/codeTreePanel.js",
+   139
+  ],
+  [
+   "jar/js/sidebar.js",
+   20
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   46
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   162
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   179
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   300
+  ],
+  [
+   "jar/js/summary-vert-popup.js",
+   290
+  ],
+  [
+   "jar/js/summary-col-filter.js",
+   51
+  ],
+  [
+   "jar/js/summary-col-filter.js",
+   101
+  ],
+  [
+   "jar/js/codeTree.js",
+   300
+  ],
+  [
+   "jar/js/codeTree.js",
+   340
+  ],
+  [
+   "jar/js/codeTree.js",
+   711
+  ],
+  [
+   "jar/js/codeTree.js",
+   1171
+  ],
+  [
+   "jar/js/summary.js",
+   96
+  ],
+  [
+   "jar/js/summary.js",
+   262
+  ],
+  [
+   "jar/js/summary.js",
+   635
+  ],
+  [
+   "jar/js/dashboard.js",
+   77
+  ],
+  [
+   "jar/js/dashboard.js",
+   103
+  ],
+  [
+   "jar/js/dashboard.js",
+   115
+  ],
+  [
+   "jar/js/dashboard.js",
+   124
+  ],
+  [
+   "jar/js/summary-claude.js",
+   423
+  ],
+  [
+   "jar/js/summary-claude.js",
+   616
+  ],
+  [
+   "jar/js/summary-claude.js",
+   731
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   214
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   926
+  ],
+  [
+   "jar/js/summary-corr-logbrowser.js",
+   115
+  ],
+  [
+   "jar/js/summary-corr-logbrowser.js",
+   119
+  ],
+  [
+   "jar/js/summary-corr-logbrowser.js",
+   121
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   235
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   300
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   375
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   381
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   390
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   560
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   571
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   595
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   597
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   601
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   603
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   622
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   625
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   638
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   639
+  ],
+  [
+   "jar/js/nav.js",
+   117
+  ],
+  [
+   "jar/js/app.js",
+   230
+  ],
+  [
+   "jar/js/app.js",
+   371
+  ],
+  [
+   "jar/js/app.js",
+   719
+  ],
+  [
+   "jar/js/app.js",
+   720
+  ],
+  [
+   "jar/js/app.js",
+   789
+  ],
+  [
+   "jar/js/app.js",
+   804
+  ],
+  [
+   "jar/js/app.js",
+   806
+  ],
+  [
+   "jar/js/app.js",
+   808
+  ],
+  [
+   "jar/js/app.js",
+   953
+  ],
+  [
+   "jar/js/summary-lifecycle.js",
+   97
+  ],
+  [
+   "jar/js/summary-corrections.js",
+   101
+  ],
+  [
+   "jar/js/summary-corrections.js",
+   114
+  ],
+  [
+   "shared/chatbox.js",
+   346
+  ],
+  [
+   "shared/help.js",
+   53
+  ],
+  [
+   "shared/help.js",
+   54
+  ],
+  [
+   "shared/chat.js",
+   186
+  ],
+  [
+   "shared/chat.js",
+   313
+  ],
+  [
+   "shared/chat.js",
+   347
+  ],
+  [
+   "shared/chat.js",
+   348
+  ],
+  [
+   "shared/chat.js",
+   435
+  ],
+  [
+   "shared/chat.js",
+   569
+  ],
+  [
+   "shared/chat.js",
+   622
+  ],
+  [
+   "parser/js/cursors.js",
+   140
+  ],
+  [
+   "parser/js/promptManager.js",
+   138
+  ],
+  [
+   "parser/js/promptManager.js",
+   139
+  ],
+  [
+   "parser/js/promptManager.js",
+   149
+  ],
+  [
+   "parser/js/joins.js",
+   75
+  ],
+  [
+   "parser/js/callGraph.js",
+   332
+  ],
+  [
+   "parser/js/callGraph.js",
+   347
+  ],
+  [
+   "parser/js/callGraph.js",
+   350
+  ],
+  [
+   "parser/js/callGraph.js",
+   364
+  ],
+  [
+   "parser/js/callGraph.js",
+   369
+  ],
+  [
+   "parser/js/tableFramework.js",
+   524
+  ],
+  [
+   "parser/js/sequences.js",
+   95
+  ],
+  [
+   "parser/js/detailHeader.js",
+   315
+  ],
+  [
+   "parser/js/home.js",
+   177
+  ],
+  [
+   "parser/js/home.js",
+   190
+  ],
+  [
+   "parser/js/callGraphViz.js",
+   671
+  ],
+  [
+   "parser/js/statements.js",
+   158
+  ],
+  [
+   "parser/js/statements.js",
+   194
+  ],
+  [
+   "parser/js/router.js",
+   34
+  ],
+  [
+   "parser/js/router.js",
+   39
+  ],
+  [
+   "parser/js/history.js",
+   30
+  ],
+  [
+   "parser/js/perfSummary.js",
+   402
+  ],
+  [
+   "parser/js/perfSummary.js",
+   410
+  ],
+  [
+   "parser/js/perfSummary.js",
+   423
+  ],
+  [
+   "parser/js/cacheManager.js",
+   94
+  ],
+  [
+   "parser/js/tableOps.js",
+   97
+  ],
+  [
+   "parser/js/refs.js",
+   32
+  ],
+  [
+   "parser/js/refs.js",
+   175
+  ],
+  [
+   "parser/js/refs.js",
+   186
+  ],
+  [
+   "parser/js/joinSummary.js",
+   973
+  ],
+  [
+   "plsql/js/cursors.js",
+   107
+  ],
+  [
+   "plsql/js/cursors.js",
+   144
+  ],
+  [
+   "plsql/js/joins.js",
+   106
+  ],
+  [
+   "plsql/js/joins.js",
+   143
+  ],
+  [
+   "plsql/js/callGraph.js",
+   177
+  ],
+  [
+   "plsql/js/callGraph.js",
+   180
+  ],
+  [
+   "plsql/js/callGraph.js",
+   186
+  ],
+  [
+   "plsql/js/callGraph.js",
+   191
+  ],
+  [
+   "plsql/js/callGraph.js",
+   273
+  ],
+  [
+   "plsql/js/claude.js",
+   299
+  ],
+  [
+   "plsql/js/claude.js",
+   546
+  ],
+  [
+   "plsql/js/claude.js",
+   960
+  ],
+  [
+   "plsql/js/claude.js",
+   1192
+  ],
+  [
+   "plsql/js/claude.js",
+   1212
+  ],
+  [
+   "plsql/js/claude.js",
+   1217
+  ],
+  [
+   "plsql/js/claude.js",
+   1243
+  ],
+  [
+   "plsql/js/claude.js",
+   1248
+  ],
+  [
+   "plsql/js/claude.js",
+   1271
+  ],
+  [
+   "plsql/js/claude.js",
+   1277
+  ],
+  [
+   "plsql/js/claude.js",
+   1318
+  ],
+  [
+   "plsql/js/claude.js",
+   1404
+  ],
+  [
+   "plsql/js/claude.js",
+   1406
+  ],
+  [
+   "plsql/js/summary-helpers.js",
+   642
+  ],
+  [
+   "plsql/js/predicates.js",
+   146
+  ],
+  [
+   "plsql/js/predicates.js",
+   185
+  ],
+  [
+   "plsql/js/tableFramework.js",
+   278
+  ],
+  [
+   "plsql/js/tableFramework.js",
+   324
+  ],
+  [
+   "plsql/js/config.js",
+   37
+  ],
+  [
+   "plsql/js/config.js",
+   57
+  ],
+  [
+   "plsql/js/config.js",
+   80
+  ],
+  [
+   "plsql/js/config.js",
+   120
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   115
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   157
+  ],
+  [
+   "plsql/js/summary-col-filter.js",
+   49
+  ],
+  [
+   "plsql/js/summary-col-filter.js",
+   94
+  ],
+  [
+   "plsql/js/summary.js",
+   117
+  ],
+  [
+   "plsql/js/summary.js",
+   244
+  ],
+  [
+   "plsql/js/summary.js",
+   252
+  ],
+  [
+   "plsql/js/summary.js",
+   274
+  ],
+  [
+   "plsql/js/tableOps.js",
+   92
+  ],
+  [
+   "plsql/js/app.js",
+   334
+  ],
+  [
+   "plsql/js/app.js",
+   440
+  ],
+  [
+   "plsql/js/app.js",
+   498
+  ],
+  [
+   "plsql/js/app.js",
+   504
+  ],
+  [
+   "plsql/js/app.js",
+   670
+  ],
+  [
+   "plsql/js/app.js",
+   687
+  ],
+  [
+   "plsql/js/app.js",
+   692
+  ],
+  [
+   "plsql/js/app.js",
+   1123
+  ],
+  [
+   "plsql/js/app.js",
+   1125
+  ],
+  [
+   "plsql/js/app.js",
+   1139
+  ],
+  [
+   "plsql/js/app.js",
+   1147
+  ],
+  [
+   "plsql/js/app.js",
+   1157
+  ],
+  [
+   "plsql/js/app.js",
+   1166
+  ],
+  [
+   "plsql/js/app.js",
+   1170
+  ],
+  [
+   "plsql/js/app.js",
+   1555
+  ],
+  [
+   "plsql/js/app.js",
+   1680
+  ],
+  [
+   "plsql/js/app.js",
+   1691
+  ],
+  [
+   "plsql/js/app.js",
+   1695
+  ],
+  [
+   "plsql/js/app.js",
+   1739
+  ],
+  [
+   "plsql/js/app.js",
+   1940
+  ],
+  [
+   "plsql/js/app.js",
+   2118
+  ],
+  [
+   "plsql/js/app.js",
+   2136
+  ],
+  [
+   "plsql/js/app.js",
+   2724
+  ],
+  [
+   "plsql/js/app.js",
+   2730
+  ],
+  [
+   "plsql/js/app.js",
+   3189
+  ],
+  [
+   "plsql/js/app.js",
+   3314
+  ],
+  [
+   "plsql/js/app.js",
+   3316
+  ],
+  [
+   "plsql/js/app.js",
+   3328
+  ],
+  [
+   "plsql/js/app.js",
+   3329
+  ],
+  [
+   "plsql/js/app.js",
+   3340
+  ],
+  [
+   "plsql/js/app.js",
+   3344
+  ],
+  [
+   "plsql/js/app.js",
+   3387
+  ],
+  [
+   "plsql/js/app.js",
+   3427
+  ],
+  [
+   "plsql/js/app.js",
+   3429
+  ],
+  [
+   "plsql/js/app.js",
+   3448
+  ],
+  [
+   "plsql/js/app.js",
+   3693
+  ],
+  [
+   "plsql/js/app.js",
+   3702
+  ],
+  [
+   "plsql/js/app.js",
+   3743
+  ],
+  [
+   "plsql/js/app.js",
+   3796
+  ],
+  [
+   "plsql/js/app.js",
+   3815
+  ],
+  [
+   "plsql/js/app.js",
+   3908
+  ]
+ ],
+ "length_counts": [
+  [
+   "jar/js/callGraph.js",
+   496,
+   "candidates"
+  ],
+  [
+   "jar/js/callGraph.js",
+   532,
+   "candidates"
+  ],
+  [
+   "jar/js/callGraph.js",
+   532,
+   "candidates"
+  ],
+  [
+   "jar/js/callGraph.js",
+   544,
+   "candidates"
+  ],
+  [
+   "jar/js/summary-helpers.js",
+   696,
+   "filtered"
+  ],
+  [
+   "jar/js/summary-helpers.js",
+   696,
+   "filtered"
+  ],
+  [
+   "jar/js/summary-helpers.js",
+   696,
+   "filtered"
+  ],
+  [
+   "jar/js/summary-tables.js",
+   388,
+   "httpCalls"
+  ],
+  [
+   "jar/js/summary-tables.js",
+   463,
+   "arr"
+  ],
+  [
+   "jar/js/summary-tables.js",
+   509,
+   "exts"
+  ],
+  [
+   "jar/js/summary-tables.js",
+   1182,
+   "deps"
+  ],
+  [
+   "jar/js/endpointList.js",
+   78,
+   "filtered"
+  ],
+  [
+   "jar/js/summary-explorer.js",
+   303,
+   "children"
+  ],
+  [
+   "jar/js/summary-explorer.js",
+   338,
+   "childColls"
+  ],
+  [
+   "jar/js/summary-explorer.js",
+   339,
+   "children"
+  ],
+  [
+   "jar/js/summary-explorer.js",
+   431,
+   "allColls"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   33,
+   "ep"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   37,
+   "vert"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   59,
+   "crossModule"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   67,
+   "batch"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   137,
+   "items"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   156,
+   "views"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   181,
+   "ep"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   204,
+   "vert"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   205,
+   "ep"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   214,
+   "colls"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   214,
+   "eps"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   223,
+   "colls"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   224,
+   "eps"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   236,
+   "crossEps"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   237,
+   "crossModule"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   263,
+   "required"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   264,
+   "single"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   265,
+   "none"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   278,
+   "write"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   281,
+   "read"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   567,
+   "methods"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   632,
+   "batch"
+  ],
+  [
+   "jar/js/summary-popups.js",
+   647,
+   "colls"
+  ],
+  [
+   "jar/js/sessions.js",
+   114,
+   "sessions"
+  ],
+  [
+   "jar/js/sidebar.js",
+   76,
+   "others"
+  ],
+  [
+   "jar/js/sidebar.js",
+   76,
+   "others"
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   227,
+   "sorted"
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   249,
+   "httpMethods"
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   260,
+   "methods"
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   261,
+   "fields"
+  ],
+  [
+   "jar/js/codeTreeViews.js",
+   294,
+   "main"
+  ],
+  [
+   "jar/js/summary-vert-popup.js",
+   105,
+   "callers"
+  ],
+  [
+   "jar/js/summary-vert-popup.js",
+   105,
+   "callers"
+  ],
+  [
+   "jar/js/summary-vert-popup.js",
+   146,
+   "eps"
+  ],
+  [
+   "jar/js/summary-vert-popup.js",
+   146,
+   "eps"
+  ],
+  [
+   "jar/js/summary-vert-popup.js",
+   167,
+   "endpoints"
+  ],
+  [
+   "jar/js/codeTree.js",
+   169,
+   "files"
+  ],
+  [
+   "jar/js/codeTree.js",
+   177,
+   "_resources"
+  ],
+  [
+   "jar/js/codeTree.js",
+   183,
+   "_resources"
+  ],
+  [
+   "jar/js/codeTree.js",
+   293,
+   "jarClasses"
+  ],
+  [
+   "jar/js/codeTree.js",
+   334,
+   "jarClasses"
+  ],
+  [
+   "jar/js/codeTree.js",
+   718,
+   "_history"
+  ],
+  [
+   "jar/js/codeTree.js",
+   769,
+   "classes"
+  ],
+  [
+   "jar/js/codeTree.js",
+   978,
+   "invocations"
+  ],
+  [
+   "jar/js/codeTree.js",
+   1096,
+   "_bundledJars"
+  ],
+  [
+   "jar/js/codeTree.js",
+   1102,
+   "_bundledJars"
+  ],
+  [
+   "jar/js/codeTree.js",
+   1163,
+   "appClasses"
+  ],
+  [
+   "jar/js/codeTree.js",
+   1209,
+   "invocations"
+  ],
+  [
+   "jar/js/summary.js",
+   235,
+   "epReports"
+  ],
+  [
+   "jar/js/summary.js",
+   263,
+   "epReports"
+  ],
+  [
+   "jar/js/summary-claude.js",
+   133,
+   "arr"
+  ],
+  [
+   "jar/js/summary-claude.js",
+   179,
+   "exts"
+  ],
+  [
+   "jar/js/summary-claude.js",
+   311,
+   "errors"
+  ],
+  [
+   "jar/js/summary-claude.js",
+   456,
+   "frags"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   78,
+   "ep"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   79,
+   "vert"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   80,
+   "views"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   82,
+   "batch"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   88,
+   "ep"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   89,
+   "vert"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   90,
+   "dist"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   91,
+   "batch"
+  ],
+  [
+   "jar/js/summary-export-modal.js",
+   92,
+   "views"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   172,
+   "impls"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   172,
+   "impls"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   372,
+   "_codeStack"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   387,
+   "_codeStack"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   387,
+   "_codeStack"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   641,
+   "impls"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   871,
+   "impls"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   1016,
+   "matches"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   1135,
+   "matches"
+  ],
+  [
+   "jar/js/summary-codeview.js",
+   1192,
+   "calls"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   87,
+   "endpoints"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   239,
+   "profiles"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   239,
+   "profiles"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   407,
+   "endpoints"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   765,
+   "results"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   765,
+   "results"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   771,
+   "allLogs"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   771,
+   "allLogs"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   775,
+   "runLog"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   844,
+   "allLogs"
+  ],
+  [
+   "jar/js/flow-analysis.js",
+   844,
+   "allLogs"
+  ],
+  [
+   "jar/js/app.js",
+   804,
+   "parts"
+  ],
+  [
+   "jar/js/app.js",
+   804,
+   "parts"
+  ],
+  [
+   "jar/js/app.js",
+   924,
+   "bp"
+  ],
+  [
+   "jar/js/app.js",
+   938,
+   "domainEntries"
+  ],
+  [
+   "shared/chat.js",
+   511,
+   "content"
+  ],
+  [
+   "plsql/js/cursors.js",
+   279,
+   "queryText"
+  ],
+  [
+   "plsql/js/joins.js",
+   263,
+   "onPredicate"
+  ],
+  [
+   "plsql/js/claude.js",
+   760,
+   "chunkIds"
+  ],
+  [
+   "plsql/js/claude.js",
+   913,
+   "all"
+  ],
+  [
+   "plsql/js/claude.js",
+   918,
+   "filtered"
+  ],
+  [
+   "plsql/js/claude.js",
+   1290,
+   "lines"
+  ],
+  [
+   "plsql/js/summary-helpers.js",
+   282,
+   "filtered"
+  ],
+  [
+   "plsql/js/summary-helpers.js",
+   282,
+   "filtered"
+  ],
+  [
+   "plsql/js/summary-helpers.js",
+   282,
+   "filtered"
+  ],
+  [
+   "plsql/js/summary-trace.js",
+   46,
+   "flatNodes"
+  ],
+  [
+   "plsql/js/summary-trace.js",
+   52,
+   "flatNodes"
+  ],
+  [
+   "plsql/js/predicates.js",
+   298,
+   "items"
+  ],
+  [
+   "plsql/js/summary-explorer.js",
+   99,
+   "children"
+  ],
+  [
+   "plsql/js/summary-explorer.js",
+   117,
+   "childTables"
+  ],
+  [
+   "plsql/js/summary-explorer.js",
+   118,
+   "children"
+  ],
+  [
+   "plsql/js/summary-explorer.js",
+   163,
+   "allTables"
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   75,
+   "refTables"
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   102,
+   "calledProcs"
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   129,
+   "procs"
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   167,
+   "lines"
+  ],
+  [
+   "plsql/js/triggerModal.js",
+   178,
+   "strPlaceholders"
+  ],
+  [
+   "plsql/js/summary.js",
+   91,
+   "procReports"
+  ],
+  [
+   "plsql/js/summary.js",
+   118,
+   "procReports"
+  ],
+  [
+   "plsql/js/tableOps.js",
+   164,
+   "enabledTriggers"
+  ],
+  [
+   "plsql/js/tableOps.js",
+   164,
+   "enabledTriggers"
+  ],
+  [
+   "plsql/js/summary-claude.js",
+   218,
+   "tables"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   50,
+   "proc"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   52,
+   "batch"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   53,
+   "slice"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   54,
+   "ext"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   60,
+   "proc"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   62,
+   "txn"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   63,
+   "batch"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   64,
+   "slice"
+  ],
+  [
+   "plsql/js/summary-export-modal.js",
+   65,
+   "ext"
+  ],
+  [
+   "plsql/js/app.js",
+   382,
+   "claudeSessions"
+  ],
+  [
+   "plsql/js/app.js",
+   382,
+   "claudeSessions"
+  ],
+  [
+   "plsql/js/app.js",
+   474,
+   "errors"
+  ],
+  [
+   "plsql/js/app.js",
+   1620,
+   "children"
+  ],
+  [
+   "plsql/js/app.js",
+   1663,
+   "procedures"
+  ],
+  [
+   "plsql/js/app.js",
+   1711,
+   "sorted"
+  ],
+  [
+   "plsql/js/app.js",
+   1995,
+   "params"
+  ],
+  [
+   "plsql/js/app.js",
+   1996,
+   "vars"
+  ],
+  [
+   "plsql/js/app.js",
+   1998,
+   "tables"
+  ],
+  [
+   "plsql/js/app.js",
+   1999,
+   "calls"
+  ],
+  [
+   "plsql/js/app.js",
+   2178,
+   "calledBy"
+  ],
+  [
+   "plsql/js/app.js",
+   2213,
+   "calls"
+  ],
+  [
+   "plsql/js/app.js",
+   3364,
+   "items"
+  ],
+  [
+   "plsql/js/app.js",
+   3583,
+   "lines"
+  ],
+  [
+   "plsql/js/app.js",
+   3875,
+   "queued"
+  ],
+  [
+   "plsql/js/app.js",
+   3890,
+   "history"
+  ]
+ ]
+}

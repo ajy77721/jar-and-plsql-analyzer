@@ -1,0 +1,15 @@
+You are analyzing a large endpoint flow in a Java application that uses MongoDB, broken into {{TOTAL_CHUNKS}} chunks.
+This is chunk {{CHUNK_INDEX}}/{{TOTAL_CHUNKS}}.
+IMPORTANT: Each node contains 'sourceCode' -- this is ACTUAL decompiled Java code from CFR, not synthetic. Analyze the real code for accuracy.
+
+{{CHUNK_TYPE_DESCRIPTION}}
+
+For MongoDB operations: identify collections via MongoTemplate, Spring Data repositories, @Document annotations, and aggregation pipelines.
+
+Respond with JSON: {procName, riskFlags, collections, transactionRequired, crossDomainDependencies}.
+
+Cluster context:
+{{CLUSTER_CONTEXT}}
+
+Chunk data:
+{{CHUNK_DATA}}

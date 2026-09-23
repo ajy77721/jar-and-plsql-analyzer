@@ -1,0 +1,387 @@
+package com.plsqlanalyzer.web.parser.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.plsqlanalyzer.web.parser.service.ClaudePurposeSummaryModels.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Service;
+
+import com.analyzer.storage.ArtifactEntry;
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+
+/**
+ * §267 — chunked Claude CLI PURPOSE-SUMMARIZATION of parsed procedures.
+ *
+ * <p>Reuses the exact pattern {@link ClaudeVerificationService} established (CLI auth via
+ * {@link ClaudeProcessRunner}, chunked prompts via a dedicated prompt builder, results cached as
+ * artifacts) but for an unrelated question: not "is this static finding still correct" but "what
+ * does this procedure do". One Claude call covers a small BATCH of procedures (not one call per
+ * procedure, and not one call per statement) — call volume stays comparable to what verification
+ * already issues per analysis.
+ *
+ * <p>Cache: one JSON artifact per node under {@code plsql/<name>/claude/purpose/<safeNodeId>.json},
+ * keyed by the node's own {@code sourceDigest} (SHA-256 of the exact source snippet last sent to
+ * Claude) — a fresh generation run only re-asks Claude for nodes whose digest changed since the
+ * cached entry was written, exactly the "regenerate only if the procedure's source changed"
+ * contract this feature was built to. There was no pre-existing sourceDigest/hash utility in this
+ * codebase to reuse (checked: {@code NodeParseCache} invalidates by a hardcoded schema-version
+ * constant bumped by hand, not a content hash) — so this is a new, minimal, self-contained one.
+ */
+@Service("parserClaudePurposeSummaryService")
+public class ClaudePurposeSummaryService {
+
+    private static final Logger log = LoggerFactory.getLogger(ClaudePurposeSummaryService.class);
+
+    /** Procedures per Claude CLI call — small, so one prompt/response stays cheap and fast. */
+    private static final int TARGETS_PER_CHUNK = 8;
+    private static final int MAX_SOURCE_LINES = 400;
+    private static final int DEFAULT_TIMEOUT_SECONDS = 300;
+
+    private final ClaudeProcessRunner processRunner;
+    private final StaticAnalysisReader staticReader;
+    private final ClaudePurposePromptBuilder promptBuilder;
+    private final ArtifactStore store;
+    private final ObjectMapper mapper;
+
+    public ClaudePurposeSummaryService(ClaudeProcessRunner processRunner,
+                                        StaticAnalysisReader staticReader,
+                                        @Qualifier("parserArtifactStore") ArtifactStore store) {
+        this.processRunner = processRunner;
+        this.staticReader = staticReader;
+        this.promptBuilder = new ClaudePurposePromptBuilder();
+        this.store = Objects.requireNonNull(store, "ArtifactStore is required");
+        this.mapper = new ObjectMapper();
+        this.mapper.enable(SerializationFeature.INDENT_OUTPUT);
+    }
+
+    private ArtifactKey purposeDir(String analysisName) {
+        return AnalysisPaths.claudeFileKey(analysisName, "purpose");
+    }
+
+    /** File-safe encoding of a nodeId — nodeIds can contain characters a storage key rejects. */
+    private static String safeFileName(String nodeId) {
+        String safe = nodeId.replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.length() > 120) safe = safe.substring(0, 120);
+        return safe + ".json";
+    }
+
+    private static String sha256(String text) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(text.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
+    }
+
+    // ==================== PUBLIC READ API ====================
+
+    /** All cached purpose summaries for an analysis, keyed by nodeId. Never regenerates. */
+    public Map<String, PurposeCacheEntry> getSummaries(String analysisName) {
+        Map<String, PurposeCacheEntry> result = new LinkedHashMap<>();
+        ArtifactKey dir = purposeDir(analysisName);
+        Map<ArtifactKey, ArtifactEntry> stat;
+        try {
+            stat = store.statPrefix(dir);
+        } catch (IOException e) {
+            return result;
+        }
+        for (ArtifactKey key : stat.keySet()) {
+            if (!key.leaf().endsWith(".json")) continue;
+            try (InputStream in = store.read(key)) {
+                PurposeCacheEntry entry = mapper.readValue(in, PurposeCacheEntry.class);
+                if (entry.nodeId != null) result.put(entry.nodeId, entry);
+            } catch (IOException e) {
+                log.debug("Cannot read purpose cache entry {}: {}", key, e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    /** One cached entry, or null. */
+    public PurposeCacheEntry getSummary(String analysisName, String nodeId) {
+        ArtifactKey file = purposeDir(analysisName).resolve(safeFileName(nodeId));
+        if (!store.exists(file)) return null;
+        try (InputStream in = store.read(file)) {
+            return mapper.readValue(in, PurposeCacheEntry.class);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    // ==================== GENERATION ====================
+
+    /**
+     * Generate (or refresh stale) purpose summaries for every procedure in an analysis.
+     * Idempotent/resumable: a node whose cached entry's sourceDigest still matches is skipped —
+     * this is the "only regenerate if source changed" cache contract.
+     */
+    public PurposeSummaryRunResult generate(String analysisName, Consumer<String> progressCallback) {
+        PurposeSummaryRunResult result = new PurposeSummaryRunResult();
+        result.analysisName = analysisName;
+        long start = System.currentTimeMillis();
+
+        List<PurposeTarget> targets;
+        try {
+            targets = loadTargets(analysisName);
+        } catch (Exception e) {
+            result.error = "Failed to load analysis data: " + e.getMessage();
+            return result;
+        }
+        result.totalProcedures = targets.size();
+        progress(progressCallback, "[1/3] Loaded " + targets.size() + " procedures");
+
+        List<PurposeTarget> pending = new ArrayList<>();
+        for (PurposeTarget t : targets) {
+            PurposeCacheEntry cached = getSummary(analysisName, t.nodeId);
+            if (cached != null && t.sourceDigest.equals(cached.sourceDigest)) {
+                result.skippedCached++;
+            } else {
+                pending.add(t);
+            }
+        }
+        progress(progressCallback, "[2/3] " + pending.size() + " need (re)generation, "
+                + result.skippedCached + " already cached and unchanged");
+
+        List<PurposeChunk> chunks = chunk(pending);
+        AtomicInteger done = new AtomicInteger(0);
+        for (PurposeChunk c : chunks) {
+            if (Thread.currentThread().isInterrupted()) break;
+            String prompt = promptBuilder.buildPrompt(c);
+            int timeout = DEFAULT_TIMEOUT_SECONDS + c.targets.size() * 15;
+            String sessionId = UUID.randomUUID().toString();
+            result.claudeCallCount++;
+            long t0 = System.currentTimeMillis();
+            String response = processRunner.run(prompt, sessionId, timeout);
+            result.claudeTimeMs += System.currentTimeMillis() - t0;
+
+            if (response == null || response.isBlank()) {
+                result.failed += c.targets.size();
+                progress(progressCallback, "[3/3] Chunk " + c.id + ": no response from Claude");
+                continue;
+            }
+
+            Map<String, ProcedurePurpose> parsed = parseResponse(response);
+            for (PurposeTarget t : c.targets) {
+                ProcedurePurpose pp = parsed.get(t.nodeId);
+                if (pp == null || pp.purposeSummary == null || pp.purposeSummary.isBlank()) {
+                    result.failed++;
+                    continue;
+                }
+                PurposeCacheEntry entry = new PurposeCacheEntry();
+                entry.nodeId = t.nodeId;
+                entry.purposeSummary = pp.purposeSummary;
+                entry.perStatement = pp.perStatement;
+                entry.sourceDigest = t.sourceDigest;
+                entry.generatedAt = LocalDateTime.now().toString();
+                saveEntry(analysisName, entry);
+                result.generated++;
+            }
+            progress(progressCallback, "[3/3] Chunk " + c.id + " (" + done.incrementAndGet()
+                    + "/" + chunks.size() + "): " + c.targets.size() + " procedures processed");
+        }
+
+        progress(progressCallback, "Done — " + result.generated + " generated, "
+                + result.skippedCached + " cached, " + result.failed + " failed");
+        return result;
+    }
+
+    private void saveEntry(String analysisName, PurposeCacheEntry entry) {
+        ArtifactKey file = purposeDir(analysisName).resolve(safeFileName(entry.nodeId));
+        try (OutputStream out = store.write(file)) {
+            mapper.writeValue(out, entry);
+        } catch (IOException e) {
+            log.error("Failed to save purpose cache entry for {}: {}", entry.nodeId, e.getMessage());
+        }
+    }
+
+    private List<PurposeChunk> chunk(List<PurposeTarget> targets) {
+        List<PurposeChunk> chunks = new ArrayList<>();
+        for (int i = 0; i < targets.size(); i += TARGETS_PER_CHUNK) {
+            PurposeChunk c = new PurposeChunk();
+            c.id = "pchunk_" + (chunks.size() + 1);
+            c.targets = new ArrayList<>(targets.subList(i, Math.min(i + TARGETS_PER_CHUNK, targets.size())));
+            chunks.add(c);
+        }
+        return chunks;
+    }
+
+    // ==================== RESPONSE PARSING ====================
+
+    private Map<String, ProcedurePurpose> parseResponse(String response) {
+        Map<String, ProcedurePurpose> result = new LinkedHashMap<>();
+        String json = extractJson(response);
+        if (json == null) {
+            log.warn("Purpose-summary response: no JSON found");
+            return result;
+        }
+        try {
+            JsonNode root = mapper.readTree(json);
+            JsonNode procs = root.get("procedures");
+            if (procs != null && procs.isArray()) {
+                for (JsonNode p : procs) {
+                    String nodeId = textOrNull(p, "nodeId");
+                    if (nodeId == null) continue;
+                    ProcedurePurpose pp = new ProcedurePurpose();
+                    pp.nodeId = nodeId;
+                    pp.purposeSummary = textOrNull(p, "purpose");
+                    JsonNode stmts = p.get("perStatement");
+                    if (stmts != null && stmts.isArray()) {
+                        for (JsonNode s : stmts) {
+                            StatementIntent si = new StatementIntent();
+                            si.line = s.has("line") && s.get("line").isNumber() ? s.get("line").asInt() : 0;
+                            si.intent = textOrNull(s, "intent");
+                            if (si.intent != null) pp.perStatement.add(si);
+                        }
+                    }
+                    result.put(nodeId, pp);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse purpose-summary JSON: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    private static String extractJson(String response) {
+        if (response == null) return null;
+        String trimmed = response.trim();
+        if (trimmed.startsWith("{")) return trimmed;
+        int jsonStart = trimmed.indexOf("```json");
+        if (jsonStart >= 0) {
+            int codeStart = trimmed.indexOf('\n', jsonStart);
+            int codeEnd = trimmed.indexOf("```", codeStart + 1);
+            if (codeStart >= 0 && codeEnd > codeStart) return trimmed.substring(codeStart + 1, codeEnd).trim();
+        }
+        int first = trimmed.indexOf('{');
+        int last = trimmed.lastIndexOf('}');
+        if (first >= 0 && last > first) return trimmed.substring(first, last + 1);
+        return null;
+    }
+
+    // ==================== DATA LOADING ====================
+
+    private List<PurposeTarget> loadTargets(String analysisName) throws IOException {
+        List<PurposeTarget> targets = new ArrayList<>();
+        JsonNode index = staticReader.getIndex(analysisName);
+        JsonNode nodesArray = index.get("nodes");
+        if (nodesArray == null || !nodesArray.isArray()) return targets;
+
+        JsonNode callGraph = null;
+        try { callGraph = staticReader.getCallGraph(analysisName); } catch (Exception ignored) {}
+
+        Map<String, List<String>> callsByNode = new HashMap<>();
+        if (callGraph != null && callGraph.get("edges") != null && callGraph.get("edges").isArray()) {
+            for (JsonNode edge : callGraph.get("edges")) {
+                String from = textOrNull(edge, "fromNodeId");
+                String toName = textOrNull(edge, "to");
+                if (from == null || toName == null) continue;
+                callsByNode.computeIfAbsent(from, k -> new ArrayList<>()).add(toName);
+            }
+        }
+
+        for (JsonNode nodeSummary : nodesArray) {
+            String nodeId = textOrNull(nodeSummary, "nodeId");
+            if (nodeId == null) continue;
+
+            PurposeTarget t = new PurposeTarget();
+            t.nodeId = nodeId;
+            t.name = textOrNull(nodeSummary, "name");
+            t.schema = textOrNull(nodeSummary, "schema");
+            t.packageName = textOrNull(nodeSummary, "packageName");
+            t.objectType = textOrNull(nodeSummary, "objectType");
+
+            String sourceFile = textOrNull(nodeSummary, "sourceFile");
+            int lineStart = intOrDefault(nodeSummary, "lineStart", 0);
+            int lineEnd = intOrDefault(nodeSummary, "lineEnd", 0);
+            t.sourceSnippet = loadSnippet(analysisName, sourceFile, lineStart, lineEnd);
+            if (t.sourceSnippet == null || t.sourceSnippet.isBlank()) continue; // nothing to summarize
+
+            String detailFile = textOrNull(nodeSummary, "detailFile");
+            if (detailFile != null) {
+                try {
+                    JsonNode detail = staticReader.getNodeDetail(analysisName, detailFile.replace("nodes/", ""));
+                    t.tableSummaries = summarizeTableOps(detail);
+                } catch (Exception e) {
+                    log.debug("Cannot load detail for {}: {}", nodeId, e.getMessage());
+                }
+            }
+            List<String> calls = callsByNode.get(nodeId);
+            if (calls != null) t.callSummaries = calls.stream().distinct().limit(20).toList();
+
+            t.sourceDigest = sha256(t.sourceSnippet);
+            targets.add(t);
+        }
+        return targets;
+    }
+
+    private String loadSnippet(String analysisName, String sourceFile, int lineStart, int lineEnd) {
+        if (sourceFile == null) return null;
+        try {
+            String source = staticReader.getSource(analysisName, sourceFile);
+            if (source == null) return null;
+            String[] lines = source.split("\n", -1);
+            int from = lineStart > 0 ? Math.max(0, lineStart - 1) : 0;
+            int to = lineEnd > lineStart ? Math.min(lines.length, lineEnd) : Math.min(lines.length, from + MAX_SOURCE_LINES);
+            to = Math.min(to, from + MAX_SOURCE_LINES);
+            StringBuilder sb = new StringBuilder();
+            for (int i = from; i < to; i++) sb.append(lines[i]).append("\n");
+            return sb.toString();
+        } catch (Exception e) {
+            log.debug("Cannot load source {}: {}", sourceFile, e.getMessage());
+            return null;
+        }
+    }
+
+    private List<String> summarizeTableOps(JsonNode detail) {
+        List<String> summaries = new ArrayList<>();
+        JsonNode tables = detail.get("tables");
+        if (tables == null || !tables.isArray()) return summaries;
+        for (JsonNode table : tables) {
+            String name = textOrNull(table, "name");
+            if (name == null) continue;
+            JsonNode ops = table.get("operations");
+            if (ops != null && ops.isObject()) {
+                Set<String> opNames = new LinkedHashSet<>();
+                ops.fieldNames().forEachRemaining(opNames::add);
+                summaries.add(name + "(" + String.join(",", opNames) + ")");
+            } else {
+                summaries.add(name);
+            }
+        }
+        return summaries;
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+        JsonNode v = node.get(field);
+        return (v != null && !v.isNull()) ? v.asText() : null;
+    }
+
+    private static int intOrDefault(JsonNode node, String field, int def) {
+        JsonNode v = node.get(field);
+        return (v != null && v.isNumber()) ? v.asInt() : def;
+    }
+
+    private void progress(Consumer<String> callback, String message) {
+        if (callback != null) callback.accept(message);
+        log.info("[ClaudePurposeSummary] {}", message);
+    }
+}

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.codeanalyzer</groupId>
+        <artifactId>plsql-jar-analyzer</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>jar-analyzer-core</artifactId>
+    <name>JAR Analyzer - Core</name>
+
+    <dependencies>
+        <!-- Storage abstraction: FileStore SPI + local/S3 implementations + factory. -->
+        <dependency>
+            <groupId>com.codeanalyzer</groupId>
+            <artifactId>analyzer-storage</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+            <version>${asm.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-tree</artifactId>
+            <version>${asm.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.benf</groupId>
+            <artifactId>cfr</artifactId>
+            <version>0.152</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.2.5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Excluded: these reference APIs that do not exist in this build.
+                 MessagingTaggingTest targets CallTreeBuilder.createMessagingProducerLeaf(), which
+                 is absent from main entirely (verified by grep) — it tests a feature this build
+                 does not have, not a regression. The rest are stale against signatures that moved.
+                 PersistenceServiceCacheTest, AbstractAnalysisDataProviderTest and JarDataPathsTest
+                 were re-enabled after verifying they compile and pass. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <!--
+                      Four test classes remain excluded. Seven were repaired on 2026-09-04 and now
+                      run; AsyncBoundaryTest was removed entirely (docs/audit/removed-tests/).
+
+                      These four reference members that no longer exist on the production types —
+                      each a capability taken out rather than renamed:
+
+                        CallTreeVisibilityTest     CallNode.isAsyncChainOp()
+                        FalsePositiveDetectionTest JpaMethodDetector.isRepositoryClass(String)
+                        SecurityTaggingTest        CallNode.getSecurityRoles()
+                        TransactionBoundaryTest    CallNode.isTransactionalBoundary(),
+                                                   isTransactionalReadOnly(),
+                                                   getTransactionalPropagation()
+
+                      Unlike the constructor-arity and record-component drift already fixed, there
+                      is no current API to repoint these at. Each needs a decision about whether the
+                      capability should exist again, so they are left excluded and NAMED rather than
+                      quietly deleted — the features they cover are otherwise untested.
+                    -->
+                    <testExcludes>
+                        <exclude>**/SecurityTaggingTest.java</exclude>
+                        <exclude>**/CallTreeVisibilityTest.java</exclude>
+                        <exclude>**/TransactionBoundaryTest.java</exclude>
+                        <exclude>**/FalsePositiveDetectionTest.java</exclude>
+                    </testExcludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>**/SecurityTaggingTest.java</exclude>
+                        <exclude>**/CallTreeVisibilityTest.java</exclude>
+                        <exclude>**/TransactionBoundaryTest.java</exclude>
+                        <exclude>**/FalsePositiveDetectionTest.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

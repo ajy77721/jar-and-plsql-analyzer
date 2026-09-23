@@ -1,0 +1,21 @@
+/* ==========================================================================
+   DEPRECATED as a palette. All colour tokens now live in
+   /shared/mongodb-theme.css, which is loaded before this file on every page.
+
+   Every name this file used to define (--bg, --accent, --sidebar-*, --badge-*,
+   --radius-*, --font-*) is now owned by the theme and switches with
+   light/dark. Re-declaring any of them here would shadow the theme and break
+   the switch, so this file is intentionally reduced to a shim.
+
+   Add only parser-specific aliases below — never raw hex.
+   ========================================================================== */
+
+/* Nothing is redeclared here on purpose.
+
+   This file used to contain
+       --sidebar-active-bg: var(--sidebar-active);
+   which is exactly the defect this file's own header warns about: it is loaded
+   after the theme, so it shadowed the theme's PALE selection tint
+   (--mdb-green-light3 / rgba(0,237,100,.14)) with the SATURATED accent. Any
+   element that used it as a background got solid green behind body-coloured
+   text — 2.5:1 in light, 1.3:1 in dark. The theme's own value is correct. */

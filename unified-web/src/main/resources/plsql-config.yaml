@@ -1,0 +1,166 @@
+source_paths:
+- "./plsql-sources"
+schema_mappings: {}
+file_extensions:
+- ".sql"
+- ".pks"
+- ".pkb"
+- ".prc"
+- ".fnc"
+- ".trg"
+exclude_patterns:
+- "**/test/**"
+- "**/backup/**"
+# Global fallback connection (legacy single-DB mode) — points at the local Oracle demo.
+db_hostname: "localhost"
+db_port: 1521
+db_service_name: "FREEPDB1"
+db_users:
+- username: "analyzer"
+  password: "Password123!"
+  description: "Oracle Free local demo"
+# ── Default multi-DB demo setup (Oracle / MySQL / DB2 / SQL Server) ──
+# Seeded from inside the jar into {data}/config on first startup; edit via the UI.
+projects:
+- name: "OracleDemo"
+  description: "Oracle Free 23ai local demo"
+  db_type: "ORACLE"
+  environments:
+  - name: "local"
+    zone: null
+    connections:
+    - name: "oracle-free-conn"
+      username: "analyzer"
+      password: "Password123!"
+      hostname: "localhost"
+      port: 1521
+      service_name: "FREEPDB1"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: null
+      tested: true
+      db_type: "ORACLE"
+      jdbc_url: "jdbc:oracle:thin:@//localhost:1521/FREEPDB1"
+      effective_port: 1521
+    jdbc_url: "jdbc:oracle:thin:@//localhost:1521/FREEPDB1"
+    users:
+    - username: "analyzer"
+      password: "Password123!"
+      description: "oracle-free-conn"
+- name: "MysqlDemo"
+  description: "MySQL 8 local demo"
+  db_type: "MYSQL"
+  environments:
+  - name: "local"
+    zone: null
+    connections:
+    - name: "mysql-local-conn"
+      username: "root"
+      password: "Password123!"
+      hostname: "localhost"
+      port: 3307
+      service_name: "analyzerdb"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: null
+      tested: true
+      db_type: "MYSQL"
+      jdbc_url: "jdbc:mysql://localhost:3307/analyzerdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectTimeout=10000"
+      effective_port: 3307
+    jdbc_url: "jdbc:mysql://localhost:3307/analyzerdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectTimeout=10000"
+    users:
+    - username: "root"
+      password: "Password123!"
+      description: "mysql-local-conn"
+- name: "Db2Demo"
+  description: "IBM Db2 (community, amd64 emulated) local demo"
+  db_type: "DB2"
+  environments:
+  - name: "local"
+    zone: null
+    connections:
+    - name: "db2-local-conn"
+      username: "db2inst1"
+      password: "Password123"
+      hostname: "localhost"
+      port: 50000
+      service_name: "anlzdb"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: null
+      tested: true
+      db_type: "DB2"
+      jdbc_url: "jdbc:db2://localhost:50000/anlzdb:progressiveStreaming=2;"
+      effective_port: 50000
+    jdbc_url: "jdbc:db2://localhost:50000/anlzdb:progressiveStreaming=2;"
+    users:
+    - username: "db2inst1"
+      password: "Password123"
+      description: "db2-local-conn"
+- name: "SqlServerDemo"
+  description: "analyzer-db SQL Server demo"
+  db_type: "SQLSERVER"
+  environments:
+  - name: "local"
+    zone: null
+    connections:
+    - name: "analyzer-db-conn"
+      username: "sa"
+      password: "Password123!"
+      hostname: "localhost"
+      port: 1433
+      service_name: "analyzer-db"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: null
+      tested: true
+      db_type: "SQLSERVER"
+      jdbc_url: "jdbc:sqlserver://localhost:1433;encrypt=false;trustServerCertificate=true;loginTimeout=10;databaseName=analyzer-db"
+      effective_port: 1433
+    jdbc_url: "jdbc:sqlserver://localhost:1433;encrypt=false;trustServerCertificate=true;loginTimeout=10;databaseName=analyzer-db"
+    users:
+    - username: "sa"
+      password: "Password123!"
+      description: "analyzer-db-conn"
+- name: "PostgresDemo"
+  description: "PostgreSQL 16 local demo"
+  db_type: "POSTGRES"
+  environments:
+  - name: "local"
+    zone: null
+    connections:
+    - name: "postgres-local-conn"
+      username: "postgres"
+      password: "Password123!"
+      hostname: "localhost"
+      port: 5432
+      service_name: "analyzerdb"
+      sid: null
+      connection_type: "SERVICE_NAME"
+      role: "DEFAULT"
+      tns_alias: null
+      custom_url: null
+      description: null
+      tested: true
+      db_type: "POSTGRES"
+      effective_port: 5432
+      jdbc_url: "jdbc:postgresql://localhost:5432/analyzerdb"
+    jdbc_url: "jdbc:postgresql://localhost:5432/analyzerdb"
+    users:
+    - username: "postgres"
+      password: "Password123!"
+      description: "postgres-local-conn"
+jdbc_url: "jdbc:oracle:thin:@//localhost:1521/FREEPDB1"
+legacy_mode: false

@@ -1,0 +1,15 @@
+You are analyzing a cluster of related REST endpoints in a Java application that uses Oracle/JPA/JDBC for database access.
+Each call tree node contains 'sourceCode' -- actual decompiled Java from CFR.
+Read the real code for accurate analysis, not just method names.
+
+For Oracle/JPA operations: identify tables via JdbcTemplate SQL, EntityManager queries, JPA repositories, @Query annotations, stored procedure calls (CallableStatement, SimpleJdbcCall, @Procedure, {call ...}), and native SQL strings.
+
+Cluster context:
+{{CLUSTER_CONTEXT}}
+
+Analyze this endpoint call tree.
+Identify: procName, risk flags, transaction requirements, cross-domain dependencies.
+Respond with JSON only.
+
+Endpoint:
+{{TREE_CONTEXT}}

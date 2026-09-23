@@ -1,0 +1,8 @@
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: var(--radius-sm); }
+::-webkit-scrollbar-thumb:hover { background: var(--bg-inset); }
+
+.left-panel ::-webkit-scrollbar-thumb { background: var(--sidebar-hover); }
+.left-panel ::-webkit-scrollbar-track { background: transparent; }
+.src-container ::-webkit-scrollbar-thumb { background: var(--sidebar-hover); }

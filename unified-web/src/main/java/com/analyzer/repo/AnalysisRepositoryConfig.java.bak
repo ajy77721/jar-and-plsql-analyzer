@@ -1,0 +1,91 @@
+package com.analyzer.repo;
+
+import com.analyzer.storage.AnalysisRepository;
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.repo.RepositoryMode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jaranalyzer.service.AnalysisDataProviderFactory;
+import com.jaranalyzer.service.JarDataPaths;
+import com.plsqlanalyzer.web.parser.service.AnalysisReaderFactory;
+import com.plsqlanalyzer.web.parser.service.StaticAnalysisReader;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Builds the {@link AnalysisRepository} chosen by {@code app.storage.repository}.
+ *
+ * <p><b>Both</b> arms now have an implementation: PLAN-09 Increment D added the Mongo one, which
+ * takes the scan one as its source. So the switch is still one arm per {@link RepositoryMode} and
+ * still the only place the choice is made.
+ *
+ * <p>One switch, one arm per {@link RepositoryMode}, mirroring
+ * {@code StorageConfig#artifactStore}'s shape so that adding the Mongo implementation in Increment D
+ * is one arm here and one class — the same "a new backend is a new implementation plus one branch"
+ * property that kept the S3 backend to a single class.
+ *
+ * <p><b>Why here and not in {@code StorageConfig}.</b> {@code analyzer-storage} owns the interface
+ * and the mode ({@code StorageConfig#repositoryMode} parses, validates and logs it), and it is the
+ * right home for both: the Mongo implementation will live there and needs no part of the web layer.
+ * The <em>scan</em> implementation is the exception, and for a specific reason — the readers that
+ * already parse these artifacts ({@code AnalysisReaderFactory}, {@code StaticAnalysisReader},
+ * {@code AnalysisDataProviderFactory}) live in this module. Increment C's whole promise is that no
+ * response changes, and the surest way to break it would be to stand up a second parser over the
+ * same bytes in another module and hope the two agree. So the implementation sits next to the code
+ * it delegates to, and takes the module dependency rather than duplicating it.
+ */
+@Configuration
+public class AnalysisRepositoryConfig {
+
+    @Bean
+    public AnalysisRepository analysisRepository(RepositoryMode mode,
+                                                 ArtifactStore store,
+                                                 ObjectMapper mapper,
+                                                 AnalysisReaderFactory readerFactory,
+                                                 StaticAnalysisReader staticReader,
+                                                 AnalysisDataProviderFactory providerFactory,
+                                                 JarDataPaths jarPaths,
+                                                 com.analyzer.storage.mongo.MongoConnection mongoConnection) {
+        ArtifactScanRepository scan = new ArtifactScanRepository(store, mapper, readerFactory,
+                staticReader, providerFactory, jarPaths);
+        return switch (mode) {
+            case ARTIFACT_SCAN -> scan;
+            case MONGO -> {
+                // Refused at startup with the property to fix, rather than on the first query. The
+                // alternative — falling back to the scan implementation with a warning — would let
+                // an operator believe a cutover had happened while every query still scanned JSON,
+                // which is PLAN-09 §8 R1 in a different costume. MongoConnection.open() has already
+                // pinged the server, so reaching here means the connection works.
+                if (!mongoConnection.configured()) {
+                    throw new IllegalStateException(
+                            "app.storage.repository=mongo requires app.storage.mongodb.uri and "
+                            + "app.storage.mongodb.database. Set them, or set "
+                            + "app.storage.repository=artifact-scan.");
+                }
+                // The scan implementation is passed in as the source, not as a fallback: PLAN-09
+                // Increment D populates the collections by ingesting from it on first touch, which
+                // is what keeps every response byte-identical to artifact-scan's while moving where
+                // the second and later reads come from. It is constructed unconditionally above
+                // because it is a collaborator in both arms, not an alternative to this one.
+                var repo = new com.analyzer.storage.mongo.MongoAnalysisRepository(
+                        mongoConnection.database(), store, mapper, scan);
+                repo.ensureIndexes();
+
+                // PLAN-09 Increment E. Additive: the opaque-payload path above is untouched and
+                // still answers all five original methods, so no response can move by a byte. This
+                // adds the PLAN-04 flow-node entity collections beside it, which is what lets the
+                // repository answer "which nodes touch table X" from an index instead of not at all.
+                //
+                // PARSE_ROOT is passed rather than duplicated in analyzer-storage:
+                // com.plsqlanalyzer.web.parser.service.AnalysisPaths is the single owner of this
+                // path arithmetic and a second copy of the literal is exactly the drift PLAN-09 §8
+                // R2 records.
+                var entities = new com.analyzer.storage.mongo.MongoPlsqlEntityIndex(
+                        mongoConnection.database(), store, mapper,
+                        com.plsqlanalyzer.web.parser.service.AnalysisPaths.PARSE_ROOT);
+                entities.ensureIndexes();
+                repo.attachEntityIndex(entities);
+                yield repo;
+            }
+        };
+    }
+}

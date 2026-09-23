@@ -1,0 +1,49 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    font-size: 13px;
+}
+
+#app { height: 100vh; display: flex; flex-direction: column; }
+
+.screen { display: none; height: 100vh; flex-direction: column; }
+.screen.active { display: flex; }
+
+.badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: var(--radius-lg);
+    background: var(--badge-gray-bg);
+    color: var(--badge-gray);
+    font-weight: 600;
+}
+
+.empty-msg {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* Left-panel schema grouping (§B11).
+   A flat list of 114 procedures across several schemas gave nothing to navigate by; these are the
+   collapsible group headers. .lp-head carries the "showing N of M" count, which is what makes a
+   filtered list distinguishable from the whole set. */
+.lp-head { padding:6px 10px; font-size:10px; color:var(--text-muted);
+           border-bottom:1px solid var(--border); }
+.lp-group-head { display:flex; align-items:center; gap:4px; padding:3px 8px; cursor:pointer;
+                 font-size:10px; font-weight:600; color:var(--text-muted);
+                 background:var(--bg-hover, rgba(128,128,128,.06));
+                 border-top:1px solid var(--border); position:sticky; top:0; z-index:1; }
+.lp-group-head:hover { color:var(--text); }
+.lp-group-caret { width:9px; display:inline-block; }
+.lp-group-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lp-group-n { opacity:.7; font-weight:400; }
+.lp-show-more { padding:6px 10px; font-size:11px; color:var(--accent); cursor:pointer;
+                text-align:center; border-top:1px solid var(--border); }

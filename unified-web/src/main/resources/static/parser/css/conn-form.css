@@ -1,0 +1,107 @@
+/* ── Connection Form — base layout shared across all DB types ──────────────── */
+
+.conn-form-wrap {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    height: 100%;
+}
+
+.conn-form-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 14px 14px;
+}
+
+/* Section headers inside the form */
+.conn-form-section-title {
+    margin: 14px 0 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Row: label + input side by side */
+.conn-form-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.conn-form-row label {
+    width: 110px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.conn-form-inp {
+    flex: 1;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+    transition: border-color var(--transition);
+}
+
+.conn-form-inp:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.conn-form-inp[readonly] {
+    opacity: 0.55;
+    cursor: default;
+}
+
+/* Role selector — small width */
+.conn-form-inp.small {
+    max-width: 140px;
+}
+
+/* Connection type field panels — shown/hidden by dialect module */
+.conn-type-fields {
+    animation: cfFadeIn 0.12s ease;
+}
+
+@keyframes cfFadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Action bar: Test + Save */
+.conn-form-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-inset);
+    flex-shrink: 0;
+}
+
+.conn-form-status {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex: 1;
+}
+
+.conn-form-status.ok   { color: var(--green); }
+.conn-form-status.fail { color: var(--red); }
+
+/* Test result box */
+.conn-test-result {
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    font-size: 11px;
+    margin: 6px 14px;
+}
+
+.conn-test-result.ok   { background: var(--badge-green-bg);  color: var(--green); }
+.conn-test-result.fail { background: var(--badge-red-bg);  color: var(--badge-red); }

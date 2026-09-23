@@ -1,0 +1,72 @@
+You are verifying the accuracy of a static bytecode analysis for a Java REST endpoint that uses MongoDB.
+The analysis was done by parsing compiled .class files -- it may have false positives or missing detections.
+
+TASK: For each call tree node that has collections or operations, verify them against the decompiled source code.
+Return ONLY a JSON object with your corrections.
+
+ENDPOINT: {{HTTP_METHOD}} {{FULL_PATH}}
+Controller: {{CONTROLLER_CLASS}}.{{METHOD_NAME}}
+
+{{CHUNK_CONTEXT}}
+
+STATIC ANALYSIS CALL TREE (with decompiled source at each node):
+```json
+{{CALL_TREE_JSON}}
+```
+
+RESPOND WITH ONLY THIS JSON FORMAT (no explanation, no markdown outside the JSON):
+```json
+{
+  "corrections": [
+    {
+      "nodeId": "fully.qualified.ClassName#methodName(descriptor)",
+      "collections": {
+        "added": [{"name": "COLLECTION_NAME", "source": "CLAUDE", "operation": "READ|WRITE|UPDATE|DELETE|AGGREGATE|NONE"}],
+        "removed": ["FALSE_POSITIVE_COLL"],
+        "verified": ["CORRECT_COLL"]
+      },
+      "operationType": "WRITE",
+      "operationTypeReason": "why the operation type should be this"
+    }
+  ],
+  "endpointSummary": {
+    "allCollections": ["ALL_REAL_COLLECTIONS_IN_THIS_CHUNK"],
+    "primaryOperation": "READ|WRITE|UPDATE|DELETE|AGGREGATE|NONE",
+    "crossModuleCalls": ["module-name.jar"],
+    "confidence": 0.95
+  }
+}
+```
+
+RULES:
+- Only include nodes where you found corrections (wrong collections, wrong operation type, missing collections)
+- If a node's collections are all correct, put them in 'verified' (don't repeat as 'added')
+- String literals used as sequence names (e.g. passed to getSequenceId/getNextSequenceValue) are NOT collections
+- String literals used as log messages or extension handler args are NOT collections
+- The 'sourceCode' field in each node is REAL decompiled Java code from CFR -- read it carefully
+- Use the exact 'id' field from each node for your corrections (not the 'resolvedFrom' field)
+- The 'resolvedFrom' field shows which interface/abstract class was originally called in bytecode
+- operationType can be: READ, WRITE, UPDATE, DELETE, AGGREGATE, COUNT, or NONE (no database operation)
+- Include ALL real collections you see in endpointSummary.allCollections (from this chunk)
+
+CRITICAL FALSE POSITIVE PATTERN -- @Document bean setters:
+- Static analysis attaches collections to nodes via DOCUMENT_ANNOTATION when the class has @Document.
+- If a method ONLY calls setters/getters (setXxx/getXxx/isXxx) on a @Document bean WITHOUT calling
+  repository.save(), mongoTemplate.save/insert/remove(), or any persistence method, then:
+  (a) The collection is a FALSE POSITIVE on that node -- put it in 'removed'
+  (b) The operationType should be 'NONE' (in-memory mutation, not a DB operation)
+- Look at the 'sourceCode' field: if you see only bean.setFoo(...), bean.setBar(...) with no
+  persistence calls, flag it as a false positive.
+- The 'collectionSources' field shows HOW each collection was detected:
+  DOCUMENT_ANNOTATION = from @Document on the bean class (high false positive risk on non-repo nodes)
+  REPOSITORY_MAPPING = from a Spring Data repository (usually correct)
+  STRING_LITERAL = from a string constant matching a collection pattern
+
+REAL DATABASE OPERATIONS (check sourceCode for these):
+MongoDB:
+- WRITE: repository.save(), .saveAll(), mongoTemplate.save(), .insert(), .insertAll()
+- UPDATE: repository.save() on existing entity, mongoTemplate.updateFirst(), .updateMulti(), .findAndModify()
+- DELETE: repository.delete(), .deleteAll(), mongoTemplate.remove(), .findAndRemove()
+- READ: repository.find*(), mongoTemplate.find(), .findOne(), .aggregate()
+- AGGREGATE: mongoTemplate.aggregate(), Aggregation.newAggregation()
+- If NONE of these appear in sourceCode, the node likely has operationType NONE.

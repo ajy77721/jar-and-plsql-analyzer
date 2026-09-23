@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.codeanalyzer</groupId>
+        <artifactId>plsql-jar-analyzer</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>analyzer-storage</artifactId>
+    <name>Analyzer Storage</name>
+    <description>
+        Storage abstraction: one FileStore SPI, two implementations (local filesystem and S3),
+        selected by a factory from app.storage.mode.
+
+        Deliberately depends on NO other project module. Storage must be testable in isolation,
+        and an inward dependency on analyzer internals would make that impossible and invite the
+        layering to erode.
+    </description>
+
+    <properties>
+        <!--
+            Pinned deliberately. The local ~/.m2 holds the AWS SDK at BOTH 2.25.60 and 2.29.24, and
+            mixing them fails at RUNTIME with NoClassDefFoundError: BusinessMetricFeatureId — a
+            clash the build does not catch. 2.29.24 is the version whose BOM is present, so it is
+            the one that can govern every transitive artifact consistently.
+        -->
+        <aws.sdk.version>2.29.24</aws.sdk.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws.sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Spring for @Configuration/@Value only; no web, no analyzer modules. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <!--
+            S3 backend. apache-client is selected explicitly and netty excluded: the SDK otherwise
+            pulls the async Netty client, which drags in a second Netty onto a Spring Boot classpath
+            that already has one.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache-client</artifactId>
+        </dependency>
+        <!--
+            Profile-based SSO credentials (sso_session/sso_role_name in ~/.aws/config) resolve
+            only when the sso service modules are on the classpath; without them the default
+            credentials chain fails with "To use Sso related properties ... the 'sso' service
+            module must be on the class path".
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sso</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssooidc</artifactId>
+        </dependency>
+
+        <!--
+            MongoDB backend. No version here: mongodb.version in the parent pom drives the Boot
+            BOM, which manages this artifact and its bson/driver-core transitives together,
+            so the three modules that declare this artifact cannot land two different drivers on
+            one classpath — the same clash the aws.sdk.version property exists to prevent, which
+            fails at RUNTIME rather than in the build. It used to be pinned by copying the literal
+            from jar-analyzer-core, which prevented nothing: bumping either copy alone reintroduced
+            exactly the clash the comment was warning about. mongodb-driver-sync is the blocking driver: the async/reactive one would pull
+            a second Netty onto a Spring Boot classpath that already has one, exactly as the S3
+            netty-nio-client exclusion above avoids.
+        -->
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+        </dependency>
+
+        <!--
+            AnalysisRepository trades in JsonNode, because Increment C's acceptance criterion is
+            that no endpoint's response changes byte for byte, and today's responses ARE these JSON
+            documents — mapping them through records and back is exactly where a field order or an
+            absent-vs-null distinction changes. So the query interface needs databind.
+
+            Not a project module, so the "depends on NO other project module" rule above still
+            holds. Version comes from spring-boot-starter-parent, and every consumer already has
+            this exact artifact on its classpath via spring-boot-starter-json — so this makes an
+            existing runtime dependency visible at compile time rather than adding a new one.
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

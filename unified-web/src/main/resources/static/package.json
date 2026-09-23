@@ -1,0 +1,11 @@
+{
+  "name": "analyzer-frontend-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Headless tests for the analyzer frontend. Deliberately dependency-free: see tests/README.md.",
+  "scripts": {
+    "test": "node tests/run.mjs && node tests/lint-fetch.mjs",
+    "lint:fetch": "node tests/lint-fetch.mjs",
+    "fixtures": "node tests/fixtures/generate.mjs"
+  }
+}

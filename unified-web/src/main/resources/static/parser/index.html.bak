@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/shared/mongodb-theme.css?v=1789287064">
+    <!-- Page envelope shim: normalises paged and legacy (bare array) API responses.
+         Must load before any script that reads a list endpoint. -->
+    <script src="../shared/escape.js?v=1788675772"></script>
+    <script src="../shared/page-envelope.js?v=1788752637"></script>
+    <script src="../shared/ui-busy.js?v=1788555867"></script>
+    <!-- Polling intervals. Must load before every app script: the shared log FAB reads
+         PollConfig.logRefreshMs and threw ReferenceError on this page without it. -->
+    <script src="../shared/poll-config.js?v=1788676228"></script>
+    <script src="/shared/theme-toggle.js?v=1789138484"></script>
+    <script src="/shared/theme-colors.js?v=1788261891"></script>
+    <title>PL/SQL Parse Analyzer</title>
+    <link rel="stylesheet" href="css/variables.css?v=1788290582">
+    <link rel="stylesheet" href="css/base.css?v=1788501611">
+    <link rel="stylesheet" href="css/buttons.css?v=1788290523">
+    <link rel="stylesheet" href="css/forms.css?v=1788290292">
+    <link rel="stylesheet" href="css/home.css?v=1788290856">
+    <link rel="stylesheet" href="css/topbar.css?v=1789232747">
+    <link rel="stylesheet" href="css/sidebar.css?v=1789271777">
+    <link rel="stylesheet" href="css/right-panel.css?v=1788261887">
+    <link rel="stylesheet" href="css/detail-header.css?v=1788291852">
+    <link rel="stylesheet" href="css/call-trace.css?v=1790155557399">
+    <link rel="stylesheet" href="css/txn-trace.css?v=1789232747">
+    <link rel="stylesheet" href="css/trace.css?v=1788290856">
+    <link rel="stylesheet" href="css/table-ops.css?v=1788546605">
+    <link rel="stylesheet" href="css/refs.css?v=1788290292">
+    <link rel="stylesheet" href="css/source-view.css?v=1789131846">
+    <link rel="stylesheet" href="css/pagination.css?v=1788290856">
+    <link rel="stylesheet" href="css/column-filter.css?v=1789209797">
+    <link rel="stylesheet" href="css/toast.css?v=1788290523">
+    <link rel="stylesheet" href="css/scrollbar.css?v=1788290856">
+    <link rel="stylesheet" href="css/export.css?v=1789232664">
+    <link rel="stylesheet" href="css/table-detail.css?v=1789099684">
+    <link rel="stylesheet" href="css/statements.css?v=1788290856">
+    <link rel="stylesheet" href="css/ex-handlers.css?v=1788291852">
+    <link rel="stylesheet" href="css/sequences.css?v=1788261886">
+    <link rel="stylesheet" href="css/summary.css?v=1789099691">
+    <link rel="stylesheet" href="css/call-graph-viz.css?v=1788291852">
+    <link rel="stylesheet" href="css/triggers.css?v=1788290856">
+    <link rel="stylesheet" href="css/trigger-detail.css?v=1788290523">
+    <link rel="stylesheet" href="css/claude-enrichment.css?v=1789232747">
+    <link rel="stylesheet" href="css/claude-insights.css?v=1789232747">
+    <link rel="stylesheet" href="css/chunk-viewer.css?v=1788290856">
+    <link rel="stylesheet" href="css/tooltips.css?v=1788290523">
+    <link rel="stylesheet" href="css/error-modal.css?v=1788290523">
+    <link rel="stylesheet" href="css/query-runner.css?v=1788291852">
+    <link rel="stylesheet" href="css/perf-summary.css?v=1788291852">
+    <link rel="stylesheet" href="css/complexity.css?v=1788290856">
+    <link rel="stylesheet" href="css/join-detail.css?v=1788290856">
+    <link rel="stylesheet" href="css/join-summary.css?v=1788290856">
+    <link rel="stylesheet" href="css/claude-overview.css?v=1788290856">
+    <link rel="stylesheet" href="css/sync.css?v=1789232658">
+    <link rel="stylesheet" href="css/config.css?v=1788291852">
+    <link rel="stylesheet" href="css/db-selector.css?v=1788291852">
+    <link rel="stylesheet" href="css/conn-form.css?v=1788290292">
+    <link rel="stylesheet" href="css/log-viewer.css?v=1788290856">
+    <link rel="stylesheet" href="css/ui-polish.css?v=1789229421">
+    <link rel="stylesheet" href="css/persistent-progress.css?v=1789300001">
+</head>
+<body>
+    <div id="app">
+
+        <!-- ==================== SCREEN 1: HOME ==================== -->
+        <div id="screenHome" class="screen active">
+            <div class="home-container">
+                <div class="home-brand">
+                    <a href="/" style="color:var(--text-muted);font-size:11px;text-decoration:none">&larr; Back to Home</a>
+                    <h1>PL/SQL Parse Analyzer</h1>
+                    <p>Oracle PL/SQL Parse Analysis &amp; Call Trace</p>
+                    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+                        <button class="btn btn-sm" onclick="PA.config.showModal()" title="Manage database connections">&#9881; Manage Connections</button>
+                        <button class="btn btn-sm" onclick="PA.logViewer.toggle()" title="View application logs">&#128196; Logs</button>
+                        <button class="btn btn-sm" onclick="PA.cacheManager.open()" title="Manage &amp; clear cache per connection (datasource / project / env)">&#128465; Clear Cache</button>
+                        <button class="btn btn-sm" onclick="PA.promptManager.open()" title="Manage Claude prompt templates &amp; global extras">&#128221; Prompt Manager</button>
+                        <button class="btn btn-sm" onclick="PA.home.showHelp()" title="What to enter for each database before clicking Analyze">&#63; Help</button>
+                    </div>
+                    <div id="claudeApiStats" style="display:none;margin-top:10px;font-size:11px;color:var(--text-muted);background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--radius);padding:6px 12px;align-items:center;gap:10px">
+                        <span style="font-weight:600;color:var(--text)">Claude API Statistics</span>
+                        <span id="claudeApiCallsBadge">0 calls</span>
+                        <span id="claudeApiSessionsBadge">0 sessions</span>
+                        <span id="claudeApiPromptBadge">0 B prompt</span>
+                        <span id="claudeApiResponseBadge">0 B response</span>
+                        <span id="claudeApiDurationBadge">0s total</span>
+                        <span id="claudeApiErrorsBadge" style="display:none"></span>
+                        <button class="btn btn-sm" onclick="PA.claudeSessions.open()" style="font-size:10px;padding:2px 8px;margin-left:4px">View Details</button>
+                    </div>
+                </div>
+
+                <div class="home-form">
+                    <div class="af-step">
+                        <span class="af-step-num">1</span>
+                        <span class="af-label">Database</span>
+                        <div class="af-fields">
+                            <select id="homeDbType" class="form-input" onchange="PA.home.onDbTypeChange()" style="max-width:150px">
+                                <option value="">Select database</option>
+                                <option value="ORACLE">Oracle</option>
+                                <option value="MYSQL">MySQL</option>
+                                <option value="SQLSERVER">SQL Server</option>
+                                <option value="DB2">IBM Db2</option>
+                                <option value="POSTGRES">PostgreSQL</option>
+                            </select>
+                            <select id="homeProject" class="form-input" onchange="PA.home.onProjectChange()" style="max-width:160px">
+                                <option value="">Select project</option>
+                            </select>
+                            <select id="homeEnv" class="form-input" onchange="PA.home.onEnvChange()" style="max-width:160px">
+                                <option value="">Select environment</option>
+                            </select>
+                            <span id="homeLegacyLabel" style="font-size:10px;color:var(--text-muted);display:none">Legacy (global config)</span>
+                        </div>
+                    </div>
+                    <!-- Owner/schema and object-type are auto-detected server-side (ObjectResolutionService
+                         .findObjectSmart) from whatever the user types below — package, procedure, function,
+                         pkg.proc or pkg.func. The selects stay in the DOM (hidden) because the non-Oracle
+                         branch of homeOwner also doubles as the connection picker (getFormData() still reads
+                         it for connName), and hiding rather than removing keeps every existing render call in
+                         home.js (_renderOwnerSelect/_renderObjTypeSelect) safe with no null-check changes needed. -->
+                    <div class="af-step" style="display:none">
+                        <span class="af-step-num">2</span>
+                        <span class="af-label" id="homeStep2Label">Owner</span>
+                        <div class="af-fields">
+                            <select id="homeOwner" class="form-input" style="max-width:240px">
+                                <option value="">Auto-detect (all schemas)</option>
+                            </select>
+                            <span id="homeStep2Hint" style="font-size:10px;color:var(--text-muted)">DB schema that owns the object</span>
+                        </div>
+                    </div>
+                    <div class="af-step">
+                        <span class="af-step-num">2</span>
+                        <span class="af-label">Target</span>
+                        <div class="af-fields">
+                            <input type="text" id="homeObject" class="form-input" placeholder="e.g. PKG_CUSTOMER, PKG.PROC or PROC_NAME — type detected automatically" onkeydown="if(event.key==='Enter')PA.startAnalysis()">
+                            <select id="homeObjType" class="form-input" style="width:130px;flex:none;display:none">
+                                <option value="PACKAGE">PACKAGE</option>
+                                <option value="PROCEDURE">PROCEDURE</option>
+                                <option value="FUNCTION">FUNCTION</option>
+                            </select>
+                            <button id="btnStartAnalysis" class="btn btn-primary af-analyze-btn" onclick="PA.startAnalysis()">Analyze</button>
+                            <button class="btn btn-sm af-help-btn" onclick="PA.home.showHelp()" title="What to select &amp; type for the chosen database">&#63;</button>
+                        </div>
+                    </div>
+                    <div id="homeProgress" class="home-progress" style="display:none">
+                        <div class="progress-bar"><div class="progress-fill" id="homeProgressFill"></div></div>
+                        <span id="homeProgressText" class="progress-text">Starting...</span>
+                    </div>
+                </div>
+
+                <div class="home-section">
+                    <div class="home-section-header">
+                        <div class="home-tab-row">
+                            <button class="home-tab active" data-htab="history" onclick="PA.switchHomeTab('history')">Analysis History</button>
+                            <button class="home-tab" data-htab="perfSummary" onclick="PA.switchHomeTab('perfSummary')">Performance Summary</button>
+                            <button class="home-tab" data-htab="queue" onclick="PA.switchHomeTab('queue')">Queue Analysis</button>
+                        </div>
+                        <span id="historyCount" class="badge" style="display:none">0</span>
+                    </div>
+                    <input type="text" id="historySearch" class="form-input home-search" placeholder="Search history..." oninput="PA.onHistorySearch(this.value)">
+                    <div id="historyFilters" class="home-filter-row"></div>
+                    <div id="homeTabHistory" class="home-tab-content active">
+                        <div id="historyList" class="history-list home-scroll">
+                            <div class="empty-msg" style="color:var(--text-muted)">Click &ldquo;Analysis History&rdquo; to load</div>
+                        </div>
+                    </div>
+                    <div id="homeTabPerfSummary" class="home-tab-content" style="display:none">
+                        <div id="perfSummaryContainer" class="home-scroll" style="padding:8px 0">
+                            <div class="empty-msg">Loading...</div>
+                        </div>
+                    </div>
+                    <div id="homeTabQueue" class="home-tab-content" style="display:none">
+                        <div id="queueContainer" class="home-scroll" style="padding:8px 0">
+                            <div class="empty-msg">Loading queue...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== SCREEN 2: ANALYSIS ==================== -->
+        <div id="screenAnalysis" class="screen">
+            <div class="topbar">
+                <button class="btn btn-back" onclick="PA.goHome()" title="Back to home">&larr; Home</button>
+                <div class="topbar-info">
+                    <span id="topbarTitle" class="topbar-title">No Analysis</span>
+                    <span id="topbarStats" class="topbar-stats"></span>
+                    <div id="topbarConnStrip" class="topbar-conn-strip" style="display:none"></div>
+                </div>
+                <!-- TASK-REGISTRY §277 — was PA.analysisSearch.open() (a separate, never-updated
+                     statement-level search feature the user confirmed replacing rather than
+                     maintaining twice). Redirected to the same Global Search (#globalSearch) that
+                     already has real filters/regex/case-sensitive/pagination (§269-276). Honest
+                     gap, not silently dropped: the old feature matched inside raw SQL statement
+                     TEXT (any table/column mentioned in a SELECT/INSERT body); Global Search
+                     matches object NAMES (procedures/tables/etc) — a coarser granularity. -->
+                <!-- §280 follow-up — clicking this only focused the input, requiring the user to
+                     then type/retype to trigger anything; if a query was already sitting in the box
+                     (typed earlier, then blurred), clicking Search visibly did nothing. Now it opens
+                     results immediately using whatever is already in the box, and only falls back to
+                     a plain focus when the box is empty. -->
+                <!-- Now opens a Notepad++-style find modal (text box + Regex/Case/Whole-word toggles)
+                     directly, instead of the old focus-the-topbar-input flow — the topbar #globalSearch
+                     input below is gone, so openFromButton()'s old fallback has nothing left to focus. -->
+                <button class="btn btn-sm as-open-btn" onclick="PA.search.open()"
+                        title="Search this analysis (press /)">&#128269; Search <kbd>/</kbd></button>
+                <div class="topbar-badge">
+                    <span class="pa-mode-badge pa-mode-static" id="claudeModeBadge">Static Analysis</span>
+                </div>
+                <div class="topbar-claude-group">
+                    <div class="claude-mode-toggle">
+                        <button class="claude-mode-btn active" data-mode="static">Static</button>
+                        <button class="claude-mode-btn" data-mode="claude">Claude</button>
+                        <!-- <button class="claude-mode-btn" data-mode="previous">Previous</button> -->
+                    </div>
+                    <button class="claude-verify-btn" id="claudeVerifyBtn" onclick="PA.promptManager.openAnalysisContext(false)" title="Run Claude AI enrichment on this analysis">Enable Claude</button>
+                    <!-- <button class="claude-apply-btn" id="claudeApplyBtn" onclick="PA.claude.openOverview()" title="Claude enrichment overview &amp; merge controls">Claude Overview</button> -->
+                    <div class="claude-progress-wrap" id="claudeProgressWrap">
+                        <div class="claude-progress-bar"><div class="claude-progress-fill" id="claudeProgressFill"></div></div>
+                        <span class="claude-progress-text" id="claudeProgressText">0%</span>
+                        <button class="claude-kill-btn" onclick="PA.claude.killVerification()" title="Kill verification">Kill</button>
+                    </div>
+                    <button class="btn btn-sm" onclick="PA.claude.openChunkViewer()" title="View verification chunks" style="font-size:10px;padding:3px 8px">Chunks</button>
+                    <button class="btn btn-sm" onclick="PA.claudeSessions.open()" title="View Claude sessions" style="font-size:10px;padding:3px 8px">Sessions</button>
+                    <span class="claude-status unavailable" id="claudeStatusIndicator"><span class="claude-status-dot"></span>Claude</span>
+                </div>
+                <div class="topbar-actions">
+                    <!-- <button class="sync-topbar-btn" onclick="PA.sync.open()" title="View JAR and Parser analyses side by side">Sync JAR &amp; Parser</button> -->
+                    <button class="btn btn-sm topbar-action-btn" onclick="PA.pullData()" title="Pull latest data from server">Pull</button>
+                    <button class="btn btn-sm topbar-action-btn" onclick="PA.refreshTab()" title="Refresh current tab">Refresh</button>
+                    <button class="btn btn-sm global-export-fab" onclick="PA.export.show()" title="Export analysis data">Export</button>
+                    <!-- Duplicate of the shared bottom-right log FAB (../shared/log-fab.js) which already
+                         covers this page — hidden here so there is one Log control per page, in the
+                         shared bottom-right cluster, instead of two different log viewers. -->
+                    <button class="btn btn-sm global-logs-hidden" onclick="PA.logViewer.toggle()" title="View application logs">Logs</button>
+                </div>
+            </div>
+
+            <div class="analysis-layout">
+                <!-- Left Panel -->
+                <div class="left-panel" id="leftPanel">
+                    <div class="left-tabs">
+                        <button class="ltab active" data-tab="procedures" onclick="PA.switchLeftTab('procedures')" title="Procedures and functions in the call tree, sorted by depth">Call Flow</button>
+                        <button class="ltab" data-tab="tables" onclick="PA.switchLeftTab('tables')" title="Database tables accessed across the analysis">Tables</button>
+                    </div>
+                    <div class="left-filter">
+                        <input type="text" id="leftFilter" class="form-input" placeholder="Filter..." oninput="PA.filterLeft()">
+                    </div>
+                    <div class="left-content" id="leftContent">
+                        <div class="left-panel-list" id="lpProcedures"></div>
+                        <div class="left-panel-list" id="lpTables" style="display:none"></div>
+                    </div>
+                </div>
+
+                <!-- Right Panel -->
+                <div class="right-panel">
+                    <div class="detail-header" id="detailHeader" style="display:none">
+                        <div class="dh-top">
+                            <div class="dh-name">
+                                <span id="dhSchema" class="dh-schema-badge"></span>
+                                <span id="dhFullName" class="dh-full-name"></span>
+                            </div>
+                            <div class="dh-meta" id="dhMeta"></div>
+                        </div>
+                        <!-- §267: Claude-generated one-sentence purpose summary, additive/optional —
+                             hidden entirely when no summary has been generated for this node yet. -->
+                        <div class="dh-purpose-summary" id="dhPurposeSummary" style="display:none;font-size:12px;color:var(--text-muted);font-style:italic;padding:2px 0 4px"></div>
+                        <div class="dh-scope-row">
+                            <div class="dh-scope-toggle" id="dhScopeToggle"></div>
+                            <div class="dh-badges" id="dhBadges"></div>
+                        </div>
+                        <div class="dh-stats" id="dhStats"></div>
+                        <div class="dh-totals" id="dhTotals" style="display:none"></div>
+                        <div class="dh-info" id="dhInfo" style="display:none"></div>
+                        <div class="dh-nav" id="dhNav" style="display:none"></div>
+                    </div>
+
+                    <div class="right-tabs">
+                        <button class="rtab active" data-view="explore" onclick="PA.switchRightTab('explore')" title="Hierarchy, trace, and references">Explore</button>
+                        <button class="rtab" data-view="tableOps" onclick="PA.switchRightTab('tableOps')" title="Table operations — SELECT, INSERT, UPDATE, DELETE across procedures">Table Ops</button>
+                        <button class="rtab" data-view="details" onclick="PA.switchRightTab('details')" title="Sequences, joins, dynamic SQL, transactions, cursors, statements and exception handlers">Details</button>
+                        <button class="rtab" data-view="summary" onclick="PA.switchRightTab('summary')" title="Aggregated statistics dashboard for the entire analysis">Summary</button>
+                        <button class="rtab" data-view="complexity" onclick="PA.switchRightTab('complexity')" title="Procedure complexity analysis — LOC, tables, calls, risk ratings">Complexity</button>
+                        <button class="rtab" data-view="callGraphViz" onclick="PA.switchRightTab('callGraphViz')" title="Visual call graph diagram showing procedure dependencies">Graph</button>
+                        <button class="rtab" data-view="source" onclick="PA.switchRightTab('source')" title="View PL/SQL source code with syntax highlighting">Source</button>
+                    </div>
+
+                    <div class="right-content">
+                        <div class="right-view active" id="viewExplore">
+                            <div class="dt-subtabs">
+                                <button class="dt-subtab active" data-exview="hierarchy" onclick="PA.exploreTab.switchSub('hierarchy')" title="Call tree and flat call trace — same data, Tree or Flat layout">Hierarchy</button>
+                                <button class="dt-subtab" data-exview="references" onclick="PA.exploreTab.switchSub('references')">References</button>
+                                <button class="dt-subtab" data-exview="txn" onclick="PA.exploreTab.switchSub('txn')">Transactions</button>
+                            </div>
+
+                            <div class="dt-subview active" id="exViewHierarchy">
+                                <div class="ct-toolbar">
+                                    <div class="breadcrumb" id="breadcrumb"><span class="bc-item bc-root" onclick="PA.callTrace.goRoot()">Root</span></div>
+                                    <div class="ct-actions">
+                                        <div class="mode-tabs" id="hierarchyModeTabs">
+                                            <button class="btn btn-sm mode-tab active" data-mode="tree" onclick="PA.exploreTab.setHierarchyMode('tree')" title="Tree layout — nested rows, drill-down, Make Root">Tree</button>
+                                            <button class="btn btn-sm mode-tab" data-mode="flat" onclick="PA.exploreTab.setHierarchyMode('flat')" title="Flat layout — every call in execution order, one row each, no drill-down">Flat</button>
+                                        </div>
+                                        <button class="btn btn-sm btn-analysis-root" id="btnAnalysisRoot" style="display:none" title="Return to the analysis entry point" onclick="PA.callTrace.goAnalysisRoot()">&#8617; Analysis Root</button>
+                                        <span class="ct-mode-controls" id="ctTreeControls">
+                                            <input type="text" id="exploreSearch" class="form-input" placeholder="Search..." oninput="PA.callTrace.search(this.value)" style="width:150px;font-size:11px;padding:2px 6px">
+                                            <button class="btn btn-sm active" id="ctUniqueBtn" onclick="PA.callTrace.toggleUnique()" title="Unique (default): one row per called procedure, with a &times;N badge listing its call sites. Turn off to show every individual call site as its own row.">Unique</button>
+                                            <button class="btn btn-sm" onclick="PA.callTrace.expandAll()">Expand All</button>
+                                            <button class="btn btn-sm" onclick="PA.callTrace.collapseAll()">Collapse All</button>
+                                        </span>
+                                        <span class="ct-mode-controls" id="ctFlatControls" style="display:none">
+                                            <span id="traceCount" class="badge"></span>
+                                            <input type="text" id="traceSearch" class="form-input" placeholder="Search..." oninput="PA.trace.search(this.value)" style="width:130px;font-size:11px;padding:2px 6px">
+                                            <select id="traceTypeFilter" class="form-input" onchange="PA.trace.setType(this.value)" style="font-size:11px;padding:2px 6px">
+                                                <option value="">All types</option>
+                                                <option value="INTERNAL">Internal</option>
+                                                <option value="EXTERNAL">External</option>
+                                                <option value="TRIGGER">Trigger</option>
+                                                <option value="DYNAMIC">Dynamic</option>
+                                                <option value="CIRCULAR">Circular</option>
+                                            </select>
+                                            <button class="btn btn-sm" id="traceUniqueBtn" onclick="PA.trace.toggleUnique()" title="Collapse repeated calls to each procedure into one row with a call count">Unique</button>
+                                            <button class="btn btn-sm" onclick="PA.trace.expandAll()">Expand All</button>
+                                            <button class="btn btn-sm" onclick="PA.trace.collapseAll()">Collapse All</button>
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="ct-container" id="ctContainer"><div class="empty-msg">Select a procedure from the left panel</div></div>
+                                <div class="ct-container" id="traceContainer" style="display:none"><div class="empty-msg">Select a procedure to see flat trace</div></div>
+                            </div>
+
+                            <div class="dt-subview" id="exViewReferences">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <div class="refs-tabs">
+                                            <button class="btn btn-sm refs-tab active" data-ref="calls" onclick="PA.refs.switchTab('calls')">Calls</button>
+                                            <button class="btn btn-sm refs-tab" data-ref="callers" onclick="PA.refs.switchTab('callers')">Called By</button>
+                                            <!-- <button class="btn btn-sm refs-tab" data-ref="tables" onclick="PA.refs.switchTab('tables')">Tables</button> -->
+                                        </div>
+                                        <input type="text" id="refSearch" class="form-input" placeholder="Search..." oninput="PA.refs.onSearch()" style="width:180px">
+                                        <div class="op-filter-pills" id="refScopePills"></div>
+                                        <span class="op-filter-clear" onclick="PA.refs.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="refsTotalCount" class="badge">0 refs</span>
+                                        <span id="refsFilteredCount" class="badge" style="display:none">0 shown</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="refsContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select a procedure to see references</div></div>
+                                <div class="pagination-bar" id="ref-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="exViewTxn">
+                                <div class="ct-toolbar">
+                                    <div style="font-size:12px;color:var(--text-muted)">Transaction boundaries across the call trace <span id="txnScopeNote" style="color:var(--text-muted)"></span></div>
+                                    <div class="ct-actions">
+                                        <span id="txnCount" class="badge">0 transactions</span>
+                                        <input type="text" id="txnSearchTrace" class="form-input" placeholder="Filter proc / type…" oninput="PA.txnTrace.onSearch(this.value)" style="width:150px;font-size:11px;padding:2px 6px">
+                                        <button class="btn btn-sm active" id="txnViewTableBtn" onclick="PA.txnTrace.setView('table')">Table</button>
+                                        <button class="btn btn-sm" id="txnViewGraphBtn" onclick="PA.txnTrace.setView('graph')">Graph</button>
+                                    </div>
+                                </div>
+                                <div class="ct-container" id="txnContainerTrace"><div class="empty-msg">Select a procedure to see its transaction boundaries</div></div>
+                            </div>
+                        </div>
+
+                        <div class="right-view" id="viewTableOps">
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <input type="text" id="toSearch" class="form-input" placeholder="Search tables..." oninput="PA.tableOps.onSearch()" style="width:180px">
+                                    <div class="op-filter-pills" id="toOpPills"></div>
+                                    <span class="op-filter-clear" onclick="PA.tableOps.clearFilters()">Clear</span>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="toTotalCount" class="badge">0 tables</span>
+                                    <span id="toFilteredCount" class="badge" style="display:none">0 shown</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="toContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see table operations</div></div>
+                            <div class="pagination-bar" id="to-pager" style="display:none"></div>
+                        </div>
+
+                        <div class="right-view" id="viewDetails">
+                            <div class="dt-subtabs">
+                                <button class="dt-subtab active" data-dtview="sequences" onclick="PA.detailsTab.switchSub('sequences')">Sequences</button>
+                                <button class="dt-subtab" data-dtview="joinQuery" onclick="PA.detailsTab.switchSub('joinQuery')">Join Summary</button>
+                                <button class="dt-subtab" data-dtview="dynamic" onclick="PA.detailsTab.switchSub('dynamic')">Dynamic SQL</button>
+                                <button class="dt-subtab" data-dtview="transactions" onclick="PA.detailsTab.switchSub('transactions')">Transactions</button>
+                                <button class="dt-subtab" data-dtview="cursors" onclick="PA.detailsTab.switchSub('cursors')">Cursors</button>
+                                <button class="dt-subtab" data-dtview="statements" onclick="PA.detailsTab.switchSub('statements')">Statements</button>
+                                <button class="dt-subtab" data-dtview="exHandlers" onclick="PA.detailsTab.switchSub('exHandlers')">Exceptions</button>
+                            </div>
+
+                            <div class="dt-subview active" id="dtViewSequences">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="seqSearch" class="form-input" placeholder="Search sequences..." oninput="PA.sequences.onSearch()" style="width:180px">
+                                        <div class="op-filter-pills" id="seqOpPills"></div>
+                                        <span class="op-filter-clear" onclick="PA.sequences.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="seqTotalCount" class="badge">0 sequences</span>
+                                        <span id="seqFilteredCount" class="badge" style="display:none">0 shown</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="seqContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see sequence usage</div></div>
+                                <div class="pagination-bar" id="seq-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="dtViewJoinQuery">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="jqSearch" class="form-input" placeholder="Search queries..." oninput="PA.joinSummary.onSearchQuery()" style="width:180px">
+                                        <span class="op-filter-clear" onclick="PA.joinSummary.clearFiltersQuery()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="jqTotalCount" class="badge">0 queries</span>
+                                        <span id="jqFilteredCount" class="badge" style="display:none">0 shown</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="jqContainer" style="flex:1;overflow:auto"></div>
+                                <div class="pagination-bar" id="jq-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="dtViewDynamic">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="dynSearch" class="form-input" placeholder="Search dynamic SQL..." oninput="PA.dynamicSql.onSearch()" style="width:180px">
+                                        <span class="op-filter-clear" onclick="PA.dynamicSql.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="dynTotalCount" class="badge">0 dynamic</span>
+                                        <span id="dynFilteredCount" class="badge" style="display:none">0 shown</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="dynContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see dynamic SQL</div></div>
+                            </div>
+
+                            <div class="dt-subview" id="dtViewTransactions">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="txnSearch" class="form-input" placeholder="Search transactions..." oninput="PA.transactions.onSearch()" style="width:180px">
+                                        <span class="op-filter-clear" onclick="PA.transactions.clearFilter()">Clear</span>
+                                    </div>
+                                    <div class="to-summary"><span id="txnTotalCount" class="badge">0 statements</span></div>
+                                </div>
+                                <div class="to-container" id="txnContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see transaction control</div></div>
+                            </div>
+
+                            <div class="dt-subview" id="dtViewCursors">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="curSearch" class="form-input" placeholder="Search cursors..." oninput="PA.cursors.onSearch()" style="width:180px">
+                                        <div class="op-filter-pills" id="curTypePills"></div>
+                                        <div class="scope-toggle" id="curScopeToggle"></div>
+                                        <span class="op-filter-clear" onclick="PA.cursors.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="curTotalCount" class="badge">0 cursors</span>
+                                        <span id="curFilteredCount" class="badge" style="display:none">0 shown</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="curContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see cursors</div></div>
+                                <div class="pagination-bar" id="cur-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="dtViewStatements">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="stmtSearch" class="form-input" placeholder="Search statements..." oninput="PA.statements.onSearch()" style="width:180px">
+                                        <div class="op-filter-pills" id="stmtTypePills"></div>
+                                        <span class="op-filter-clear" onclick="PA.statements.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="stmtTotalCount" class="badge">0 types</span>
+                                        <span id="stmtFilteredCount" class="badge" style="display:none">0 shown</span>
+                                        <span id="stmtSumCount" class="badge">0 stmts</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="stmtContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see statement analysis</div></div>
+                                <div class="pagination-bar" id="stmt-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="dtViewExHandlers">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="exhSearch" class="form-input" placeholder="Search..." oninput="PA.exHandlers.onSearch()" style="width:180px">
+                                        <span class="op-filter-clear" onclick="PA.exHandlers.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="exhTotalCount" class="badge">0 procs</span>
+                                        <span id="exhFilteredCount" class="badge" style="display:none">0 shown</span>
+                                        <span id="exhSumCount" class="badge">0 handlers</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="exhContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see exception handlers</div></div>
+                                <div class="pagination-bar" id="exh-pager" style="display:none"></div>
+                            </div>
+                        </div>
+
+                        <!-- viewSequences, viewCursors, viewStatements and viewExHandlers moved into viewDetails sub-tabs -->
+
+                        <div class="right-view" id="viewSummary">
+                            <div class="dt-subtabs">
+                                <button class="dt-subtab active" data-sumview="dashboard" onclick="PA.summaryTab.switchSub('dashboard')">Dashboard</button>
+                                <button class="dt-subtab" data-sumview="claudeInsights" onclick="PA.summaryTab.switchSub('claudeInsights')">Claude Insights</button>
+                                <button class="dt-subtab" data-sumview="claudeCorrections" onclick="PA.summaryTab.switchSub('claudeCorrections')">Claude Corrections</button>
+                            </div>
+                            <div class="dt-subview active" id="sumViewDashboard">
+                                <div class="to-container" id="summaryContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see summary</div></div>
+                            </div>
+                            <div class="dt-subview" id="sumViewClaudeInsights">
+                                <div class="to-container" id="claudeInsightsContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis then enable Claude</div></div>
+                            </div>
+                            <div class="dt-subview" id="sumViewClaudeCorrections">
+                                <div class="to-container" id="claudeCorrectionsContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis then enable Claude</div></div>
+                            </div>
+                        </div>
+
+                        <div class="right-view" id="viewComplexity">
+                            <div class="to-toolbar">
+                                <div class="to-filters">
+                                    <input type="text" id="cxSearch" class="form-input" placeholder="Search procedures..." oninput="PA.complexity.onSearch()" style="width:180px;font-size:11px;padding:3px 8px">
+                                    <div class="op-filter-pills" id="cxRiskPills"></div>
+                                    <span class="op-filter-clear" onclick="PA.complexity.clearFilters()">Clear</span>
+                                    <button class="btn btn-sm" onclick="PA.complexity.openConfig()" title="Configure the scoring algorithm (weights &amp; thresholds)" style="margin-left:8px">&#9881; Scoring</button>
+                                    <span id="cxActiveAlgo" class="cx-active-algo" title="Scoring algorithm currently applied — click to change" onclick="PA.complexity.openConfig()"></span>
+                                </div>
+                                <div class="to-summary">
+                                    <span id="cxTotalCount" class="badge">0 procedures</span>
+                                    <span id="cxFilteredCount" class="badge" style="display:none">0 shown</span>
+                                </div>
+                            </div>
+                            <div class="to-container" id="cxContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see complexity</div></div>
+                            <div class="pagination-bar" id="cx-pager" style="display:none"></div>
+                        </div>
+
+                        <div class="right-view" id="viewCallGraphViz">
+                            <div class="to-container" id="graphContainer" style="flex:1;overflow:hidden;position:relative"><div class="empty-msg">Run analysis to see call graph</div></div>
+                        </div>
+
+                        <div class="right-view" id="viewSource">
+                            <div class="src-header"><span id="srcPath" class="src-path">No file open</span></div>
+                            <div id="srcDetailBar" class="src-detail-bar" style="display:none"></div>
+                            <div class="src-search-bar" id="srcSearchBar" style="display:none">
+                                <input type="text" id="srcSearchInput" class="form-input" placeholder="Find in source..." style="width:200px;font-size:11px;padding:3px 8px"
+                                       oninput="PA.sourceView.search(this.value)" onkeydown="PA.sourceView.searchKeydown(event)">
+                                <span id="srcSearchCount" class="badge" style="font-size:10px">0</span>
+                                <button class="btn btn-sm" onclick="PA.sourceView.searchPrev()" title="Previous">&#9650;</button>
+                                <button class="btn btn-sm" onclick="PA.sourceView.searchNext()" title="Next">&#9660;</button>
+                                <button class="btn btn-sm" onclick="PA.sourceView.closeSearch()">&times;</button>
+                            </div>
+                            <div class="src-tab-body">
+                                <div class="src-container" id="srcContainer"><div class="empty-msg">Click a procedure or line number to view source</div></div>
+                                <div class="src-tab-sidebar" id="srcTabSidebar" style="display:none">
+                                    <div class="cm-sb-section">
+                                        <div class="cm-sb-title" onclick="PA.sourceView.toggleSideSection('stParam')">Parameters <span id="stParamCount" class="cm-sb-count"></span></div>
+                                        <div class="cm-sb-filter"><input type="text" class="cm-sb-search" placeholder="Filter..." oninput="PA.sourceView.filterSideSection('stParam',this.value)"></div>
+                                        <div id="stParamList" class="cm-sb-scroll"></div>
+                                    </div>
+                                    <div class="cm-sb-section">
+                                        <div class="cm-sb-title" onclick="PA.sourceView.toggleSideSection('stVar')">Variables <span id="stVarCount" class="cm-sb-count"></span></div>
+                                        <div class="cm-sb-filter"><input type="text" class="cm-sb-search" placeholder="Filter..." oninput="PA.sourceView.filterSideSection('stVar',this.value)"></div>
+                                        <div id="stVarList" class="cm-sb-scroll"></div>
+                                    </div>
+                                    <div class="cm-sb-section">
+                                        <div class="cm-sb-title" onclick="PA.sourceView.toggleSideSection('stTable')">Tables <span id="stTableCount" class="cm-sb-count"></span></div>
+                                        <div class="cm-sb-filter"><input type="text" class="cm-sb-search" placeholder="Filter..." oninput="PA.sourceView.filterSideSection('stTable',this.value)"></div>
+                                        <div id="stTableList" class="cm-sb-scroll"></div>
+                                    </div>
+                                    <div class="cm-sb-section">
+                                        <div class="cm-sb-title" onclick="PA.sourceView.toggleSideSection('stCalls')">Calls Made <span id="stCallsCount" class="cm-sb-count"></span></div>
+                                        <div class="cm-sb-filter"><input type="text" class="cm-sb-search" placeholder="Filter..." oninput="PA.sourceView.filterSideSection('stCalls',this.value)"></div>
+                                        <div id="stCallsList" class="cm-sb-scroll"></div>
+                                    </div>
+                                    <div class="cm-sb-section">
+                                        <div class="cm-sb-title" onclick="PA.sourceView.toggleSideSection('stCalledBy')">Called By <span id="stCalledByCount" class="cm-sb-count"></span></div>
+                                        <div class="cm-sb-filter"><input type="text" class="cm-sb-search" placeholder="Filter..." oninput="PA.sourceView.filterSideSection('stCalledBy',this.value)"></div>
+                                        <div id="stCalledByList" class="cm-sb-scroll"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="toast" id="toast"></div>
+
+        <!-- Persistent, cross-screen job progress indicator (Home / analysis / History / Perf
+             Summary / Queue) — sits outside every .screen so PA.showScreen never hides it. -->
+        <div class="parser-persistent-progress" id="parserPersistentProgress" style="display:none"></div>
+
+        <!-- Persistent error banner for a failed analyze trigger, alongside the 4s toast. -->
+        <div class="parser-job-banner" id="parserJobBanner" style="display:none">
+            <span id="parserJobBannerMsg"></span>
+            <button class="parser-job-banner-close" onclick="PA.hideJobBanner()">&times;</button>
+        </div>
+
+        <!-- Export Modal -->
+        <div class="src-modal-overlay" id="exportModal" style="display:none" onclick="PA.export.close(event)">
+            <div class="export-modal" onclick="event.stopPropagation()">
+                <div class="src-modal-header">
+                    <span class="src-modal-title">Export Analysis</span>
+                    <div class="src-modal-actions">
+                        <button class="btn btn-sm" onclick="PA.export.close()">&times;</button>
+                    </div>
+                </div>
+                <div class="export-body">
+                    <div class="export-info" id="exportInfo"></div>
+
+                    <div class="exp-section-label">Sheets to include</div>
+                    <div class="export-sections">
+                        <label class="export-check"><input type="checkbox" id="expSummary"   checked> <span class="exp-sheet-dot" style="background:var(--accent)"></span> Summary &amp; Stats</label>
+                        <label class="export-check"><input type="checkbox" id="expProcs"     checked> <span class="exp-sheet-dot" style="background:var(--green)"></span> Call Flow (Procedures)</label>
+                        <label class="export-check"><input type="checkbox" id="expTables"    checked> <span class="exp-sheet-dot" style="background:var(--blue)"></span> Table Operations</label>
+                        <label class="export-check"><input type="checkbox" id="expJoins"     checked> <span class="exp-sheet-dot" style="background:var(--orange)"></span> Joins</label>
+                        <label class="export-check"><input type="checkbox" id="expCursors"   checked> <span class="exp-sheet-dot" style="background:var(--pink)"></span> Cursors</label>
+                        <label class="export-check"><input type="checkbox" id="expSequences" checked> <span class="exp-sheet-dot" style="background:var(--teal)"></span> Sequences</label>
+                        <label class="export-check"><input type="checkbox" id="expCallGraph" checked> <span class="exp-sheet-dot" style="background:var(--accent)"></span> Call Graph</label>
+                        <label class="export-check"><input type="checkbox" id="expComplexity" checked><span class="exp-sheet-dot" style="background:var(--red)"></span> Complexity</label>
+                    </div>
+
+                    <div class="exp-section-label" style="margin-top:10px">Bundle options</div>
+                    <div class="export-sections">
+                        <label class="export-check"><input type="checkbox" id="expSourceCode"> <span class="exp-sheet-dot" style="background:var(--text-muted)"></span> Include source code (raw .prc/.fnc/.sql, ZIP only)</label>
+                    </div>
+
+                    <div class="exp-section-label" style="margin-top:10px">Scope</div>
+                    <div class="exp-detail-row">
+                        <label class="exp-radio"><input type="radio" name="expScope" id="expScopeFull"    value="full"    checked> <b>Full</b> — all procedures in analysis</label>
+                        <label class="exp-radio"><input type="radio" name="expScope" id="expScopeSub"     value="subtree"> <b>Subtree</b> — descendants of selected proc</label>
+                        <label class="exp-radio"><input type="radio" name="expScope" id="expScopeSubflow" value="subflow"> <b>SubFlow</b> — selected proc + descendants</label>
+                        <label class="exp-radio"><input type="radio" name="expScope" id="expScopeDirect"  value="direct"> <b>Direct</b> — selected proc only</label>
+                    </div>
+
+                    <div class="exp-section-label" style="margin-top:10px">Detail level</div>
+                    <div class="exp-detail-row">
+                        <label class="exp-radio"><input type="radio" name="expDetail" id="expLvlDetail" value="detail" checked> <b>Detail</b> — expanded rows per proc/table/line</label>
+                        <label class="exp-radio"><input type="radio" name="expDetail" id="expLvlSummary" value="summary"> <b>Summary</b> — one row per entity</label>
+                    </div>
+
+                    <div class="exp-section-label" style="margin-top:10px">Format</div>
+                    <div class="export-format">
+                        <button class="btn btn-sm" id="expFmtJson" onclick="PA.export.setFormat('json')">JSON</button>
+                        <button class="btn btn-sm" id="expFmtCsv"  onclick="PA.export.setFormat('csv')">CSV</button>
+                        <button class="btn btn-sm active" id="expFmtXlsx" onclick="PA.export.setFormat('xlsx')">&#x1F4CA; Excel (XLSX)</button>
+                        <button class="btn btn-sm" id="expFmtZip" onclick="PA.export.setFormat('zip')">&#x1F5DC; Download as ZIP</button>
+                    </div>
+
+                    <button class="btn exp-download-btn" id="expDownloadBtn" onclick="PA.export.download()">&#x2B07; Download</button>
+                    <div class="exp-status" id="expStatus"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Table Detail Modal -->
+        <div class="src-modal-overlay" id="tableDetailModal" style="display:none" onclick="PA.tableDetail.close(event)">
+            <div class="src-modal" onclick="event.stopPropagation()">
+                <div class="src-modal-header">
+                    <span class="src-modal-title" id="tdModalTitle">Table Details</span>
+                    <div class="src-modal-actions">
+                        <button class="btn btn-sm" onclick="PA.queryRunner.open(PA.tableDetail._tableName, PA.tableDetail._schema)" title="Query this table">Query</button>
+                        <button class="btn btn-sm" onclick="PA.tableDetail.close()">&times;</button>
+                    </div>
+                </div>
+                <div class="cm-info-bar" id="tdInfoBar"></div>
+                <div class="td-toolbar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-bottom:1px solid var(--border)">
+                    <div class="op-filter-pills" id="tdOpPills"></div>
+                    <input type="text" id="tdSearch" class="form-input" placeholder="Search..." style="width:160px;font-size:11px;padding:3px 8px" oninput="PA.tableDetail.filter()">
+                    <span id="tdCount" class="badge" style="font-size:10px"></span>
+                </div>
+                <div class="src-modal-body" id="tdModalBody" style="padding:12px;flex:1;overflow:auto;min-height:0"></div>
+            </div>
+        </div>
+
+        <!-- Cross-analysis search (B13) -->
+        <div class="src-modal-overlay" id="asModal" style="display:none" onclick="PA.analysisSearch.close(event)">
+            <div class="src-modal" onclick="event.stopPropagation()">
+                <div class="src-modal-header">
+                    <span class="src-modal-title">Search analysis</span>
+                    <div class="src-modal-actions">
+                        <button class="btn btn-sm" onclick="PA.analysisSearch.close()">&times;</button>
+                    </div>
+                </div>
+                <div class="td-toolbar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-bottom:1px solid var(--border)">
+                    <input type="search" id="asQuery" class="form-input"
+                           placeholder="op:UPDATE table:ERP_STOCK_LEVEL col:QTY*"
+                           style="flex:1;font-size:12px;padding:4px 8px"
+                           oninput="PA.analysisSearch.onInput()">
+                </div>
+                <!-- The true total and the query as the engine understood it. Both must be visible
+                     before a row is read: a page count read as a total, or a misparsed query read
+                     as an absence, are the two ways this screen could mislead. -->
+                <div class="as-header" id="asHeader"></div>
+                <div class="src-modal-body" id="asBody" style="padding:12px;flex:1;overflow:auto;min-height:0"></div>
+            </div>
+        </div>
+
+        <!-- Source Modal -->
+        <div class="src-modal-overlay" id="srcModal" style="display:none" onclick="PA.sourceModal.close(event)">
+            <div class="src-modal" onclick="event.stopPropagation()">
+                <div class="src-modal-header">
+                    <div class="cm-nav-btns">
+                        <button class="btn btn-sm" id="cmBack" onclick="PA.sourceModal.back()" disabled title="Back">&#9664;</button>
+                        <button class="btn btn-sm" id="cmFwd" onclick="PA.sourceModal.forward()" disabled title="Forward">&#9654;</button>
+                    </div>
+                    <span class="src-modal-title" id="srcModalTitle">Source</span>
+                    <div class="src-modal-actions">
+                        <button class="btn btn-sm" onclick="PA.sourceModal.copy()" title="Copy source">Copy</button>
+                        <button class="btn btn-sm" onclick="PA.sourceModal.toggleSearch()" title="Search (Ctrl+F)">Find</button>
+                        <button class="btn btn-sm" id="cmMinimizeBtn" onclick="PA.sourceModal.toggleMinimize()" title="Minimize / restore">&#x2013;</button>
+                        <button class="btn btn-sm" id="cmFullscreenBtn" onclick="PA.sourceModal.toggleFullscreen()" title="Toggle fullscreen">&#x26F6;</button>
+                        <button class="btn btn-sm" onclick="PA.sourceModal.close()" title="Close (Esc)">&times;</button>
+                    </div>
+                </div>
+                <div class="cm-info-bar" id="cmInfoBar" style="display:none"></div>
+                <div class="cm-breadcrumb" id="cmBreadcrumb" style="display:none"></div>
+                <div class="cm-search-bar" id="cmSearchBar" style="display:none">
+                    <input type="text" id="cmSearchInput" class="form-input" placeholder="Find in source..." style="width:200px;font-size:11px;padding:3px 8px"
+                           oninput="PA.sourceModal.search(this.value)" onkeydown="PA.sourceModal.searchKeydown(event)">
+                    <span id="cmSearchCount" class="badge" style="font-size:10px">0</span>
+                    <button class="btn btn-sm" onclick="PA.sourceModal.searchPrev()" title="Previous (Shift+Enter)">&#9650;</button>
+                    <button class="btn btn-sm" onclick="PA.sourceModal.searchNext()" title="Next (Enter)">&#9660;</button>
+                    <button class="btn btn-sm" onclick="PA.sourceModal.closeSearch()">&times;</button>
+                </div>
+                <div class="cm-body">
+                    <div class="src-modal-body" id="srcModalBody"></div>
+                    <div class="cm-sidebar" id="cmSidebar">
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Param')">Parameters <span id="cmParamCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmParamSearch" placeholder="Filter params..." oninput="PA.sourceModal.filterSection('Param',this.value)"></div>
+                            <div id="cmParamList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Var')">Variables <span id="cmVarCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmVarSearch" placeholder="Filter variables..." oninput="PA.sourceModal.filterSection('Var',this.value)"></div>
+                            <div id="cmVarList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Table')">Tables <span id="cmTableCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmTableSearch" placeholder="Filter tables..." oninput="PA.sourceModal.filterSection('Table',this.value)"></div>
+                            <div id="cmTableList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Cursor')">Cursors <span id="cmCursorCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmCursorSearch" placeholder="Filter cursors..." oninput="PA.sourceModal.filterSection('Cursor',this.value)"></div>
+                            <div id="cmCursorList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Calls')">Calls Made <span id="cmCallsCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmCallsSearch" placeholder="Filter calls..." oninput="PA.sourceModal.filterSection('Calls',this.value)"></div>
+                            <div id="cmCallsList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('CalledBy')">Called By <span id="cmCalledByCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmCalledBySearch" placeholder="Filter callers..." oninput="PA.sourceModal.filterSection('CalledBy',this.value)"></div>
+                            <div id="cmCalledByList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('PkgVar')">Package Variables <span id="cmPkgVarCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmPkgVarSearch" placeholder="Filter package vars..." oninput="PA.sourceModal.filterSection('PkgVar',this.value)"></div>
+                            <div id="cmPkgVarList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Fk')">Foreign Keys <span id="cmFkCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmFkSearch" placeholder="Filter foreign keys..." oninput="PA.sourceModal.filterSection('Fk',this.value)"></div>
+                            <div id="cmFkList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Txn')">Transaction Scope <span id="cmTxnCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmTxnSearch" placeholder="Filter transaction stmts..." oninput="PA.sourceModal.filterSection('Txn',this.value)"></div>
+                            <div id="cmTxnList" class="cm-sb-scroll"></div>
+                        </div>
+                        <div class="cm-sb-section">
+                            <div class="cm-sb-title" onclick="PA.sourceModal.toggleSection('Claude')">Claude Verification <span id="cmClaudeCount" class="cm-sb-count"></span></div>
+                            <div class="cm-sb-filter"><input type="text" class="cm-sb-search" id="cmClaudeSearch" placeholder="Filter verifications..." oninput="PA.sourceModal.filterSection('Claude',this.value)"></div>
+                            <div id="cmClaudeList" class="cm-sb-scroll"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Config Modal -->
+    <div class="cfg-overlay" id="cfgModal" style="display:none" onclick="PA.config.closeModal(event)">
+        <div class="cfg-modal" onclick="event.stopPropagation()">
+            <div class="cfg-header">
+                <h2>&#9881; DB Configuration &amp; Environments</h2>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <button class="btn btn-sm btn-primary" onclick="PA.config.showAddProject()">+ Add Project</button>
+                    <button class="btn btn-sm" onclick="PA.config.closeModal()">&times;</button>
+                </div>
+            </div>
+            <div class="cfg-body">
+                <div class="cfg-panel cfg-col-projects" id="cfgProjectList"><div class="cfg-empty">Loading...</div></div>
+                <div class="cfg-panel cfg-col-envs" id="cfgEnvPanel"></div>
+                <div class="cfg-panel cfg-col-detail" id="cfgDetailPanel"><div class="cfg-empty">Select a project</div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Viewer (created dynamically by logViewer.js) -->
+
+    <!-- Log FAB (bottom-left, always visible) -->
+    <link rel="stylesheet" href="../shared/log-fab.css?v=1789225475">
+    <script src="../shared/log-fab.js?v=1789329600"></script>
+
+    <link rel="stylesheet" href="../shared/api-activity-panel.css?v=1789310000">
+    <script src="../shared/api-activity-panel.js?v=1789310000"></script>
+    <!-- TASK-REGISTRY §275 — measures topbar/detail-header at runtime and sets --fab-top-offset,
+         so the export+log cluster above never collides with real page content. -->
+    <script src="../shared/floating-fab-position.js?v=1789223096"></script>
+    <script>LogFab.init();</script>
+    <!-- TASK-REGISTRY §276 — user asked for Export/Log to stop floating over the page entirely
+         and instead sit inside the loaded analysis screen itself. Reparents both into
+         `.topbar-actions` (already where Export lived in normal document flow before it was
+         pulled out into a floating FAB). -->
+    <script src="../shared/inline-fab.js?v=1789225431"></script>
+    <script>MdbInlineFab.init('.topbar-actions');</script>
+
+    <script src="js/utils.js?v=1789028442"></script>
+    <script src="js/jobTracker.js?v=1789300001"></script>
+    <script src="js/nodeIndex.js?v=1789027740"></script>
+    <script src="js/pagination.js?v=1788351397"></script>
+    <script src="js/scope.js?v=1789028423"></script>
+    <script src="../shared/tableFramework.js?v=1789329600"></script>
+    <script src="../shared/access-details.js?v=1788553813"></script>
+    <script src="js/api.js?v=1789329600"></script>
+    <!-- TASK-REGISTRY §280 — was never wired here; #globalSearch's oninput still called the old
+         PA.globalSearch (toy same-tab filter) the whole time, even after §277's topbar-button
+         redirect (redirecting a click to an input that itself called the wrong function on
+         keystroke fixed nothing). -->
+    <script src="js/search.js?v=1789280901"></script>
+    <script src="js/router.js?v=1788261889"></script>
+    <script src="js/history.js?v=1788555881"></script>
+    <script src="js/leftPanel.js?v=1790140946"></script>
+    <script src="js/detailHeader.js?v=1789198708"></script>
+    <script src="js/callGraph.js?v=1790155557399"></script>
+    <script src="js/tableOps.js?v=1789272053"></script>
+    <script src="js/analysisSearch.js?v=1789233556"></script>
+    <script src="js/triggers.js?v=1788516008"></script>
+    <script src="js/triggerDetail.js?v=1789028713"></script>
+    <script src="js/joins.js?v=1789209860"></script>
+    <script src="js/joinSummary.js?v=1789028692"></script>
+    <script src="js/cursors.js?v=1789209932"></script>
+    <script src="js/sourceView.js?v=1789825000"></script>
+    <script>if(typeof cptable === 'undefined') var cptable = {};</script>
+    <script src="js/xlsx.full.min.js?v=1788261890"></script>
+    <script>
+    /* xlsx-style@0.8.x browser compatibility shim */
+    (function(){
+        if(typeof XLSX === 'undefined') return;
+        if(!XLSX.utils.book_new) XLSX.utils.book_new = function(){ return { SheetNames:[], Sheets:{} }; };
+        if(!XLSX.utils.book_append_sheet) XLSX.utils.book_append_sheet = function(wb,ws,name){ wb.SheetNames.push(name); wb.Sheets[name]=ws; };
+        /* Force-override writeFile — xlsx-style's built-in calls fs.writeFileSync (Node only) */
+        XLSX.writeFile = function(wb, fn){
+            var wbout = XLSX.write(wb, { bookType:'xlsx', bookSST:false, type:'binary' });
+            function s2ab(s){ var b=new ArrayBuffer(s.length); var v=new Uint8Array(b); for(var i=0;i<s.length;i++) v[i]=s.charCodeAt(i)&0xff; return b; }
+            var blob = new Blob([s2ab(wbout)], { type:'application/octet-stream' });
+            var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fn; document.body.appendChild(a); a.click(); setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 100);
+        };
+    })();
+    </script>
+    <script src="js/export.js?v=1789138849"></script>
+    <script src="js/tableDetail.js?v=1789029078"></script>
+    <script src="js/sequences.js?v=1788352248"></script>
+    <script src="js/dynamicSql.js?v=1788351515"></script>
+    <script src="js/transactions.js?v=1788498141"></script>
+    <script src="js/txnTrace.js?v=1788261888"></script>
+    <script src="js/statements.js?v=1789907708"></script>
+    <script src="js/exHandlers.js?v=1788808913"></script>
+    <script src="js/summary.js?v=1788930695"></script>
+    <script src="js/complexity.js?v=1789329600"></script>
+    <script src="js/callGraphFullscreen.js?v=1788261891"></script>
+    <script src="js/callGraphModal.js?v=1788959420"></script>
+    <script src="js/callGraphViz.js?v=1789247001"></script>
+    <script src="js/refs.js?v=1789877877"></script>
+    <script src="js/claudeEnrichment.js?v=1788857452"></script>
+    <script src="js/claudeSessions.js?v=1788340110"></script>
+    <script src="js/claudeInsights.js?v=1788338996"></script>
+    <script src="js/claudeCorrections.js?v=1788261890"></script>
+    <script src="js/chunkViewer.js?v=1788516008"></script>
+    <script src="js/tooltips.js?v=1788290523"></script>
+    <script src="js/errorModal.js?v=1788261889"></script>
+    <script src="js/queryRunner.js?v=1788676003"></script>
+    <script src="js/perfSummary.js?v=1788543964"></script>
+    <script src="js/cacheManager.js?v=1788543964"></script>
+    <script src="js/promptManager.js?v=1788675678"></script>
+    <script src="js/sync.js?v=1788261888"></script>
+    <!-- DB multi-support components — must load before config.js -->
+    <script src="js/db-selector.js?v=1788261891"></script>
+    <script src="js/conn-form-fields-oracle.js?v=1788261887"></script>
+    <script src="js/conn-form-fields-mysql.js?v=1788261888"></script>
+    <script src="js/conn-form-fields-sqlserver.js?v=1788261889"></script>
+    <script src="js/conn-form-fields-db2.js?v=1788261889"></script>
+    <script src="js/conn-form-fields-postgres.js?v=1788261889"></script>
+    <script src="js/conn-form.js?v=1788261888"></script>
+    <script src="js/conn-test.js?v=1788675928"></script>
+    <script src="js/config.js?v=1788675928"></script>
+    <script src="js/logViewer.js?v=1788516008"></script>
+    <script src="js/home.js?v=1789202639"></script>
+    <script src="js/app.js?v=1790155557399"></script>
+
+    <!-- Classic Chat -->
+    <link rel="stylesheet" href="../shared/chat.css?v=1789232664">
+    <script src="../shared/chat-api.js?v=1789240569"></script>
+    <script src="../shared/chat.js?v=1788355691"></script>
+    <div id="chatRoot"></div>
+    <script>ChatPanel.init('#chatRoot', 'PARSER', function(){
+        var entry = (PA.analysisData && PA.analysisData.entryPoint) || '';
+        var proc  = (PA.context && PA.context.procId) || '';
+        var name  = proc || entry;
+        return { procName: name, analysisName: (PA.analysisData && PA.analysisData.name) || name };
+    });</script>
+
+    <!-- New Chatbox + Toggle -->
+    <link rel="stylesheet" href="../shared/chatbox.css?v=1789240603">
+    <script src="../shared/chatbox.js?v=1789240599"></script>
+    <script src="../shared/chat-toggle.js?v=1788261877"></script>
+    <script>SharedChatToggle.init('PARSER', function(){
+        var entry = (PA.analysisData && PA.analysisData.entryPoint) || '';
+        var proc  = (PA.context && PA.context.procId) || '';
+        var name  = proc || entry;
+        return { procName: name, analysisName: (PA.analysisData && PA.analysisData.name) || name };
+    });</script>
+
+    <!-- Help System -->
+    <link rel="stylesheet" href="../shared/help.css?v=1789139145">
+    <script src="../shared/help.js?v=1788261878"></script>
+    <link rel="stylesheet" href="../shared/sidebar-toggle.css?v=1789139139">
+    <script src="../shared/sidebar-toggle.js?v=1789139121"></script>
+    <link rel="stylesheet" href="../shared/resizable-panel.css?v=1789231308">
+    <script src="../shared/resizable-panel.js?v=1789231304"></script>
+    <script>HelpSystem.init('parser');</script>
+</body>
+</html>

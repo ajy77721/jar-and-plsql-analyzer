@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/shared/mongodb-theme.css?v=1789287064">
+    <!-- Page envelope shim: normalises paged and legacy (bare array) API responses.
+         Must load before any script that reads a list endpoint. -->
+    <script src="../shared/escape.js?v=1788675772"></script>
+    <script src="../shared/page-envelope.js?v=1788752637"></script>
+    <script src="../shared/ui-busy.js?v=1788555867"></script>
+    <!-- Polling intervals. Must load before every app script: the shared log FAB reads
+         PollConfig.logRefreshMs and threw ReferenceError on this page without it. -->
+    <script src="../shared/poll-config.js?v=1788676228"></script>
+    <script src="/shared/theme-toggle.js?v=1789138484"></script>
+    <script src="/shared/theme-colors.js?v=1788261891"></script>
+    <title>PL/SQL → Java Conversion</title>
+    <style>
+        /* Page-local aliases only — all colour lives in
+           /shared/mongodb-theme.css. This page was hardcoded dark; it now
+           follows the light/dark switch like every other screen. */
+        :root {
+            --surface:  var(--bg-card);
+            --surface2: var(--bg-elevated);
+            --surface3: var(--bg-inset);
+            --accent-d: var(--accent-hover);
+            --muted:    var(--text-muted);
+            --code:     var(--code-text);
+        }
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+        /* ── top bar ── */
+        .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;display:flex;align-items:center;gap:14px;height:48px;flex-shrink:0}
+        .topbar a{color:var(--muted);text-decoration:none;font-size:12px}.topbar a:hover{color:var(--text)}
+        .topbar h1{font-size:15px;font-weight:700}
+        .topbar .sep{color:var(--border)}
+        #claude-badge{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+        .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.dot.ok{background:var(--green)}.dot.err{background:var(--red)}
+
+        /* ── layout ── */
+        .layout{display:grid;grid-template-columns:320px 1fr;flex:1;overflow:hidden}
+
+        /* ── left panel ── */
+        .left{background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:14px}
+        .sec-title{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+        .field{display:flex;flex-direction:column;gap:4px}
+        .field label{font-size:11px;font-weight:600;color:var(--muted)}
+        .field input,.field select{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;padding:7px 9px;outline:none;width:100%}
+        .field input:focus,.field select:focus{border-color:var(--accent)}
+        .field .hint{font-size:10px;color:var(--text-muted)}
+        .toggle-row{display:flex;align-items:center;gap:8px}
+        .toggle-row label{font-size:12px}
+        input[type=checkbox]{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
+        .btn{padding:9px 14px;border:none;border-radius:var(--radius);font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s;display:flex;align-items:center;gap:7px;justify-content:center;width:100%}
+        .btn:hover:not(:disabled){opacity:.85}.btn:disabled{opacity:.4;cursor:not-allowed}
+        .btn-primary{background:var(--accent);color:var(--text-inverse)}
+        .btn-green{background:var(--badge-green-bg);color:var(--badge-green);border:1px solid var(--badge-green)}
+        .btn-yellow{background:var(--badge-orange-bg);color:var(--badge-orange);border:1px solid var(--badge-orange)}
+        .divider{display:flex;align-items:center;gap:8px;margin:4px 0}
+        .divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--border)}
+        .divider span{font-size:10px;color:var(--muted);white-space:nowrap}
+
+        /* ── right panel ── */
+        .right{display:flex;flex-direction:column;overflow:hidden}
+
+        /* ── tab bar ── */
+        .tabs{background:var(--surface);border-bottom:1px solid var(--border);display:flex;padding:0 16px;flex-shrink:0}
+        .tab{padding:10px 16px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
+        .tab.active{color:var(--accent);border-color:var(--accent)}
+        .tab-content{display:none;flex:1;overflow-y:auto;padding:16px;flex-direction:column;gap:12px}
+        .tab-content.active{display:flex}
+
+        /* ── job list ── */
+        .jobs-empty{color:var(--muted);text-align:center;padding:40px 0;font-size:13px}
+        .job-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px;cursor:pointer;transition:border-color .15s}
+        .job-card:hover,.job-card.selected{border-color:var(--accent)}
+        .job-card.running{border-color:var(--blue)}
+        .jh{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+        .tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:var(--radius-sm);text-transform:uppercase}
+        .tag-convert{background:var(--badge-blue-bg);color:var(--badge-blue)}.tag-validate{background:var(--badge-green-bg);color:var(--badge-green)}.tag-fix{background:var(--badge-orange-bg);color:var(--badge-orange)}
+        .j-proc{font-weight:700;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .j-status{font-size:10px;font-weight:700;padding:2px 7px;border-radius:var(--radius-sm)}
+        .st-running{background:var(--badge-blue-bg);color:var(--badge-blue)}.st-done{background:var(--badge-green-bg);color:var(--badge-green)}
+        .st-failed{background:var(--badge-red-bg);color:var(--badge-red)}.st-interrupted{background:var(--badge-orange-bg);color:var(--badge-orange)}
+        .j-meta{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:8px}
+        .phase-pill{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-xl);padding:2px 9px;font-size:10px;color:var(--muted);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+        /* ── detail view ── */
+        .detail-hdr{display:flex;align-items:center;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+        .detail-proc{font-size:15px;font-weight:700}
+        .elapsed{font-size:11px;color:var(--muted);margin-left:auto}
+
+        /* ── progress log (pill messages) ── */
+        .log-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden}
+        .box-hdr{padding:8px 12px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+        .box-hdr .hdr-actions{margin-left:auto;display:flex;gap:6px}
+        .log-body{padding:10px 12px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+        .log-line{font-size:12px;color:var(--badge-blue)}
+
+        /* ── live output ── */
+        .live-box{background:var(--surface3);border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;flex:1;display:flex;flex-direction:column;min-height:300px}
+        .live-hdr{padding:8px 12px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--badge-blue);display:flex;align-items:center;gap:8px;flex-shrink:0}
+        .live-counter{background:var(--badge-blue-bg);border-radius:var(--radius-sm);padding:1px 6px;font-size:10px;color:var(--badge-blue)}
+        .live-body{flex:1;overflow-y:auto;padding:10px 12px;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-size:11.5px;line-height:1.65;color:var(--code)}
+        .live-empty{color:var(--text-secondary);padding:24px;text-align:center;font-style:italic}
+        .ll{white-space:pre-wrap;word-break:break-word;padding:1px 0}
+        /* colour claude output lines */
+        .ll.phase{color:var(--accent-hover);font-weight:600}
+        .ll.done{color:var(--green)}
+        .ll.warn{color:var(--orange)}
+        .ll.err{color:var(--red)}
+        .ll.info{color:var(--blue)}
+
+        /* ── prompt view ── */
+        .prompt-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden}
+        .prompt-body{padding:12px;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-size:11px;line-height:1.65;max-height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;color:var(--code)}
+
+        .report-pill{background:var(--badge-green-bg);border:1px solid var(--badge-green);border-radius:var(--radius);padding:9px 12px;color:var(--badge-green);font-family:monospace;font-size:12px;display:flex;align-items:center;gap:8px}
+        .error-pill{background:var(--badge-red-bg);border:1px solid var(--badge-red);border-radius:var(--radius);padding:9px 12px;color:var(--badge-red);font-size:12px}
+
+        /* ── report markdown ── */
+        .report-body{padding:18px 20px;flex:1;overflow-y:auto;line-height:1.75;max-width:900px}
+        .report-body h1{font-size:18px;font-weight:700;color:var(--text);margin:0 0 14px}
+        .report-body h2{font-size:14px;font-weight:700;color:var(--accent);margin:20px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+        .report-body h3{font-size:13px;font-weight:600;color:var(--badge-blue);margin:14px 0 6px}
+        .report-body h4{font-size:12px;font-weight:600;color:var(--muted);margin:10px 0 4px}
+        .report-body p{font-size:12.5px;color:var(--text);margin:4px 0 8px}
+        .report-body ul,.report-body ol{padding-left:20px;margin:4px 0 8px}
+        .report-body li{font-size:12.5px;color:var(--text);margin:2px 0}
+        .report-body code{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1px 5px;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-size:11px;color:var(--badge-blue)}
+        .report-body pre{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;overflow-x:auto;margin:8px 0}
+        .report-body pre code{background:none;border:none;padding:0;font-size:11px}
+        .report-body table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px}
+        .report-body th{background:var(--surface2);color:var(--muted);font-weight:600;padding:6px 10px;text-align:left;border:1px solid var(--border)}
+        .report-body td{padding:5px 10px;border:1px solid var(--border);color:var(--text)}
+        .report-body tr:nth-child(even) td{background:var(--blue)}
+        .report-body hr{border:none;border-top:1px solid var(--border);margin:16px 0}
+        .report-body blockquote{border-left:3px solid var(--accent);padding:4px 12px;margin:8px 0;color:var(--muted);background:var(--surface)}
+        /* checkbox items */
+        .report-body .cb-pass{color:var(--green)}.report-body .cb-fail{color:var(--red)}.report-body .cb-skip{color:var(--yellow)}
+        .report-body strong{color:var(--text-inverse)}
+        .report-body a{color:var(--accent);text-decoration:none}.report-body a:hover{text-decoration:underline}
+
+        .copy-btn{background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--muted);font-size:10px;padding:2px 7px;cursor:pointer}
+        .copy-btn:hover{color:var(--text)}
+        .spinner{width:12px;height:12px;border:2px solid var(--surface2);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .auto-scroll-btn{background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--muted);font-size:10px;padding:2px 7px;cursor:pointer}
+        .auto-scroll-btn.on{color:var(--green);border-color:var(--green)}
+    </style>
+</head>
+<body>
+
+<div class="topbar">
+    <a href="/">← Home</a>
+    <span class="sep">|</span>
+    <h1>PL/SQL → Java Conversion</h1>
+    <div id="claude-badge">
+        <div class="dot" id="cdot"></div>
+        <span id="clabel">Checking…</span>
+    </div>
+</div>
+
+<div class="layout">
+
+    <!-- ── LEFT: form ── -->
+    <div class="left">
+
+        <div>
+            <div class="sec-title">Procedure</div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+                <div class="field">
+                    <label>Oracle Procedure *</label>
+                    <input id="f-proc" placeholder="PG_UWTH_VI_PROVISO.FN_FETCH_PROVISO_DETAILS" />
+                </div>
+                <div class="field">
+                    <label>Maven Module Path *</label>
+                    <input id="f-module" placeholder="CustomerExtension/opus.AccountsService" />
+                </div>
+                <div class="field">
+                    <label>Service Impl Class</label>
+                    <input id="f-service" placeholder="ExtensionAccountsFnFetchProvisioDetailsServiceImpl" />
+                    <span class="hint">Auto-inferred from PROCEDUREREF if blank</span>
+                </div>
+                <div class="field">
+                    <label>Controller Class (optional)</label>
+                    <input id="f-ctrl" placeholder="e.g. ExtensionAccountsController" />
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <div class="sec-title">Project</div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+                <div class="field">
+                    <label>opus-product-services Root</label>
+                    <input id="f-path" placeholder="C:\Users\HUMDL98\Projects\opus-product-services" />
+                    <span class="hint">Absolute path to your repo checkout</span>
+                </div>
+                <div class="field">
+                    <label>Oracle Schema (optional)</label>
+                    <input id="f-owner" placeholder="e.g. OPUS_CORE" />
+                </div>
+            </div>
+        </div>
+
+        <div class="toggle-row">
+            <input type="checkbox" id="f-batch" />
+            <label for="f-batch">Batch procedure (G18–G22 rules)</label>
+        </div>
+
+        <div class="divider"><span>Run</span></div>
+
+        <button class="btn btn-primary" onclick="CV.run('convert')"  id="b-convert" >⚡ Convert Procedure</button>
+        <button class="btn btn-green"   onclick="CV.run('validate')" id="b-validate">✓ Validate Conversion</button>
+        <button class="btn btn-yellow"  onclick="CV.run('fix')"      id="b-fix"     >🔧 Fix Conversion</button>
+
+        <div class="divider"><span>About</span></div>
+
+        <div style="font-size:11px;color:var(--text-muted);line-height:1.7">
+            <b style="color:var(--muted)">Convert</b> — Full 11-phase Oracle→Java pipeline via Claude CLI.<br><br>
+            <b style="color:var(--muted)">Validate</b> — Reverse-validates an existing conversion, emits VALIDATION_REPORT_*.md.<br><br>
+            <b style="color:var(--muted)">Fix</b> — Auto-fixes all open checkboxes from the last validation report (max 3 loops).<br><br>
+            Jobs survive page refresh &amp; server restart. Claude stdout streams live.
+        </div>
+    </div>
+
+    <!-- ── RIGHT ── -->
+    <div class="right">
+
+        <div class="tabs">
+            <div class="tab active" id="t-jobs"   onclick="CV.tab('jobs')">Jobs</div>
+            <div class="tab"        id="t-detail" onclick="CV.tab('detail')">Live Output</div>
+            <div class="tab"        id="t-report" onclick="CV.tab('report')">📄 Report</div>
+            <div class="tab"        id="t-prompt" onclick="CV.tab('prompt')">Instruction Prompt</div>
+        </div>
+
+        <!-- Jobs list -->
+        <div class="tab-content active" id="tc-jobs">
+            <div id="jobs-list"><div class="jobs-empty">No jobs yet — run a conversion above.</div></div>
+        </div>
+
+        <!-- Live output + log -->
+        <div class="tab-content" id="tc-detail" style="gap:10px">
+            <div id="detail-empty" style="color:var(--muted);text-align:center;padding:40px;font-size:13px">Select a job from the Jobs tab to see live output.</div>
+            <div id="detail-wrap" style="display:none;flex-direction:column;gap:10px;flex:1">
+
+                <!-- Header -->
+                <div class="detail-hdr">
+                    <span class="tag" id="d-tag"></span>
+                    <span class="detail-proc" id="d-proc"></span>
+                    <span class="j-status" id="d-status"></span>
+                    <div id="d-spinner" class="spinner" style="display:none"></div>
+                    <span class="phase-pill" id="d-phase"></span>
+                    <span class="elapsed" id="d-elapsed"></span>
+                </div>
+
+                <!-- Report path (shown when done) -->
+                <div id="d-report" style="display:none" class="report-pill">📄 <span id="d-report-path"></span></div>
+
+                <!-- Error -->
+                <div id="d-error" style="display:none" class="error-pill">❌ <span id="d-error-msg"></span></div>
+
+                <!-- Progress log (system messages) -->
+                <div class="log-box">
+                    <div class="box-hdr">
+                        Progress Log
+                        <div class="hdr-actions">
+                            <button class="copy-btn" onclick="CV.copyEl('d-log-body')">Copy</button>
+                        </div>
+                    </div>
+                    <div class="log-body" id="d-log-body"></div>
+                </div>
+
+                <!-- Live Claude output -->
+                <div class="live-box" style="flex:1">
+                    <div class="live-hdr">
+                        Claude Output
+                        <span class="live-counter" id="d-live-count">0 lines</span>
+                        <div style="margin-left:auto;display:flex;gap:6px">
+                            <button class="auto-scroll-btn on" id="d-autoscroll" onclick="CV.toggleAutoscroll()">Auto-scroll ✓</button>
+                            <button class="copy-btn" onclick="CV.copyEl('d-live-body')">Copy</button>
+                        </div>
+                    </div>
+                    <div class="live-body" id="d-live-body"><div class="live-empty">Waiting for Claude output…</div></div>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- Report viewer -->
+        <div class="tab-content" id="tc-report" style="gap:10px">
+            <div id="report-empty" style="color:var(--muted);text-align:center;padding:40px;font-size:13px">
+                No report yet — run a <b>Validate</b> or <b>Convert</b> job first.
+            </div>
+            <div id="report-wrap" style="display:none;flex-direction:column;gap:0;flex:1;overflow:hidden">
+                <div class="log-box" style="border-radius:8px 8px 0 0;border-bottom:none">
+                    <div class="box-hdr" style="border-bottom:none">
+                        <span id="report-file-label" style="font-family:monospace;color:var(--green);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:600px"></span>
+                        <div class="hdr-actions">
+                            <button class="copy-btn" id="report-reload-btn" onclick="CV.loadReport()" style="border-color:var(--badge-green);color:var(--green)">↺ Reload</button>
+                            <button class="copy-btn" onclick="CV.copyEl('report-md-body')">Copy MD</button>
+                        </div>
+                    </div>
+                </div>
+                <div style="background:var(--surface);border:1px solid var(--border);border-radius:0 0 8px 8px;flex:1;overflow-y:auto">
+                    <div class="report-body" id="report-md-body"></div>
+                </div>
+                <div id="report-error" style="display:none" class="error-pill" style="margin-top:8px"></div>
+            </div>
+        </div>
+
+        <!-- Instruction prompt -->
+        <div class="tab-content" id="tc-prompt">
+            <div id="prompt-empty" style="color:var(--muted);text-align:center;padding:40px;font-size:13px">Run a job to see the generated Claude instruction prompt.</div>
+            <div id="prompt-wrap" style="display:none;flex-direction:column;gap:10px;flex:1">
+                <div class="prompt-box">
+                    <div class="box-hdr">
+                        Claude Instruction Prompt
+                        <div class="hdr-actions">
+                            <button class="copy-btn" onclick="CV.copyEl('prompt-body')">Copy</button>
+                        </div>
+                    </div>
+                    <div class="prompt-body" id="prompt-body"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+/*
+ * The conversion detail screen.
+ *
+ * PLAN-03 §1.5 #2 measured the old poll here as the worst in the application: every 1.5 s it
+ * fetched the entire job — the progress log, up to 2 000 live output lines, and the immutable
+ * generated instruction — then rebuilt the whole log DOM from it and re-ran five regexes over every
+ * line to pick a CSS class. None of that changed between most ticks.
+ *
+ * It now polls ~10 scalars with an If-None-Match (a tick with no state change is a 304), pulls the
+ * two append-only streams as `seq` deltas, appends the delta to the DOM instead of replacing it,
+ * reads the level as a field instead of re-deriving it, and fetches the instruction exactly once.
+ */
+const CV = {
+    _jobs: {},
+    _sel: null,          // selected jobId
+    _poll: null,         // setInterval handle
+    _elapsedTimer: null, // setInterval for elapsed counter
+    _autoscroll: true,
+
+    /**
+     * Per-job cursor state: how far each stream has been consumed, the last status ETag, and
+     * whether the immutable instruction has been fetched. Keyed by jobId so switching jobs and
+     * switching back does not replay either stream.
+     */
+    _streams: {},
+
+    /*
+     * First paint asks for the tail; only the polls are deltas.
+     *
+     * 1000 is PageRequest.MAX_LIMIT — the server's hard ceiling on any page, so asking for more is
+     * silently clamped rather than honoured. The server keeps a rolling 2000 live lines, so this is
+     * a visible change: the pane's first paint shows the newest 1000 rather than all 2000. It shows
+     * the newest ones, the pane autoscrolls to the bottom, and everything produced after the first
+     * paint is appended, so the only case that differs is scrolling back past 1000 lines
+     * immediately after opening a job that had already produced more than that. PLAN-08 §5.3 puts
+     * the default tail at 200; this is five times that and half the old buffer.
+     */
+    _FIRST_LOG_LIMIT: 1000,
+    _FIRST_LIVE_LIMIT: 1000,
+    _DELTA_LIMIT: 500,
+
+    /** Server `level` → the CSS class the live pane has always used. */
+    _LEVEL_CLASS: { PHASE: 'phase', DONE: 'done', WARN: 'warn', ERROR: 'err', INFO: 'info' },
+
+    _stream(jobId) {
+        if (!this._streams[jobId]) {
+            this._streams[jobId] = { logSeq: 0, liveSeq: 0, etag: null, instruction: false };
+        }
+        return this._streams[jobId];
+    },
+
+    // ── Init ──────────────────────────────────────────────────────────────
+
+    async init() {
+        await this._checkClaude();
+        await this._loadJobs();
+        // Restore last selected job from sessionStorage
+        const last = sessionStorage.getItem('cv_sel');
+        if (last && this._jobs[last]) this._open(last);
+    },
+
+    async _checkClaude() {
+        try {
+            const r = await fetch('/api/conversion/claude-status').then(x=>x.json());
+            document.getElementById('cdot').className = 'dot '+(r.available?'ok':'err');
+            document.getElementById('clabel').textContent = r.available ? 'Claude CLI ready' : 'Claude not found';
+        } catch(e) { document.getElementById('clabel').textContent = 'Claude status unknown'; }
+    },
+
+    async _loadJobs() {
+        try {
+            const list = await fetch('/api/conversion/jobs').then(x=>x.json());
+            list.forEach(j => this._jobs[j.jobId] = j);
+            this._renderList();
+        } catch(e) {}
+    },
+
+    // ── Run ───────────────────────────────────────────────────────────────
+
+    async run(action) {
+        const proc   = document.getElementById('f-proc').value.trim();
+        const module = document.getElementById('f-module').value.trim();
+        const svc    = document.getElementById('f-service').value.trim();
+        const ctrl   = document.getElementById('f-ctrl').value.trim();
+        const owner  = document.getElementById('f-owner').value.trim();
+        const path   = document.getElementById('f-path').value.trim();
+        const batch  = document.getElementById('f-batch').checked;
+
+        if (!proc)   { alert('Oracle Procedure is required'); return; }
+        if (!module) { alert('Maven Module Path is required'); return; }
+        if ((action==='validate'||action==='fix') && !svc && !ctrl) {
+            alert('At least one of Service Impl or Controller is required for validate/fix'); return;
+        }
+
+        const btn = document.getElementById('b-'+action);
+        btn.disabled = true;
+
+        try {
+            const r = await fetch('/api/conversion/'+action, {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ procedure:proc, module, service:svc, controller:ctrl,
+                                       owner, projectPath:path, batch })
+            }).then(x=>x.json());
+
+            if (r.jobId) {
+                await this._pollOnce(r.jobId);
+                this._open(r.jobId);
+                this.tab('detail');
+            }
+        } catch(e) { alert('Error: '+e.message); }
+        finally { btn.disabled = false; }
+    },
+
+    // ── Polling ───────────────────────────────────────────────────────────
+
+    _startPoll(jobId) {
+        this._poll = PollConfig.clear(this._poll);
+        this._poll = PollConfig.every('jobStatusMs', () => this._pollOnce(jobId));
+    },
+
+    /**
+     * One tick: the scalars, then whatever the two streams have appended since last time.
+     *
+     * The stream fetches are skipped entirely unless the watermark in the status payload has moved,
+     * so a job that is thinking costs one conditional request — usually a 304.
+     */
+    async _pollOnce(jobId) {
+        const st0 = this._stream(jobId);
+        // Two overlapping ticks would both read the cursor before either advanced it and append the
+        // same delta twice. `_open` deliberately fires a tick beside PollConfig.every's immediate
+        // one, so this is a real interleaving, not a theoretical one.
+        if (st0.busy) return;
+        st0.busy = true;
+        try {
+            const prev = this._jobs[jobId];
+            const st = st0;
+
+            const headers = st.etag ? { 'If-None-Match': st.etag } : {};
+            const res = await fetch('/api/conversion/jobs/'+jobId+'/status', { headers });
+            if (res.status === 404) { this._poll = PollConfig.clear(this._poll); return; }
+
+            let j = prev;
+            if (res.status !== 304) {
+                st.etag = res.headers.get('ETag');
+                const s = await res.json();
+                // Merge rather than replace: `prev` may carry fields the scalar payload does not
+                // (the job list supplies `log`), and replacing it would drop them.
+                j = Object.assign({}, prev || {}, s);
+                this._jobs[jobId] = j;
+                this._renderList();
+                if (this._sel === jobId) this._renderScalars(j);
+            }
+            if (!j) return;
+
+            if (this._sel === jobId) {
+                if ((j.logSeq || 0)  > st.logSeq)  await this._pullStream(jobId, 'log');
+                if ((j.liveSeq || 0) > st.liveSeq) await this._pullStream(jobId, 'live');
+                if (j.hasInstruction && !st.instruction) await this._loadInstruction(jobId);
+            }
+
+            if (j.status !== 'running') {
+                this._poll = PollConfig.clear(this._poll);
+                // When a report arrives for the first time, show the report tab badge
+                if (j.reportPath && (!prev || !prev.reportPath)) {
+                    document.getElementById('t-report').textContent = '📄 Report ●';
+                    document.getElementById('t-report').style.color = 'var(--green)';
+                }
+            }
+        } catch(e) {
+        } finally { st0.busy = false; }
+    },
+
+    /**
+     * Fetches and appends one stream delta.
+     *
+     * `reset` means the server's rolling buffer dropped the line this client's cursor pointed at.
+     * The pane is cleared and re-filled rather than appended to — appending would splice new lines
+     * onto a stale prefix and render a log that never existed. Never a silent gap.
+     */
+    async _pullStream(jobId, which) {
+        const st = this._stream(jobId);
+        const seq = which === 'log' ? st.logSeq : st.liveSeq;
+        const first = seq === 0;
+        const limit = first
+            ? (which === 'log' ? this._FIRST_LOG_LIMIT : this._FIRST_LIVE_LIMIT)
+            : this._DELTA_LIMIT;
+        let url = '/api/conversion/jobs/'+jobId+'/'+which+'?limit='+limit;
+        if (!first) url += '&sinceSeq='+seq;
+
+        const body = await fetch(url).then(x => x.ok ? x.json() : null);
+        if (!body) return;
+        const env = PA.normalizePage(body);
+
+        if (body.reset && !first) {
+            if (which === 'log') { st.logSeq = 0; } else { st.liveSeq = 0; }
+            this._clearStreamPane(which);
+            await this._pullStream(jobId, which);       // refill from the retained floor
+            return;
+        }
+
+        this._appendStreamLines(which, env.items);
+        const last = env.items.length ? env.items[env.items.length - 1].seq : 0;
+        const mark = Math.max(last, body.watermark || 0);
+        if (which === 'log') st.logSeq = Math.max(st.logSeq, mark);
+        else                 st.liveSeq = Math.max(st.liveSeq, mark);
+
+        // A page that says there is more is a client that has fallen behind; keep pulling.
+        if (env.page && env.page.hasMore) await this._pullStream(jobId, which);
+    },
+
+    _clearStreamPane(which) {
+        const el = document.getElementById(which === 'log' ? 'd-log-body' : 'd-live-body');
+        if (el) el.replaceChildren();
+    },
+
+    /**
+     * Appends `k` nodes. The old code did `innerHTML = wholeBuffer.map(...)` every 1.5 s, which is
+     * an O(n) DOM rebuild per tick on a buffer that only ever grows at the end.
+     */
+    _appendStreamLines(which, items) {
+        if (!items || !items.length) return;
+        const liveEl = document.getElementById(which === 'log' ? 'd-log-body' : 'd-live-body');
+        if (!liveEl) return;
+        // The pane may still be showing its "waiting"/"no output" placeholder.
+        const ph = liveEl.querySelector('.live-empty');
+        if (ph) ph.remove();
+
+        const frag = document.createDocumentFragment();
+        for (const it of items) {
+            const div = document.createElement('div');
+            if (which === 'log') {
+                div.className = 'log-line';
+            } else {
+                const cls = this._LEVEL_CLASS[it.level] || '';
+                div.className = 'll' + (cls ? ' ' + cls : '');
+            }
+            div.textContent = it.message;
+            frag.appendChild(div);
+        }
+        liveEl.appendChild(frag);
+
+        if (which === 'live') {
+            const c = document.getElementById('d-live-count');
+            if (c) c.textContent = liveEl.childElementCount + ' lines';
+            if (this._autoscroll) liveEl.scrollTop = liveEl.scrollHeight;
+        } else {
+            liveEl.scrollTop = liveEl.scrollHeight;
+        }
+    },
+
+    /** The instruction is immutable, so this runs at most once per job per page load. */
+    async _loadInstruction(jobId) {
+        const st = this._stream(jobId);
+        try {
+            const res = await fetch('/api/conversion/jobs/'+jobId+'/instruction');
+            if (res.status === 204) return;              // not generated yet — try again next tick
+            if (!res.ok) return;
+            const text = await res.text();
+            st.instruction = true;
+            if (this._sel !== jobId) return;
+            document.getElementById('prompt-empty').style.display = 'none';
+            document.getElementById('prompt-wrap').style.display = 'flex';
+            document.getElementById('prompt-body').textContent = text;
+        } catch(e) {}
+    },
+
+    // ── Tab switching ─────────────────────────────────────────────────────
+
+    tab(name) {
+        ['jobs','detail','report','prompt'].forEach(n => {
+            document.getElementById('t-'+n).className  = 'tab'+(n===name?' active':'');
+            document.getElementById('tc-'+n).className = 'tab-content'+(n===name?' active':'');
+        });
+        if (name === 'report') this.loadReport();
+    },
+
+    // ── Open a job in detail view ─────────────────────────────────────────
+
+    _open(jobId) {
+        const switching = this._sel !== jobId;
+        this._sel = jobId;
+        sessionStorage.setItem('cv_sel', jobId);
+        this._renderList();
+        const j = this._jobs[jobId];
+        // Opening a job re-fills both panes from seq 0, so the cursors start over. Without this a
+        // job opened, left and reopened would render only what arrived while it was closed.
+        if (switching) {
+            const st = this._stream(jobId);
+            st.logSeq = 0; st.liveSeq = 0; st.instruction = false;
+            this._clearStreamPane('log');
+            this._clearStreamPane('live');
+        }
+        if (j) this._renderScalars(j);
+        // One tick fills the panes and the prompt whether or not the job is still running; the
+        // interval only exists for jobs that can still change.
+        this._pollOnce(jobId);
+        if (j && j.status === 'running') this._startPoll(jobId);
+        // Reset report tab badge; reload if report tab is currently active
+        const rTab = document.getElementById('t-report');
+        rTab.textContent = '📄 Report';
+        rTab.style.color = '';
+        if (document.getElementById('tc-report').classList.contains('active')) this.loadReport();
+        // Start elapsed timer
+        clearInterval(this._elapsedTimer);
+        this._elapsedTimer = setInterval(() => {   // poll-exempt: ticks the elapsed display, no request
+            const jj = this._jobs[this._sel];
+            if (!jj) return;
+            document.getElementById('d-elapsed').textContent = this._elapsed(jj);
+            if (jj.status !== 'running') clearInterval(this._elapsedTimer);
+        }, 1000);
+    },
+
+    // ── Render job list ───────────────────────────────────────────────────
+
+    _renderList() {
+        const el = document.getElementById('jobs-list');
+        const sorted = Object.values(this._jobs).sort((a,b)=>b.startedAt-a.startedAt);
+        // Keep the wording identical to the static markup above (#jobs-list). The first render
+        // used to drop the "— run a conversion above" half, removing the only instruction on an
+        // otherwise blank panel.
+        if (!sorted.length) { el.innerHTML='<div class="jobs-empty">No jobs yet &mdash; run a conversion above.</div>'; return; }
+        el.innerHTML = sorted.map(j => {
+            const sel = j.jobId===this._sel?' selected':'';
+            const running = j.status==='running'?' running':'';
+            return `<div class="job-card${sel}${running}" onclick="CV._open('${j.jobId}')">
+                <div class="jh">
+                    <span class="tag tag-${j.action}">${j.action}</span>
+                    <span class="j-proc">${this._e(j.procedure)}</span>
+                    <span class="j-status st-${j.status}">${j.status==='running'?'⏳ running':j.status}</span>
+                    ${j.status==='running'?'<div class="spinner"></div>':''}
+                </div>
+                <div class="j-meta">
+                    <span>${this._e(j.module)}</span>
+                    <span>·</span>
+                    <span>${this._elapsed(j)}</span>
+                    ${j.reportPath?'<span style="color:var(--green)">· 📄 report ready</span>':''}
+                </div>
+                <div class="j-meta" style="margin-top:3px">
+                    <span class="phase-pill">${this._e(j.phase||'')}</span>
+                </div>
+            </div>`;
+        }).join('');
+    },
+
+    // ── Render detail panel ───────────────────────────────────────────────
+
+    /**
+     * The scalar half of the detail panel — everything except the two append-only streams and the
+     * instruction, which have their own lifetimes and their own fetches.
+     */
+    _renderScalars(j) {
+        document.getElementById('detail-empty').style.display = 'none';
+        const wrap = document.getElementById('detail-wrap');
+        wrap.style.display = 'flex';
+
+        // Header
+        document.getElementById('d-tag').className     = 'tag tag-'+j.action;
+        document.getElementById('d-tag').textContent   = j.action;
+        document.getElementById('d-proc').textContent  = j.procedure;
+        const stEl = document.getElementById('d-status');
+        stEl.className   = 'j-status st-'+j.status;
+        stEl.textContent = j.status==='running'?'⏳ running':j.status;
+        document.getElementById('d-phase').textContent  = j.phase||'';
+        document.getElementById('d-elapsed').textContent = this._elapsed(j);
+        document.getElementById('d-spinner').style.display = j.status==='running'?'block':'none';
+
+        // Report
+        const rep = document.getElementById('d-report');
+        if (j.reportPath) {
+            rep.style.display='flex';
+            document.getElementById('d-report-path').textContent = j.reportPath;
+        } else { rep.style.display='none'; }
+
+        // Error
+        const errEl = document.getElementById('d-error');
+        if (j.error) {
+            errEl.style.display='flex';
+            document.getElementById('d-error-msg').textContent = j.error;
+        } else { errEl.style.display='none'; }
+
+        // The live pane's placeholder, shown only while it is genuinely empty. `_appendStreamLines`
+        // removes it as soon as a line arrives.
+        const liveEl = document.getElementById('d-live-body');
+        if (!liveEl.childElementCount || liveEl.querySelector('.live-empty')) {
+            liveEl.replaceChildren();
+            const ph = document.createElement('div');
+            ph.className = 'live-empty';
+            ph.textContent = j.status === 'running'
+                ? '⏳ Waiting for Claude output…' : 'No output captured.';
+            liveEl.appendChild(ph);
+            document.getElementById('d-live-count').textContent = '0 lines';
+        }
+    },
+
+    // ── Report viewer ─────────────────────────────────────────────────────
+
+    async loadReport() {
+        if (!this._sel) return;
+        const j = this._jobs[this._sel];
+        if (!j || !j.reportPath) {
+            document.getElementById('report-empty').style.display = 'block';
+            document.getElementById('report-wrap').style.display  = 'none';
+            return;
+        }
+
+        document.getElementById('report-empty').style.display = 'none';
+        document.getElementById('report-wrap').style.display  = 'flex';
+        document.getElementById('report-md-body').innerHTML   = '<p style="color:var(--muted);padding:16px">Loading…</p>';
+        document.getElementById('report-error').style.display = 'none';
+        document.getElementById('report-file-label').textContent = j.reportPath;
+
+        try {
+            const r = await fetch('/api/conversion/jobs/'+this._sel+'/report').then(x=>x.json());
+            if (!r.found) {
+                const errEl = document.getElementById('report-error');
+                errEl.style.display = 'flex';
+                errEl.textContent = '❌ ' + (r.error||'File not found') + (r.path ? '\n'+r.path : '');
+                document.getElementById('report-md-body').innerHTML = '';
+                document.getElementById('report-file-label').textContent = j.reportPath;
+                return;
+            }
+            if (r.path) document.getElementById('report-file-label').textContent = r.path;
+            document.getElementById('report-md-body').innerHTML = this._renderMd(r.content);
+        } catch(e) {
+            document.getElementById('report-error').style.display = 'flex';
+            document.getElementById('report-error').textContent = '❌ ' + e.message;
+        }
+    },
+
+    _renderMd(md) {
+        if (!md) return '';
+        // Escape HTML first
+        let s = md
+            .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+        // Fenced code blocks
+        s = s.replace(/```[\w]*\n?([\s\S]*?)```/g, (_,code) =>
+            `<pre><code>${code.trimEnd()}</code></pre>`);
+        // Inline code
+        s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+        // Headings
+        s = s.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+        s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+        s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+        s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+        // HR
+        s = s.replace(/^---+$/gm, '<hr>');
+        // Bold / italic
+        s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+        s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+        // Checkbox list items  [ ] / [x] / [X]
+        s = s.replace(/^[ \t]*[-*] \[x\] (.+)$/gim,
+            '<li class="cb-pass">✅ $1</li>');
+        s = s.replace(/^[ \t]*[-*] \[X\] (.+)$/gm,
+            '<li class="cb-pass">✅ $1</li>');
+        s = s.replace(/^[ \t]*[-*] \[ \] (.+)$/gm,
+            '<li class="cb-fail">❌ $1</li>');
+        s = s.replace(/^[ \t]*[-*] \[~\] (.+)$/gm,
+            '<li class="cb-skip">⚠ $1</li>');
+        // Normal list items
+        s = s.replace(/^[ \t]*[-*] (.+)$/gm, '<li>$1</li>');
+        s = s.replace(/^[ \t]*\d+\. (.+)$/gm, '<li>$1</li>');
+        // Wrap consecutive <li> in <ul>
+        s = s.replace(/(<li>[\s\S]*?<\/li>)(\n(?!<li>)|$)/g, (m) =>
+            '<ul>'+m+'</ul>');
+        // Tables  (| col | col |)
+        s = s.replace(/(\|.+\|[ \t]*\n)([ \t]*\|[-: |]+\|[ \t]*\n)((?:\|.+\|\n?)*)/g,
+            (_, hdr, sep, body) => {
+                const cols = hdr.split('|').slice(1,-1).map(c=>`<th>${c.trim()}</th>`).join('');
+                const rows = body.trim().split('\n').map(r => {
+                    const cells = r.split('|').slice(1,-1).map(c=>`<td>${c.trim()}</td>`).join('');
+                    return `<tr>${cells}</tr>`;
+                }).join('');
+                return `<table><thead><tr>${cols}</tr></thead><tbody>${rows}</tbody></table>`;
+            });
+        // Blockquote
+        s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+        // Links
+        s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        // Paragraphs — wrap lines not already wrapped in block tags
+        const blockTags = /^(<h[1-4]|<ul|<ol|<li|<pre|<blockquote|<table|<hr|<\/)/;
+        s = s.split('\n').map(line => {
+            if (line === '' || blockTags.test(line)) return line;
+            return `<p>${line}</p>`;
+        }).join('\n');
+
+        return s;
+    },
+
+    // ── Auto-scroll toggle ────────────────────────────────────────────────
+
+    toggleAutoscroll() {
+        this._autoscroll = !this._autoscroll;
+        const btn = document.getElementById('d-autoscroll');
+        btn.textContent = this._autoscroll ? 'Auto-scroll ✓' : 'Auto-scroll';
+        btn.className = 'auto-scroll-btn'+(this._autoscroll?' on':'');
+    },
+
+    // ── Utils ─────────────────────────────────────────────────────────────
+
+    _e(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); },
+
+    _elapsed(j) {
+        const ms = j.status==='running' ? Date.now()-j.startedAt : (j.elapsedMs||0);
+        const s = Math.round(ms/1000);
+        if (s < 60)  return s+'s';
+        if (s < 3600) return Math.floor(s/60)+'m '+(s%60)+'s';
+        return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+    },
+
+    async copyEl(id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        try {
+            await navigator.clipboard.writeText(el.textContent);
+        } catch(e) {}
+    }
+};
+
+document.addEventListener('DOMContentLoaded', () => CV.init());
+</script>
+
+<link rel="stylesheet" href="../shared/api-activity-panel.css?v=1789310000">
+<script src="../shared/api-activity-panel.js?v=1789310000"></script>
+</body>
+</html>

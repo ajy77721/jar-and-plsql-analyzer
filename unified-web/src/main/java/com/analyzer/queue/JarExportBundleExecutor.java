@@ -1,0 +1,162 @@
+package com.analyzer.queue;
+
+import com.analyzer.storage.ArtifactEntry;
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jaranalyzer.service.DecompilerService;
+import com.jaranalyzer.service.InvocationPool;
+import com.jaranalyzer.service.JarDataPaths;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.BiConsumer;
+import java.util.stream.Stream;
+
+/**
+ * UI-043 — background half of the JAR export plan (§249): decompiles every class for a jar that
+ * isn't already sitting in {@link DecompilerService}'s per-class cache, then bundles every now-
+ * cached class's source into one zip artifact the UI can download once the job shows COMPLETE.
+ *
+ * <p>Reuses {@link DecompilerService#decompileWithMeta} exactly as {@link
+ * com.jaranalyzer.controller.DecompileController#decompileClass} already does for a single class
+ * — this executor does the same thing in a loop, on a background queue thread, instead of one
+ * request at a time. No new decompilation logic; only new orchestration.
+ */
+@Component
+public class JarExportBundleExecutor {
+
+    private static final Logger log = LoggerFactory.getLogger(JarExportBundleExecutor.class);
+
+    private final JarDataPaths jarDataPaths;
+    private final JarDataPaths warDataPaths;
+    private final ArtifactStore store;
+    private final DecompilerService decompilerService;
+    private final ObjectMapper objectMapper;
+
+    public JarExportBundleExecutor(JarDataPaths jarDataPaths,
+                                    @org.springframework.beans.factory.annotation.Qualifier("warPersistenceService")
+                                    com.jaranalyzer.service.PersistenceService warPersistenceService,
+                                    @org.springframework.beans.factory.annotation.Qualifier("jarArtifactStore")
+                                    ArtifactStore store,
+                                    DecompilerService decompilerService,
+                                    ObjectMapper objectMapper) {
+        this.jarDataPaths = jarDataPaths;
+        this.warDataPaths = warPersistenceService.getPaths();
+        this.store = store;
+        this.decompilerService = decompilerService;
+        this.objectMapper = objectMapper;
+    }
+
+    public void execute(QueueJob job, BiConsumer<QueueJob, String> broadcast) throws Exception {
+        String id = (String) job.metadata.get("jarId");
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("JAR_EXPORT_BUNDLE job missing jarId");
+        }
+        Integer maxClasses = job.metadata.get("maxClasses") instanceof Number n ? n.intValue() : null;
+        // WAR artifacts live under the jar/war/<id>/ key root, so a WAR job pointed at the
+        // JAR-rooted prefix would list zero classes and write an empty zip — a "successful" job
+        // producing nothing. JarExportController stamps this flag at submit time, when the
+        // originating URI (/api/jar/jars vs /api/war/wars) is still known.
+        JarDataPaths paths = Boolean.TRUE.equals(job.metadata.get("war")) ? warDataPaths : jarDataPaths;
+
+        List<String> allClasses = listAllClassNames(id, paths);
+        List<String> toProcess = allClasses;
+        if (maxClasses != null && maxClasses >= 0 && maxClasses < allClasses.size()) {
+            toProcess = allClasses.subList(0, maxClasses);
+        }
+        int total = toProcess.size();
+
+        ArtifactKey jarKey = paths.storedJarKey(id);
+        int alreadyCached = 0, decompiledNow = 0, failed = 0, done = 0;
+        for (String className : toProcess) {
+            if (job.status == QueueJob.Status.CANCELLED) break;
+            ArtifactKey cacheKey = paths.decompiledClassKey(id, className);
+            if (store.exists(cacheKey)) {
+                alreadyCached++;
+            } else {
+                try {
+                    DecompilerService.DecompileResult r = decompilerService.decompileWithMeta(jarKey, className);
+                    if (r != null) decompiledNow++; else failed++;
+                } catch (Exception e) {
+                    failed++;
+                    log.debug("Decompile failed for {} in {}: {}", className, id, e.getMessage());
+                }
+            }
+            done++;
+            if (broadcast != null) {
+                job.updateProgress("[" + done + "/" + total + "] " + className);
+                broadcast.accept(job, job.lastMessage);
+            }
+        }
+
+        // Bundle every now-cached class (not just the ones this run touched) into one zip.
+        ArtifactKey resultKey = paths.jarRootKey(id).resolve("export-full-bundle.zip");
+        ArtifactKey decompiledDir = paths.jarRootKey(id).resolve("decompiled");
+        int zipped = 0;
+        try (OutputStream raw = store.write(resultKey);
+             java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(raw)) {
+            try (Stream<ArtifactEntry> entries = store.list(decompiledDir, true)) {
+                var it = entries.filter(e -> !e.directory()).iterator();
+                while (it.hasNext()) {
+                    ArtifactEntry e = it.next();
+                    try (InputStream in = store.read(e.key())) {
+                        zos.putNextEntry(new java.util.zip.ZipEntry("source/" + e.key().leaf()));
+                        in.transferTo(zos);
+                        zos.closeEntry();
+                        zipped++;
+                    } catch (Exception ignored) {
+                        // One unreadable cached entry must not fail the whole bundle.
+                    }
+                }
+            }
+            zos.finish();
+        }
+
+        job.resultName = "export-full-bundle.zip (" + zipped + " classes)";
+        job.metadata.put("bundleReady", true);
+        job.metadata.put("totalClassesInJar", allClasses.size());
+        job.metadata.put("processedThisRun", total);
+        job.metadata.put("alreadyCached", alreadyCached);
+        job.metadata.put("decompiledNow", decompiledNow);
+        job.metadata.put("failed", failed);
+        job.metadata.put("zippedClasses", zipped);
+        log.info("[JAR_EXPORT_BUNDLE] {} — processed {}/{} classes ({} already cached, {} decompiled now, "
+                        + "{} failed), zipped {} total cached classes",
+                id, total, allClasses.size(), alreadyCached, decompiledNow, failed, zipped);
+    }
+
+    /** Streams {@code analysis.json}/{@code analysis_corrected.json} and collects every class's
+     *  {@code fullyQualifiedName} without inflating full class bodies — same streaming entry
+     *  point {@link com.jaranalyzer.controller.DecompileController#extractClassData} uses, but
+     *  collecting every name instead of stopping at the first match. */
+    private List<String> listAllClassNames(String id, JarDataPaths paths) throws Exception {
+        ArtifactKey key = paths.correctedKey(id);
+        if (!store.exists(key)) key = paths.analysisKey(id);
+        if (!store.exists(key)) return List.of();
+
+        List<String> names = new ArrayList<>();
+        try (InputStream in = store.read(key);
+             JsonParser parser = objectMapper.getFactory().createParser(in)) {
+            InvocationPool.Inflater.seekClasses(parser, objectMapper);
+            if (parser.currentToken() == JsonToken.START_ARRAY) {
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    JsonNode node = objectMapper.readTree(parser);
+                    if (node.has("fullyQualifiedName")) {
+                        String fqn = node.get("fullyQualifiedName").asText();
+                        if (fqn != null && !fqn.isBlank()) names.add(fqn);
+                    }
+                }
+            }
+        }
+        return names;
+    }
+}

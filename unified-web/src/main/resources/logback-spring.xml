@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!--
+      LevelChangePropagator keeps JUL logger levels in sync with logback levels, so JUL records
+      routed through Spring Boot's SLF4JBridgeHandler are filtered cheaply instead of being
+      converted and then dropped. resetJUL=true clears pre-existing JUL handlers first.
+
+      NOTE: this does NOT and cannot prevent
+      "NoClassDefFoundError: ch/qos/logback/classic/spi/ThrowableProxy".
+      That error means the running JVM can no longer read classes out of its own fat jar, which
+      happens when unified-web-*.jar is rebuilt (mvn install / package) while an instance launched
+      from it is still running. Boot fat jars load nested classes lazily, so overwriting the file
+      mid-run makes every not-yet-loaded class unresolvable. Fix is operational: stop the app
+      before rebuilding (see docs/audit/LOGBACK-NOCLASSDEF.md).
+    -->
+    <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+        <resetJUL>true</resetJUL>
+    </contextListener>
+
+    <!-- Console appender (keep default Spring Boot console output) -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Rolling file appender: writes under the data tree (LOG_PATH is set by
+         DirPropertyResolver to {data}/logs; falls back to logs/ if unset). -->
+    <property name="LOG_PATH" value="${LOG_PATH:-logs}"/>
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/unified-analyzer.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!--
+                The .gz suffix makes logback compress each rolled file itself, so LogArchiveService
+                only has to ship it. Rolling at 20MB is what triggers the hand-off: the active file
+                is never touched, because logback holds it open and only a rolled file is complete.
+            -->
+            <fileNamePattern>${LOG_PATH}/unified-analyzer.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>20MB</maxFileSize>
+            <maxHistory>5</maxHistory>
+            <totalSizeCap>50MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Application loggers -->
+    <logger name="com.plsqlanalyzer" level="DEBUG" />
+    <logger name="com.jaranalyzer" level="DEBUG" />
+    <logger name="com.analyzer" level="DEBUG" />
+
+    <!-- Reduce noise from frameworks -->
+    <logger name="org.springframework" level="WARN" />
+    <logger name="org.apache" level="WARN" />
+    <logger name="org.hibernate" level="WARN" />
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="FILE" />
+    </root>
+</configuration>

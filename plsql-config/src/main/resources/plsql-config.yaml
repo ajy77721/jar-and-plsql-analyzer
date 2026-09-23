@@ -1,0 +1,26 @@
+source_paths:
+  - "./plsql-sources"
+
+# Local Oracle Free demo (no production credentials shipped in the jar).
+db_hostname: "localhost"
+db_port: 1521
+db_service_name: "FREEPDB1"
+
+db_users:
+  - username: "analyzer"
+    password: "Password123!"
+    description: "Oracle Free local demo"
+
+schema_mappings: {}
+
+file_extensions:
+  - ".sql"
+  - ".pks"
+  - ".pkb"
+  - ".prc"
+  - ".fnc"
+  - ".trg"
+
+exclude_patterns:
+  - "**/test/**"
+  - "**/backup/**"

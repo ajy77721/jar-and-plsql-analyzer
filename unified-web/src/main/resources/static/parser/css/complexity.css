@@ -1,0 +1,124 @@
+/* Active scoring-algorithm indicator next to the ⚙ Scoring button */
+.cx-active-algo {
+    display: inline-flex; align-items: center; gap: 5px; margin-left: 8px;
+    font-size: 11px; color: var(--text); cursor: pointer;
+    padding: 2px 10px; border-radius: var(--radius-xl);
+    background: var(--accent-subtle); border: 1px solid var(--badge-blue-bg);
+}
+.cx-active-algo:hover { background: var(--accent-subtle); }
+.cx-active-algo b { font-weight: 700; }
+.cx-algo-scope { color: var(--text-muted); font-weight: 500; }
+
+.cx-proc-name {
+    font-weight: 600; color: var(--teal); font-family: var(--font-mono);
+    font-size: 11px; cursor: pointer; word-break: break-all;
+}
+.cx-proc-name:hover { text-decoration: underline; }
+
+.cx-schema { font-size: 10px; color: var(--text-muted); }
+.cx-num { text-align: right; font-family: var(--font-mono); font-size: 12px; }
+
+.cx-risk {
+    display: inline-block; padding: 3px 10px; border-radius: var(--radius-lg);
+    font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--text-inverse);
+}
+/* Solid, high-contrast risk badges — instantly readable */
+.cx-risk.low { background: var(--green); color: var(--text-inverse); }
+.cx-risk.medium { background: var(--orange); color: var(--text-inverse); }
+.cx-risk.high { background: var(--red); color: var(--text-inverse); }
+
+.cx-pill-low.active { border-color: var(--badge-green) !important; color: var(--badge-green) !important; }
+.cx-pill-medium.active { border-color: var(--badge-orange) !important; color: var(--badge-orange) !important; }
+.cx-pill-high.active { border-color: var(--red) !important; color: var(--red) !important; }
+
+.cx-stmt-grid { display: flex; flex-direction: column; gap: 4px; }
+.cx-stmt-row { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.cx-stmt-label { width: 130px; text-align: right; color: var(--text-muted); font-size: 10px; text-transform: uppercase; flex-shrink: 0; }
+.cx-stmt-bar { flex: 1; height: 6px; border-radius: var(--radius-sm); background: var(--border); overflow: hidden; min-width: 60px; }
+.cx-stmt-bar-fill { height: 100%; border-radius: var(--radius-sm); transition: width .3s; }
+.cx-stmt-val { width: 40px; text-align: right; font-weight: 600; font-family: var(--font-mono); }
+
+.cx-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+.cx-kv { display: flex; justify-content: space-between; font-size: 11px; padding: 3px 8px; border-radius: var(--radius-sm); background: var(--bg-card, var(--bg-card)); }
+.cx-kv-label { color: var(--text-muted); }
+.cx-kv-value { font-weight: 600; font-family: var(--font-mono); }
+
+/* Compact, color-coded risk summary — a thin severity strip, not a big block */
+.cx-risk-summary { display: flex; gap: 8px; padding: 6px 0 10px; }
+.cx-risk-card {
+    flex: 1; padding: 5px 12px; border-radius: var(--radius-md); border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    background: var(--bg-card, var(--bg-card)); cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+    transition: box-shadow .15s;
+}
+.cx-risk-card:hover { box-shadow: var(--shadow); }
+.cx-risk-card.cx-card-low    { border-left-color: var(--badge-green); }
+.cx-risk-card.cx-card-medium { border-left-color: var(--orange); }
+.cx-risk-card.cx-card-high   { border-left-color: var(--red); }
+.cx-risk-card-count { font-size: 17px; font-weight: 800; font-family: var(--font-mono); line-height: 1; }
+.cx-risk-card-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); font-weight: 700; }
+.cx-risk-card-bar { flex: 1; height: 4px; border-radius: var(--radius-sm); background: var(--border); overflow: hidden; min-width: 30px; }
+.cx-risk-card-pct { font-size: 10px; color: var(--text-muted); font-weight: 600; }
+
+/* Scoring-algorithm config modal — clean aligned rows with light row chips */
+.cx-cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
+.cx-cfg-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 12px; padding: 5px 10px; border-radius: var(--radius);
+    background: var(--bg-secondary, var(--badge-blue-bg));
+}
+.cx-cfg-row > span { color: var(--text); font-weight: 500; }
+.cx-cfg-row input, .cx-cfg-row select {
+    width: 96px; font-size: 12px; padding: 4px 8px; text-align: right;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg-card, var(--bg-card)); color: var(--text);
+}
+.cx-cfg-row select { text-align: left; }
+.cx-cfg-row input:focus, .cx-cfg-row select:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+/* ── Complexity config modal — redesigned (wider, card-based, friendlier) ── */
+.cx-cfg-modal .tds-body { padding: 16px 18px; }
+.cx-cfg-hint { font-size: 10px; font-weight: 500; color: var(--text-muted); text-transform: none; letter-spacing: 0; margin-left: 6px; }
+
+.cx-formula-box {
+    font-family: var(--font-mono); font-size: 13px; color: var(--text);
+    background: var(--bg-secondary, var(--badge-blue-bg)); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 10px 12px; margin: 8px 0 2px; text-align: center;
+}
+
+/* Weights as labeled cards, 2 per row */
+.cx-weights { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cx-weight-card {
+    border: 1px solid var(--border); border-radius: var(--radius-md); padding: 9px 11px;
+    background: var(--bg-card, var(--bg-card));
+}
+.cx-weight-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cx-weight-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.cx-weight-input {
+    width: 72px; font-size: 13px; padding: 5px 8px; text-align: right;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary, var(--bg)); color: var(--text);
+}
+.cx-weight-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+.cx-weight-desc { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.35; }
+
+/* Thresholds as two colored cards */
+.cx-thresholds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cx-thr-card {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    border: 1px solid var(--border); border-left: 4px solid var(--border);
+    border-radius: var(--radius-md); padding: 10px 12px; background: var(--bg-card, var(--bg-card));
+}
+.cx-thr-card.medium { border-left-color: var(--orange); }
+.cx-thr-card.high   { border-left-color: var(--red); }
+.cx-thr-label { font-size: 13px; font-weight: 700; color: var(--text); }
+.cx-thr-card input {
+    width: 84px; font-size: 13px; padding: 5px 8px; text-align: right;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary, var(--bg)); color: var(--text);
+}
+.cx-thr-card input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+
+@media (max-width: 560px) { .cx-weights, .cx-thresholds { grid-template-columns: 1fr; } }

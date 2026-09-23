@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.codeanalyzer</groupId>
+        <artifactId>plsql-jar-analyzer</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>postgres-parser</artifactId>
+    <name>PostgreSQL PL/pgSQL Grammar Parser</name>
+    <description>
+        Standalone ANTLR4-based parser for IBM POSTGRES SQL PL stored procedures and functions.
+        Completely separate from the Oracle PL/SQL grammar — own grammar, model,
+        visitor, and engine. The plsql-parser module depends on this module and
+        delegates all POSTGRES parsing here.
+    </description>
+
+    <!--
+        Self-contained module: NO dependency on plsql-parser (avoids circular Maven dependency).
+        Returns PostgresRoutineInfo; the adapter in plsql-parser converts it to ParseResult.
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>com.codeanalyzer</groupId>
+            <artifactId>dialect-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.antlr</groupId>
+            <artifactId>antlr4-runtime</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.antlr</groupId>
+                <artifactId>antlr4-maven-plugin</artifactId>
+                <version>${antlr4.version}</version>
+                <executions>
+                    <execution>
+                        <goals><goal>antlr4</goal></goals>
+                        <configuration>
+                            <listener>false</listener>
+                            <visitor>true</visitor>
+                            <sourceDirectory>${basedir}/src/main/antlr4</sourceDirectory>
+                            <outputDirectory>
+                                ${project.build.directory}/generated-sources/antlr4
+                            </outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,38 @@
+/* Sidebar collapse/expand toggle — TASK-REGISTRY §251.
+
+   1st slot in the shared bottom-left action cluster (sidebar-toggle, help,
+   theme, chatbot), at 56px spacing, matching the ordering/spacing three
+   other files already anticipated in their own comments. Button visuals
+   (.help-btn) are reused as-is from shared/help.css — only position differs.
+*/
+.sidebar-toggle-btn {
+    left: 28px;
+    z-index: 9990;
+}
+
+/* The other three bottom-left cluster members (help.css, mongodb-theme.css,
+   chatbox.css) each shift one slot right at their own source
+   (28->84, 84->140, 140->196) to make room for this new first slot. */
+
+/* The collapse mechanic itself: width/opacity transition on the sidebar
+   element, reusing the same transition timing pattern already used
+   app-wide for other width/opacity transitions (e.g. .sidebar-syncing,
+   parser's .ltab) rather than inventing new animation code. Works for both
+   jar's <aside class="sidebar"> and parser/plsql's <div class="left-panel">,
+   since both already sit next to a flex:1 sibling (.content / .right-panel)
+   that fills whatever width the sidebar frees up. */
+.sidebar, .left-panel {
+    transition: width 0.25s ease, min-width 0.25s ease, opacity 0.2s ease, border-color 0.2s ease;
+}
+.sidebar.sidebar-collapsed, .left-panel.sidebar-collapsed {
+    width: 0 !important;
+    min-width: 0 !important;
+    opacity: 0;
+    overflow: hidden;
+    border: none !important;
+    pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sidebar, .left-panel { transition: none; }
+}

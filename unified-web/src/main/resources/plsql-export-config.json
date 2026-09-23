@@ -1,0 +1,101 @@
+{
+  "_description": "Configuration for PL/SQL Excel export — controls Summary sheet metrics and complexity rating thresholds for the detail sub-table",
+
+  "summary_metrics": {
+    "show_loc_total":         true,
+    "show_cross_schema":      true,
+    "show_transaction_count": true,
+    "show_batch_count":       true,
+    "show_external_deps":     true,
+    "show_schema_slices":     true
+  },
+
+  "object_type_counts": {
+    "tables":             { "label": "Tables",              "tableType": "TABLE" },
+    "views":              { "label": "Views",               "tableType": "VIEW" },
+    "materialized_views": { "label": "Materialized Views",  "tableType": "MATERIALIZED VIEW" },
+    "sequences":          { "label": "Sequences",           "tableType": "SEQUENCE" }
+  },
+
+  "proc_counts": {
+    "procedures": { "label": "Procedures", "unitTypes": ["PROCEDURE"] },
+    "functions":  { "label": "Functions",  "unitTypes": ["FUNCTION"]  }
+  },
+
+  "complexity_rating": {
+    "_description": "Rules for assigning HIGH / MEDIUM / LOW rating to each proc/func in the detail sub-table. Score = loc_score + ops_score + join_score + cursor_score + cross_schema_bonus. Rating: score >= high_min → HIGH, score >= medium_min → MEDIUM, else LOW.",
+
+    "loc_thresholds": {
+      "_description": "Lines-of-code ranges → score contribution. Ranges are inclusive: min_loc <= loc <= max_loc. Ranges must not overlap; last range should have max_loc set to a very large number.",
+      "ranges": [
+        { "label": "LOW",    "min_loc": 0,   "max_loc": 99,  "score": 1 },
+        { "label": "MEDIUM", "min_loc": 100, "max_loc": 299, "score": 2 },
+        { "label": "HIGH",   "min_loc": 300, "max_loc": 9999999, "score": 3 }
+      ]
+    },
+
+    "ops_thresholds": {
+      "_description": "Number of distinct operations (SELECT/INSERT/UPDATE/DELETE/MERGE/CALL etc.) ranges → score. Ranges are inclusive.",
+      "ranges": [
+        { "label": "LOW",    "min_ops": 0,  "max_ops": 3,  "score": 1 },
+        { "label": "MEDIUM", "min_ops": 4,  "max_ops": 9,  "score": 2 },
+        { "label": "HIGH",   "min_ops": 10, "max_ops": 9999999, "score": 3 }
+      ]
+    },
+
+    "join_score": {
+      "_description": "Joins detected in the procedure body — adds to score",
+      "per_join": 0.5,
+      "max_contribution": 2
+    },
+
+    "cursor_score": {
+      "_description": "Cursors declared/used in the procedure body — adds to score",
+      "per_cursor": 0.5,
+      "max_contribution": 1.5
+    },
+
+    "cross_schema_bonus": {
+      "_description": "Extra score if procedure calls cross-schema objects",
+      "bonus": 1.5
+    },
+
+    "trigger_bonus": {
+      "_description": "Extra score if procedure has associated triggers",
+      "per_trigger": 0.5,
+      "max_contribution": 1.5
+    },
+
+    "final_thresholds": {
+      "high_min":   6,
+      "medium_min": 3
+    },
+
+    "reasons": {
+      "_description": "Human-readable reason templates used in the 'Reason' column. {loc}, {ops}, {joins}, {cursors}, {triggers} are substituted at runtime.",
+      "high":   "HIGH — {loc} LOC, {ops} operations, {joins} joins, {cursors} cursors{trigger_suffix}{cross_suffix}",
+      "medium": "MEDIUM — {loc} LOC, {ops} operations, {joins} joins{trigger_suffix}{cross_suffix}",
+      "low":    "LOW — {loc} LOC, {ops} operations"
+    }
+  },
+
+  "detail_subtable": {
+    "_description": "Columns for the proc/func detail sub-table rendered below the summary metrics on Sheet 1",
+    "columns": [
+      { "key": "fullName",    "label": "Procedure / Function",  "width": 45 },
+      { "key": "unitType",    "label": "Type",                   "width": 12 },
+      { "key": "queryNodeId", "label": "Query Node ID",           "width": 28 },
+      { "key": "tables",      "label": "Tables",                  "width": 8  },
+      { "key": "views",       "label": "Views",                   "width": 8  },
+      { "key": "mvs",         "label": "MVs",                     "width": 8  },
+      { "key": "sequences",   "label": "Seqs",                    "width": 8  },
+      { "key": "cursors",     "label": "Cursors",                 "width": 8  },
+      { "key": "joins",       "label": "Joins",                   "width": 8  },
+      { "key": "triggers",    "label": "Triggers",                "width": 8  },
+      { "key": "loc",         "label": "LOC",                     "width": 8  },
+      { "key": "operations",  "label": "Operations",              "width": 30 },
+      { "key": "rating",      "label": "Rating",                  "width": 10 },
+      { "key": "reason",      "label": "Reason",                  "width": 55 }
+    ]
+  }
+}

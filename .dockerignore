@@ -1,0 +1,18 @@
+# Git / IDE
+.git
+.idea
+.DS_Store
+
+# Runtime data — mounted as a volume, never baked into the image
+data/
+config/
+
+# Build outputs (rebuilt inside the container)
+**/target/
+
+# Archives
+*.zip
+*.hprof
+
+# Docs stay out of the build context
+docs/

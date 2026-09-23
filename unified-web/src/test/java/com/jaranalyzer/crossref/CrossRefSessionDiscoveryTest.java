@@ -1,0 +1,117 @@
+package com.jaranalyzer.crossref;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.LocalArtifactStore;
+import com.jaranalyzer.service.JarDataPaths;
+import com.plsqlanalyzer.web.parser.service.AnalysisPaths;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * {@link CrossRefService} must find PL/SQL parse sessions in BOTH storage layouts.
+ *
+ * <p>It used to list the IMMEDIATE children of {@code plsql-parse/} and treat each as a session.
+ * The current layout is nested — {@code plsql-parse/<DBTYPE>/<PROJECT>/<ENV>/<OBJECT>/} — so those
+ * children are DBTYPE folders with no {@code api/index.json}: {@code listAvailableProcs()} returned
+ * empty and {@code findPlsqlSession()} never matched. A session is any prefix containing
+ * {@code api/index.json}, at any depth.
+ */
+class CrossRefSessionDiscoveryTest {
+
+    private static final String NESTED = "DB2~Db2Demo~local~ERP_USP_RUN_CYCLE";
+    private static final String FLAT   = "PG_CNU_INTERFACE_PC_MT_PREV_POL_INFO";
+
+    @TempDir
+    Path root;
+
+    private ArtifactStore store;
+
+    private CrossRefService service() {
+        store = new LocalArtifactStore(root);
+        ObjectMapper mapper = new ObjectMapper();
+        JarDataPaths paths = new JarDataPaths(root.resolve("jar").toString(), store);
+        // One InMemoryArtifactStore stands in for both the jar-side and parser-side beans here —
+        // this test only cares about PL/SQL session discovery, and ArtifactScanRepository's own
+        // split is exercised separately.
+        return new CrossRefService(paths, new CrossRefStore(paths, store, mapper), mapper, store, store);
+    }
+
+    /** Writes an api/index.json for a session named by its identity name. */
+    private void writeSession(String name, String pkg, String proc) throws IOException {
+        ArtifactKey key = AnalysisPaths.resolveKey(name, "api/index.json");
+        String json = "{\"nodes\":[{\"nodeId\":\"" + pkg + "$" + proc + "\",\"depth\":0,"
+                + "\"packageName\":\"" + pkg + "\",\"objectName\":\"" + proc + "\","
+                + "\"schema\":\"APPUSER\"}]}";
+        try (OutputStream out = store.write(key)) {
+            out.write(json.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    /** A DBTYPE folder that holds no index.json of its own must never be mistaken for a session. */
+    private void writeNoiseUnderParseRoot() throws IOException {
+        try (OutputStream out = store.write(ArtifactKey.of(AnalysisPaths.PARSE_ROOT, "DB2", "notes.txt"))) {
+            out.write("not a session".getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private static List<String> procNames(List<Map<String, Object>> procs) {
+        return procs.stream().map(m -> String.valueOf(m.get("procName"))).collect(Collectors.toList());
+    }
+
+    @Test
+    @DisplayName("a nested session (DBTYPE/PROJECT/ENV/OBJECT) is discovered")
+    void findsNestedSession() throws IOException {
+        CrossRefService svc = service();
+        writeSession(NESTED, "PG_ERP", "USP_RUN_CYCLE");
+        writeNoiseUnderParseRoot();
+
+        List<Map<String, Object>> procs = svc.listAvailableProcs();
+        assertEquals(List.of("PG_ERP.USP_RUN_CYCLE"), procNames(procs));
+        // sessionId is the identity name the parser REST API uses, not just the leaf folder.
+        assertEquals(NESTED, procs.get(0).get("sessionId"));
+    }
+
+    @Test
+    @DisplayName("a flat legacy session (plsql-parse/<SESSION>) is still discovered")
+    void findsFlatLegacySession() throws IOException {
+        CrossRefService svc = service();
+        writeSession(FLAT, "PG_CNU_INTERFACE", "PC_MT_PREV_POL_INFO");
+
+        List<Map<String, Object>> procs = svc.listAvailableProcs();
+        assertEquals(List.of("PG_CNU_INTERFACE.PC_MT_PREV_POL_INFO"), procNames(procs));
+        assertEquals(FLAT, procs.get(0).get("sessionId"));
+    }
+
+    @Test
+    @DisplayName("both layouts present at once: every session is found, DBTYPE folders are not")
+    void findsBothLayoutsTogether() throws IOException {
+        CrossRefService svc = service();
+        writeSession(NESTED, "PG_ERP", "USP_RUN_CYCLE");
+        writeSession(FLAT, "PG_CNU_INTERFACE", "PC_MT_PREV_POL_INFO");
+        writeNoiseUnderParseRoot();
+
+        List<String> names = procNames(svc.listAvailableProcs());
+        assertEquals(2, names.size(), "both sessions must be listed: " + names);
+        assertTrue(names.contains("PG_ERP.USP_RUN_CYCLE"));
+        assertTrue(names.contains("PG_CNU_INTERFACE.PC_MT_PREV_POL_INFO"));
+    }
+
+    @Test
+    @DisplayName("an empty parse root yields no procs and does not throw")
+    void emptyParseRootIsEmpty() {
+        assertTrue(service().listAvailableProcs().isEmpty());
+    }
+}

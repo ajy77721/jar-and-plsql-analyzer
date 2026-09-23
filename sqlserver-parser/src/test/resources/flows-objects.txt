@@ -1,0 +1,762 @@
+===OBJECT:fin.fn_AccountBalance:SQL_SCALAR_FUNCTION===-- scalar: account balance (correlated subquery) — function → function via fn_ConvertCurrency
+CREATE FUNCTION fin.fn_AccountBalance(@accountId INT, @asOf DATE)
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    DECLARE @bal DECIMAL(18,2), @ccy NVARCHAR(3);
+    SELECT @ccy = Currency FROM fin.Account WHERE AccountId = @accountId;
+    SELECT @bal = SUM(jl.Debit - jl.Credit)
+    FROM fin.JournalLine jl
+    INNER JOIN fin.JournalEntry je ON je.EntryId = jl.EntryId
+    WHERE jl.AccountId = @accountId AND je.EntryDate <= @asOf;
+    RETURN fin.fn_ConvertCurrency(ISNULL(@bal,0), @ccy, @asOf);   -- function → function
+END;
+===END===
+===OBJECT:fin.fn_AccountTree:SQL_TABLE_VALUED_FUNCTION===-- multi-statement TVF: recursive account hierarchy (roll-up tree)
+CREATE FUNCTION fin.fn_AccountTree(@rootId INT)
+RETURNS @tree TABLE(Level INT, AccountId INT, ParentAccountId INT, Code NVARCHAR(20))
+AS
+BEGIN
+    WITH acct AS (
+        SELECT 0 AS Lvl, a.AccountId, a.ParentAccountId, a.Code
+        FROM fin.Account a WHERE a.AccountId = @rootId
+        UNION ALL
+        SELECT p.Lvl + 1, a.AccountId, a.ParentAccountId, a.Code
+        FROM fin.Account a
+        INNER JOIN acct p ON a.ParentAccountId = p.AccountId
+    )
+    INSERT INTO @tree SELECT Lvl, AccountId, ParentAccountId, Code FROM acct;
+    RETURN;
+END;
+===END===
+===OBJECT:fin.fn_ConvertCurrency:SQL_SCALAR_FUNCTION===
+-- scalar: currency conversion (reads ExchangeRate, correlated)
+CREATE FUNCTION fin.fn_ConvertCurrency(@amount DECIMAL(18,2), @ccy NVARCHAR(3), @asOf DATE)
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    DECLARE @rate DECIMAL(18,6);
+    SELECT TOP 1 @rate = RateToUsd
+    FROM fin.ExchangeRate
+    WHERE Currency = @ccy AND RateDate <= @asOf
+    ORDER BY RateDate DESC;
+    RETURN @amount * ISNULL(@rate, 1);
+END;
+===END===
+===OBJECT:fin.fn_PeriodKey:SQL_SCALAR_FUNCTION===-- scalar: period key
+CREATE FUNCTION fin.fn_PeriodKey(@d DATE)
+RETURNS NVARCHAR(7)
+AS
+BEGIN
+    RETURN CONCAT(DATEPART(YEAR,@d), N'-', RIGHT(N'0' + CAST(DATEPART(MONTH,@d) AS NVARCHAR(2)),2));
+END;
+===END===
+===OBJECT:fin.fn_RunningBalance:SQL_INLINE_TABLE_VALUED_FUNCTION===-- inline TVF with WINDOW function (running balance)
+CREATE FUNCTION fin.fn_RunningBalance(@accountId INT)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT je.EntryDate, jl.Debit, jl.Credit,
+           SUM(jl.Debit - jl.Credit) OVER (ORDER BY je.EntryDate, jl.LineId
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS RunningBalance
+    FROM fin.JournalLine jl
+    INNER JOIN fin.JournalEntry je ON je.EntryId = jl.EntryId
+    WHERE jl.AccountId = @accountId
+);
+===END===
+===OBJECT:fin.trg_Account_InsteadOfUpd:SQL_TRIGGER===
+-- INSTEAD OF UPDATE trigger: forbid changing an account's currency once set
+CREATE TRIGGER fin.trg_Account_InsteadOfUpd
+ON fin.Account
+INSTEAD OF UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF UPDATE(Currency) AND EXISTS (SELECT 1 FROM inserted i INNER JOIN deleted d
+                                     ON i.AccountId = d.AccountId WHERE i.Currency <> d.Currency)
+        THROW 52000, N'Account currency is immutable', 1;
+    UPDATE a SET a.Code = i.Code, a.Name = i.Name, a.ParentAccountId = i.ParentAccountId
+    FROM fin.Account a INNER JOIN inserted i ON i.AccountId = a.AccountId;
+END;
+===END===
+===OBJECT:fin.trg_JournalLine_AfterIns:SQL_TRIGGER===
+-- AFTER INSERT trigger: mark entry posted + audit
+CREATE TRIGGER fin.trg_JournalLine_AfterIns
+ON fin.JournalLine
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE je SET je.Posted = 1
+    FROM fin.JournalEntry je
+    WHERE je.EntryId IN (SELECT DISTINCT EntryId FROM inserted);
+
+    INSERT INTO fin.ReconLog(AccountId, Action, Amount)
+    SELECT i.AccountId, N'LINE_INS', i.Debit - i.Credit FROM inserted i;
+END;
+===END===
+===OBJECT:fin.usp_AddJournalLine:SQL_STORED_PROCEDURE===
+-- leaf proc
+CREATE PROCEDURE fin.usp_AddJournalLine
+    @EntryId INT, @AccountId INT, @Debit DECIMAL(18,2), @Credit DECIMAL(18,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO fin.JournalLine(EntryId, AccountId, Debit, Credit)
+    VALUES(@EntryId, @AccountId, @Debit, @Credit);
+END;
+===END===
+===OBJECT:fin.usp_LedgerSearch:SQL_STORED_PROCEDURE===
+-- dynamic EXEC() ledger search + recursive account tree + UNION
+CREATE PROCEDURE fin.usp_LedgerSearch
+    @CodeLike NVARCHAR(20) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX);
+    SET @sql = N'
+        SELECT a.AccountId, a.Code, a.Name, b.Balance
+        FROM fin.Account a
+        INNER JOIN fin.vw_AccountBalance b ON b.AccountId = a.AccountId
+        WHERE 1 = 1';
+    IF @CodeLike IS NOT NULL SET @sql += N' AND a.Code LIKE ''' + @CodeLike + N'%''';
+    EXEC (@sql);
+
+    -- also expand the tree of the first matching account
+    SELECT t.Level, t.Code
+    FROM fin.fn_AccountTree((SELECT MIN(AccountId) FROM fin.Account)) t
+    ORDER BY t.Level;
+END;
+===END===
+===OBJECT:fin.usp_PeriodPivot:SQL_STORED_PROCEDURE===
+-- dynamic PIVOT via sp_executesql (period columns computed at runtime)
+CREATE PROCEDURE fin.usp_PeriodPivot
+    @FromDate DATE, @ToDate DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @cols NVARCHAR(MAX), @sql NVARCHAR(MAX);
+    SELECT @cols = STRING_AGG(QUOTENAME(pk), N',')
+    FROM (SELECT DISTINCT fin.fn_PeriodKey(je.EntryDate) AS pk
+          FROM fin.JournalEntry je
+          WHERE je.EntryDate BETWEEN @FromDate AND @ToDate) x;
+    IF @cols IS NULL SET @cols = N'[none]';
+
+    SET @sql = N'
+        SELECT AccountId, ' + @cols + N'
+        FROM (
+            SELECT jl.AccountId, fin.fn_PeriodKey(je.EntryDate) AS Pk, jl.Debit - jl.Credit AS Amt
+            FROM fin.JournalLine jl
+            INNER JOIN fin.JournalEntry je ON je.EntryId = jl.EntryId
+            WHERE je.EntryDate BETWEEN @f AND @t
+        ) s
+        PIVOT (SUM(Amt) FOR Pk IN (' + @cols + N')) p
+        ORDER BY AccountId';
+    EXEC sp_executesql @sql, N'@f DATE, @t DATE', @f = @FromDate, @t = @ToDate;
+END;
+===END===
+===OBJECT:fin.usp_PostJournal:SQL_STORED_PROCEDURE===
+-- TOP proc: post a balanced journal — sequence, cursor, proc→proc, proc→function, TRY/CATCH
+CREATE PROCEDURE fin.usp_PostJournal
+    @Memo NVARCHAR(200)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @entryId INT, @jno BIGINT, @acct INT, @dr DECIMAL(18,2), @cr DECIMAL(18,2);
+    BEGIN TRY
+        BEGIN TRAN;
+        SET @jno = NEXT VALUE FOR fin.JournalSeq;
+        INSERT INTO fin.JournalEntry(JournalNo, Memo) VALUES(@jno, @Memo);
+        SET @entryId = SCOPE_IDENTITY();
+
+        DECLARE @lines TABLE(AccountId INT, Debit DECIMAL(18,2), Credit DECIMAL(18,2));
+        INSERT INTO @lines VALUES (1, 100, 0), (2, 0, 100);
+
+        DECLARE ln_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT AccountId, Debit, Credit FROM @lines;
+        OPEN ln_cur;
+        FETCH NEXT FROM ln_cur INTO @acct, @dr, @cr;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            EXEC fin.usp_AddJournalLine @entryId, @acct, @dr, @cr;   -- proc → proc
+            FETCH NEXT FROM ln_cur INTO @acct, @dr, @cr;
+        END
+        CLOSE ln_cur; DEALLOCATE ln_cur;
+
+        -- balance check via correlated aggregate
+        IF (SELECT SUM(Debit) - SUM(Credit) FROM fin.JournalLine WHERE EntryId = @entryId) <> 0
+            THROW 52001, N'Journal not balanced', 1;
+
+        DECLARE @chk DECIMAL(18,2) = fin.fn_AccountBalance(@acct, SYSDATETIME());  -- proc→function→function
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        INSERT INTO fin.ReconLog(Action, Amount) VALUES(N'ERROR', NULL);
+        THROW;
+    END CATCH
+END;
+===END===
+===OBJECT:fin.usp_Reconcile:SQL_STORED_PROCEDURE===
+-- MERGE + OUTPUT reconciliation
+CREATE PROCEDURE fin.usp_Reconcile
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @audit TABLE(AccountId INT, Act NVARCHAR(10), Amt DECIMAL(18,2));
+
+    MERGE fin.ReconLog AS tgt
+    USING (SELECT a.AccountId, SUM(jl.Debit - jl.Credit) AS Bal
+           FROM fin.Account a
+           LEFT JOIN fin.JournalLine jl ON jl.AccountId = a.AccountId
+           GROUP BY a.AccountId) AS src
+        ON tgt.AccountId = src.AccountId AND tgt.Action = N'BAL'
+    WHEN MATCHED THEN UPDATE SET tgt.Amount = src.Bal, tgt.RunOn = SYSDATETIME()
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT(AccountId, Action, Amount) VALUES(src.AccountId, N'BAL', src.Bal)
+    OUTPUT inserted.AccountId, N'MRG', inserted.Amount INTO @audit;
+
+    SELECT * FROM @audit;
+END;
+===END===
+===OBJECT:fin.usp_RunningBalanceReport:SQL_STORED_PROCEDURE===
+-- proc: running balance report — window funcs, CROSS APPLY, OFFSET/FETCH paging
+CREATE PROCEDURE fin.usp_RunningBalanceReport
+    @AccountId INT, @Page INT = 1, @PageSize INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT rb.EntryDate, rb.Debit, rb.Credit, rb.RunningBalance,
+           latest.LastAmount,
+           LAG(rb.RunningBalance) OVER (ORDER BY rb.EntryDate) AS PrevBalance
+    FROM fin.fn_RunningBalance(@AccountId) rb
+    CROSS APPLY (SELECT TOP 1 (jl.Debit - jl.Credit) AS LastAmount
+                 FROM fin.JournalLine jl WHERE jl.AccountId = @AccountId
+                 ORDER BY jl.LineId DESC) latest
+    ORDER BY rb.EntryDate
+    OFFSET (@Page - 1) * @PageSize ROWS FETCH NEXT @PageSize ROWS ONLY;
+END;
+===END===
+===OBJECT:fin.vw_AccountBalance:VIEW===
+-- Regular view: balance per account (INNER + LEFT join, aggregation)
+CREATE VIEW fin.vw_AccountBalance
+AS
+    SELECT a.AccountId, a.Code, a.Name,
+           SUM(jl.Debit)  AS TotalDebit,
+           SUM(jl.Credit) AS TotalCredit,
+           SUM(jl.Debit) - SUM(jl.Credit) AS Balance
+    FROM fin.Account a
+    LEFT JOIN fin.JournalLine jl ON jl.AccountId = a.AccountId
+    GROUP BY a.AccountId, a.Code, a.Name;
+===END===
+===OBJECT:fin.vw_AccountTotals:VIEW===
+-- Indexed (materialized) view: posted totals per account
+CREATE VIEW fin.vw_AccountTotals
+WITH SCHEMABINDING
+AS
+    SELECT jl.AccountId, COUNT_BIG(*) AS LineCount,
+           SUM(jl.Debit) AS Debit, SUM(jl.Credit) AS Credit
+    FROM fin.JournalLine jl
+    GROUP BY jl.AccountId;
+===END===
+===OBJECT:hr.fn_AnnualSalary:SQL_SCALAR_FUNCTION===-- scalar
+CREATE FUNCTION hr.fn_AnnualSalary(@monthly DECIMAL(18,2))
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    RETURN @monthly * 12;
+END;
+===END===
+===OBJECT:hr.fn_Factorial:SQL_SCALAR_FUNCTION===-- RECURSIVE scalar function (function calls itself)
+CREATE FUNCTION hr.fn_Factorial(@n INT)
+RETURNS BIGINT
+AS
+BEGIN
+    IF @n <= 1 RETURN 1;
+    RETURN @n * hr.fn_Factorial(@n - 1);      -- recursion
+END;
+===END===
+===OBJECT:hr.fn_FullName:SQL_SCALAR_FUNCTION===
+-- scalar
+CREATE FUNCTION hr.fn_FullName(@id INT)
+RETURNS NVARCHAR(101)
+AS
+BEGIN
+    DECLARE @n NVARCHAR(101);
+    SELECT @n = FirstName + N' ' + LastName FROM hr.Employee WHERE EmployeeId = @id;
+    RETURN @n;
+END;
+===END===
+===OBJECT:hr.fn_GradeBand:SQL_INLINE_TABLE_VALUED_FUNCTION===-- inline TVF (function → function via fn_AnnualSalary)
+CREATE FUNCTION hr.fn_GradeBand(@grade INT)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT g.Grade, g.MinSalary, g.MaxSalary,
+           hr.fn_AnnualSalary(g.MaxSalary) AS MaxAnnual
+    FROM hr.JobGrade g
+    WHERE g.Grade = @grade
+);
+===END===
+===OBJECT:hr.fn_OrgChart:SQL_TABLE_VALUED_FUNCTION===-- multi-statement TVF with recursive CTE: full org subtree under a manager
+CREATE FUNCTION hr.fn_OrgChart(@rootId INT)
+RETURNS @tree TABLE(Level INT, EmployeeId INT, ManagerId INT, FullName NVARCHAR(101))
+AS
+BEGIN
+    WITH org AS (
+        SELECT 0 AS Lvl, e.EmployeeId, e.ManagerId
+        FROM hr.Employee e WHERE e.EmployeeId = @rootId
+        UNION ALL
+        SELECT o.Lvl + 1, e.EmployeeId, e.ManagerId
+        FROM hr.Employee e
+        INNER JOIN org o ON e.ManagerId = o.EmployeeId
+    )
+    INSERT INTO @tree(Level, EmployeeId, ManagerId, FullName)
+    SELECT o.Lvl, o.EmployeeId, o.ManagerId, e.FirstName + N' ' + e.LastName
+    FROM org o INNER JOIN hr.Employee e ON e.EmployeeId = o.EmployeeId;
+    RETURN;
+END;
+===END===
+===OBJECT:hr.trg_Emp_InsteadOfDel:SQL_TRIGGER===
+-- INSTEAD OF DELETE: block deletion of managers who still have reports
+CREATE TRIGGER hr.trg_Emp_InsteadOfDel
+ON hr.Employee
+INSTEAD OF DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF EXISTS (SELECT 1 FROM hr.Employee e INNER JOIN deleted d ON e.ManagerId = d.EmployeeId)
+        THROW 51000, N'Cannot delete a manager with direct reports', 1;
+    DELETE e FROM hr.Employee e INNER JOIN deleted d ON d.EmployeeId = e.EmployeeId;
+END;
+===END===
+===OBJECT:hr.trg_Salary_Audit:SQL_TRIGGER===
+-- AFTER UPDATE trigger: salary audit (inserted ⋈ deleted)
+CREATE TRIGGER hr.trg_Salary_Audit
+ON hr.Employee
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF UPDATE(BaseSalary)
+        INSERT INTO hr.SalaryHistory(EmployeeId, OldSalary, NewSalary)
+        SELECT i.EmployeeId, d.BaseSalary, i.BaseSalary
+        FROM inserted i
+        INNER JOIN deleted d ON d.EmployeeId = i.EmployeeId
+        WHERE i.BaseSalary <> d.BaseSalary;
+END;
+===END===
+===OBJECT:hr.usp_BulkHire:SQL_STORED_PROCEDURE===
+-- proc → proc, consumes a table-valued parameter, cursor over TVP
+CREATE PROCEDURE hr.usp_BulkHire
+    @Hires hr.NewHireList READONLY
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @f NVARCHAR(50), @l NVARCHAR(50), @d INT, @g INT, @s DECIMAL(18,2), @newId INT;
+    DECLARE hire_cur CURSOR LOCAL FAST_FORWARD FOR
+        SELECT FirstName, LastName, DeptId, Grade, Salary FROM @Hires;
+    OPEN hire_cur;
+    FETCH NEXT FROM hire_cur INTO @f, @l, @d, @g, @s;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        EXEC hr.usp_HireEmployee @f, @l, @d, @g, @s, @newId OUTPUT;   -- proc → proc
+        FETCH NEXT FROM hire_cur INTO @f, @l, @d, @g, @s;
+    END
+    CLOSE hire_cur;
+    DEALLOCATE hire_cur;
+END;
+===END===
+===OBJECT:hr.usp_DeptPayroll:SQL_STORED_PROCEDURE===
+-- TOP proc: cursor + proc→function (fn_FullName, fn_OrgChart) + joins + GROUPING SETS
+CREATE PROCEDURE hr.usp_DeptPayroll
+    @DeptId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @eid INT, @name NVARCHAR(101), @sal DECIMAL(18,2);
+    CREATE TABLE #rpt(EmployeeId INT, FullName NVARCHAR(101), Salary DECIMAL(18,2), Reports INT);
+
+    DECLARE emp_cur CURSOR LOCAL FOR
+        SELECT e.EmployeeId, e.BaseSalary
+        FROM hr.Employee e
+        LEFT JOIN hr.Department d ON d.DeptId = e.DeptId
+        WHERE e.DeptId = @DeptId;
+    OPEN emp_cur;
+    FETCH NEXT FROM emp_cur INTO @eid, @sal;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @name = hr.fn_FullName(@eid);                         -- proc → function
+        INSERT INTO #rpt(EmployeeId, FullName, Salary, Reports)
+        SELECT @eid, @name, @sal, (SELECT COUNT(*) FROM hr.fn_OrgChart(@eid)) - 1;
+        FETCH NEXT FROM emp_cur INTO @eid, @sal;
+    END
+    CLOSE emp_cur;
+    DEALLOCATE emp_cur;
+
+    SELECT FullName, SUM(Salary) AS Salary
+    FROM #rpt
+    GROUP BY GROUPING SETS ((FullName), ());
+END;
+===END===
+===OBJECT:hr.usp_DynamicEmpSearch:SQL_STORED_PROCEDURE===
+-- dynamic SQL (sp_executesql prepared) + normal execution
+CREATE PROCEDURE hr.usp_DynamicEmpSearch
+    @NameLike NVARCHAR(50) = NULL, @DeptId INT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX) = N'
+        SELECT e.EmployeeId, e.FirstName, e.LastName, d.Name AS Dept, jg.MaxSalary
+        FROM hr.Employee e
+        LEFT JOIN hr.Department d ON d.DeptId = e.DeptId
+        INNER JOIN hr.JobGrade jg ON jg.Grade = e.Grade
+        WHERE 1 = 1';
+    IF @NameLike IS NOT NULL SET @sql += N' AND e.LastName LIKE ''%'' + @nm + ''%''';
+    IF @DeptId   IS NOT NULL SET @sql += N' AND e.DeptId = @dp';
+    EXEC sp_executesql @sql, N'@nm NVARCHAR(50), @dp INT', @nm = @NameLike, @dp = @DeptId;
+END;
+===END===
+===OBJECT:hr.usp_HireEmployee:SQL_STORED_PROCEDURE===
+-- leaf proc: hire (uses sequence)
+CREATE PROCEDURE hr.usp_HireEmployee
+    @First NVARCHAR(50), @Last NVARCHAR(50), @DeptId INT, @Grade INT, @Salary DECIMAL(18,2),
+    @NewId INT OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @num INT = NEXT VALUE FOR hr.EmpNumberSeq;
+    INSERT INTO hr.Employee(EmpNumber, FirstName, LastName, DeptId, Grade, BaseSalary)
+    VALUES(@num, @First, @Last, @DeptId, @Grade, @Salary);
+    SET @NewId = SCOPE_IDENTITY();
+END;
+===END===
+===OBJECT:hr.usp_OrgReport:SQL_STORED_PROCEDURE===
+-- proc: recursive org chart + PIVOT (levels as columns)
+CREATE PROCEDURE hr.usp_OrgReport
+    @RootId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT *
+    FROM (SELECT Level, FullName FROM hr.fn_OrgChart(@RootId)) src
+    PIVOT (COUNT(FullName) FOR Level IN ([0],[1],[2],[3],[4])) pvt;
+END;
+===END===
+===OBJECT:hr.usp_PromoteEmployee:SQL_STORED_PROCEDURE===
+-- proc → function (uses fn_AnnualSalary), transaction, TRY/CATCH
+CREATE PROCEDURE hr.usp_PromoteEmployee
+    @EmployeeId INT, @RaisePct DECIMAL(5,2), @NewGrade INT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        BEGIN TRAN;
+        DECLARE @cur DECIMAL(18,2);
+        SELECT @cur = BaseSalary FROM hr.Employee WHERE EmployeeId = @EmployeeId;
+        UPDATE hr.Employee
+            SET BaseSalary = @cur * (1 + @RaisePct/100.0),
+                Grade = ISNULL(@NewGrade, Grade)
+        WHERE EmployeeId = @EmployeeId;
+        -- validate against band using function → function inline TVF
+        IF EXISTS (SELECT 1 FROM hr.fn_GradeBand(ISNULL(@NewGrade,
+                        (SELECT Grade FROM hr.Employee WHERE EmployeeId=@EmployeeId))) b
+                   INNER JOIN hr.Employee e ON e.EmployeeId=@EmployeeId
+                   WHERE e.BaseSalary > b.MaxSalary)
+            THROW 51001, N'Salary exceeds grade band', 1;
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        THROW;
+    END CATCH
+END;
+===END===
+===OBJECT:hr.vw_DeptHeadcount:VIEW===
+-- Indexed (materialized) view: headcount + payroll per department
+CREATE VIEW hr.vw_DeptHeadcount
+WITH SCHEMABINDING
+AS
+    SELECT e.DeptId, COUNT_BIG(*) AS Headcount, SUM(e.BaseSalary) AS Payroll
+    FROM hr.Employee e
+    WHERE e.DeptId IS NOT NULL
+    GROUP BY e.DeptId;
+===END===
+===OBJECT:hr.vw_EmployeeDir:VIEW===
+-- Regular view (self-join to manager + LEFT join dept)
+CREATE VIEW hr.vw_EmployeeDir
+AS
+    SELECT e.EmployeeId, e.EmpNumber,
+           e.FirstName + N' ' + e.LastName AS FullName,
+           d.Name AS Department,
+           m.FirstName + N' ' + m.LastName AS ManagerName
+    FROM hr.Employee e
+    LEFT JOIN hr.Department d ON d.DeptId = e.DeptId
+    LEFT JOIN hr.Employee   m ON m.EmployeeId = e.ManagerId;
+===END===
+===OBJECT:sales.fn_DiscountFactor:SQL_SCALAR_FUNCTION===-- scalar calling another scalar function (function → function)
+CREATE FUNCTION sales.fn_DiscountFactor(@spent DECIMAL(18,2))
+RETURNS DECIMAL(5,3)
+AS
+BEGIN
+    DECLARE @tier NVARCHAR(20) = sales.fn_GetCustomerTier(@spent);
+    RETURN CASE @tier WHEN N'PLATINUM' THEN 0.85
+                      WHEN N'GOLD'     THEN 0.90
+                      WHEN N'SILVER'   THEN 0.95
+                      ELSE 1.00 END;
+END;
+===END===
+===OBJECT:sales.fn_ExplodeBom:SQL_TABLE_VALUED_FUNCTION===-- multi-statement TVF with RECURSIVE CTE (BOM explosion / self-join recursion)
+CREATE FUNCTION sales.fn_ExplodeBom(@productId INT)
+RETURNS @tree TABLE(Level INT, ProductId INT, ComponentProductId INT, Qty INT)
+AS
+BEGIN
+    WITH bom AS (
+        SELECT 0 AS Lvl, b.ParentProductId, b.ComponentProductId, b.Qty
+        FROM sales.ProductBom b
+        WHERE b.ParentProductId = @productId
+        UNION ALL
+        SELECT p.Lvl + 1, b.ParentProductId, b.ComponentProductId, b.Qty
+        FROM sales.ProductBom b
+        INNER JOIN bom p ON b.ParentProductId = p.ComponentProductId
+    )
+    INSERT INTO @tree(Level, ProductId, ComponentProductId, Qty)
+    SELECT Lvl, ParentProductId, ComponentProductId, Qty FROM bom;
+    RETURN;
+END;
+===END===
+===OBJECT:sales.fn_GetCustomerTier:SQL_SCALAR_FUNCTION===
+-- ── Functions ───────────────────────────────────────────────────────────────
+-- scalar
+CREATE FUNCTION sales.fn_GetCustomerTier(@spent DECIMAL(18,2))
+RETURNS NVARCHAR(20)
+AS
+BEGIN
+    RETURN CASE WHEN @spent >= 10000 THEN N'PLATINUM'
+                WHEN @spent >= 5000  THEN N'GOLD'
+                WHEN @spent >= 1000  THEN N'SILVER'
+                ELSE N'BRONZE' END;
+END;
+===END===
+===OBJECT:sales.fn_GetOrderLines:SQL_INLINE_TABLE_VALUED_FUNCTION===-- inline TVF
+CREATE FUNCTION sales.fn_GetOrderLines(@orderId INT)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT ol.LineId, p.Name AS ProductName, ol.Qty, ol.UnitPrice,
+           ol.Qty * ol.UnitPrice AS LineTotal
+    FROM sales.OrderLine ol
+    INNER JOIN sales.Product p ON p.ProductId = ol.ProductId
+    WHERE ol.OrderId = @orderId
+);
+===END===
+===OBJECT:sales.fn_OrderTotal:SQL_SCALAR_FUNCTION===-- scalar reading tables with INNER JOIN + correlated context
+CREATE FUNCTION sales.fn_OrderTotal(@orderId INT)
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    DECLARE @t DECIMAL(18,2);
+    SELECT @t = SUM(ol.Qty * p.UnitPrice)
+    FROM sales.OrderLine ol
+    INNER JOIN sales.Product p ON p.ProductId = ol.ProductId
+    WHERE ol.OrderId = @orderId;
+    RETURN ISNULL(@t, 0);
+END;
+===END===
+===OBJECT:sales.trg_Order_InsteadOfDel:SQL_TRIGGER===-- INSTEAD OF DELETE: soft-delete + audit rather than physical delete
+CREATE TRIGGER sales.trg_Order_InsteadOfDel
+ON sales.SalesOrder
+INSTEAD OF DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE o SET o.IsDeleted = 1
+    FROM sales.SalesOrder o
+    INNER JOIN deleted d ON d.OrderId = o.OrderId;
+
+    INSERT INTO sales.OrderAudit(OrderId, Action, Detail)
+    SELECT d.OrderId, N'SOFT_DELETE', N'instead-of delete' FROM deleted d;
+END;
+===END===
+===OBJECT:sales.trg_OrderLine_AfterIns:SQL_TRIGGER===
+-- ── Triggers ────────────────────────────────────────────────────────────────
+-- AFTER INSERT: recompute order total, write audit
+CREATE TRIGGER sales.trg_OrderLine_AfterIns
+ON sales.OrderLine
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE o SET o.Total = sales.fn_OrderTotal(o.OrderId)
+    FROM sales.SalesOrder o
+    WHERE o.OrderId IN (SELECT DISTINCT OrderId FROM inserted);
+
+    INSERT INTO sales.OrderAudit(OrderId, Action, Detail)
+    SELECT i.OrderId, N'LINE_ADD', CONCAT(N'product=', i.ProductId, N' qty=', i.Qty)
+    FROM inserted i;
+END;
+===END===
+===OBJECT:sales.usp_AddOrderLine:SQL_STORED_PROCEDURE===
+-- ── Procedures ──────────────────────────────────────────────────────────────
+-- leaf proc
+CREATE PROCEDURE sales.usp_AddOrderLine
+    @OrderId INT, @ProductId INT, @Qty INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @price DECIMAL(18,2);
+    SELECT @price = UnitPrice FROM sales.Product WHERE ProductId = @ProductId;
+    INSERT INTO sales.OrderLine(OrderId, ProductId, Qty, UnitPrice)
+    VALUES(@OrderId, @ProductId, @Qty, @price);
+END;
+===END===
+===OBJECT:sales.usp_BomReport:SQL_STORED_PROCEDURE===-- proc calling recursive TVF + windowed reporting
+CREATE PROCEDURE sales.usp_BomReport
+    @ProductId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT e.Level, e.ComponentProductId, comp.Name AS ComponentName, e.Qty,
+           SUM(e.Qty) OVER (PARTITION BY e.Level) AS QtyAtLevel,
+           ROW_NUMBER() OVER (ORDER BY e.Level, e.ComponentProductId) AS Rn
+    FROM sales.fn_ExplodeBom(@ProductId) e
+    INNER JOIN sales.Product comp ON comp.ProductId = e.ComponentProductId
+    ORDER BY e.Level, e.ComponentProductId;
+END;
+===END===
+===OBJECT:sales.usp_CreateOrder:SQL_STORED_PROCEDURE===-- mid proc: uses sequence, returns id
+CREATE PROCEDURE sales.usp_CreateOrder
+    @CustomerId INT, @NewOrderId INT OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @num BIGINT = NEXT VALUE FOR sales.OrderNumberSeq;
+    INSERT INTO sales.SalesOrder(OrderNumber, CustomerId) VALUES(@num, @CustomerId);
+    SET @NewOrderId = SCOPE_IDENTITY();
+END;
+===END===
+===OBJECT:sales.usp_FulfillOrder:SQL_STORED_PROCEDURE===-- TOP proc: cursor, proc→proc, proc→function, MERGE, TRY/CATCH, transaction
+CREATE PROCEDURE sales.usp_FulfillOrder
+    @CustomerId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @orderId INT, @pid INT, @qty INT, @total DECIMAL(18,2), @factor DECIMAL(5,3);
+    BEGIN TRY
+        BEGIN TRAN;
+        EXEC sales.usp_CreateOrder @CustomerId, @orderId OUTPUT;      -- proc → proc
+
+        DECLARE @wanted TABLE(ProductId INT, Qty INT);
+        INSERT INTO @wanted VALUES (1,2),(2,1),(3,4);
+
+        DECLARE line_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT ProductId, Qty FROM @wanted;
+        OPEN line_cur;
+        FETCH NEXT FROM line_cur INTO @pid, @qty;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            EXEC sales.usp_AddOrderLine @orderId, @pid, @qty;         -- proc → proc (in loop)
+            -- keep inventory in sync via MERGE
+            MERGE sales.Inventory AS tgt
+            USING (SELECT @pid AS ProductId, @qty AS Q) AS src
+                ON tgt.ProductId = src.ProductId
+            WHEN MATCHED THEN UPDATE SET tgt.QtyOnHand = tgt.QtyOnHand - src.Q
+            WHEN NOT MATCHED THEN INSERT(ProductId, QtyOnHand) VALUES(src.ProductId, -src.Q);
+            FETCH NEXT FROM line_cur INTO @pid, @qty;
+        END
+        CLOSE line_cur;
+        DEALLOCATE line_cur;
+
+        SET @total  = sales.fn_OrderTotal(@orderId);                  -- proc → function
+        SET @factor = sales.fn_DiscountFactor(@total);               -- proc → function (→ function)
+        UPDATE sales.SalesOrder
+            SET Total = @total * @factor, Status = N'CONFIRMED'
+        WHERE OrderId = @orderId;
+
+        UPDATE sales.Customer
+            SET TotalSpent = TotalSpent + (@total * @factor),
+                Tier = sales.fn_GetCustomerTier(TotalSpent + (@total * @factor))
+        WHERE CustomerId = @CustomerId;
+
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        INSERT INTO sales.OrderAudit(OrderId, Action, Detail) VALUES(NULL, N'ERROR', ERROR_MESSAGE());
+        THROW;
+    END CATCH
+END;
+===END===
+===OBJECT:sales.usp_ReorderReport:SQL_STORED_PROCEDURE===-- dynamic SQL via EXEC() (concatenated) + self-join + APPLY + correlated subquery
+CREATE PROCEDURE sales.usp_ReorderReport
+    @SortCol SYSNAME = N'QtyOnHand'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX);
+    SET @sql = N'
+        SELECT p.ProductId, p.Name, inv.QtyOnHand, inv.ReorderLevel,
+               ca.TotalSold,
+               (SELECT AVG(p2.UnitPrice) FROM sales.Product p2 WHERE p2.Category = p.Category) AS AvgCatPrice
+        FROM sales.Product p
+        LEFT JOIN sales.Inventory inv ON inv.ProductId = p.ProductId
+        CROSS APPLY (SELECT SUM(ol.Qty) AS TotalSold
+                     FROM sales.OrderLine ol WHERE ol.ProductId = p.ProductId) ca
+        OUTER APPLY (SELECT TOP 1 s2.Name FROM sales.Product s2
+                     WHERE s2.Category = p.Category AND s2.ProductId <> p.ProductId) peer
+        WHERE inv.QtyOnHand <= inv.ReorderLevel
+        ORDER BY inv.' + QUOTENAME(@SortCol) + N' ASC';
+    EXEC (@sql);
+END;
+===END===
+===OBJECT:sales.usp_SearchOrders:SQL_STORED_PROCEDURE===-- dynamic SQL via sp_executesql (prepared execution with parameters) + all join types
+CREATE PROCEDURE sales.usp_SearchOrders
+    @CustomerName NVARCHAR(100) = NULL, @Status NVARCHAR(20) = NULL, @Region NVARCHAR(40) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX), @params NVARCHAR(MAX);
+    SET @sql = N'
+        SELECT o.OrderId, o.OrderNumber, c.Name, c.Region, o.Status, o.Total,
+               inv.QtyOnHand
+        FROM sales.SalesOrder o
+        INNER JOIN sales.Customer c        ON c.CustomerId = o.CustomerId
+        LEFT  JOIN sales.OrderLine ol      ON ol.OrderId = o.OrderId
+        RIGHT JOIN sales.Product p         ON p.ProductId = ol.ProductId
+        FULL  JOIN sales.Inventory inv     ON inv.ProductId = p.ProductId
+        CROSS JOIN (SELECT COUNT(*) AS TotalCustomers FROM sales.Customer) cc
+        WHERE o.IsDeleted = 0
+          AND EXISTS (SELECT 1 FROM sales.OrderLine x WHERE x.OrderId = o.OrderId)';
+    IF @CustomerName IS NOT NULL SET @sql += N' AND c.Name LIKE ''%'' + @cn + ''%''';
+    IF @Status       IS NOT NULL SET @sql += N' AND o.Status = @st';
+    IF @Region       IS NOT NULL SET @sql += N' AND c.Region = @rg';
+    SET @sql += N' ORDER BY o.Total DESC';
+    SET @params = N'@cn NVARCHAR(100), @st NVARCHAR(20), @rg NVARCHAR(40)';
+    EXEC sp_executesql @sql, @params, @cn = @CustomerName, @st = @Status, @rg = @Region;
+END;
+===END===
+===OBJECT:sales.vw_OrderSummary:VIEW===
+-- ── Regular view (multi-join + LEFT join) ───────────────────────────────────
+CREATE VIEW sales.vw_OrderSummary
+AS
+    SELECT o.OrderId, o.OrderNumber, c.Name AS CustomerName, c.Region,
+           o.Status, o.Total,
+           lc.LineCount
+    FROM sales.SalesOrder o
+    INNER JOIN sales.Customer c ON c.CustomerId = o.CustomerId
+    LEFT  JOIN (SELECT OrderId, COUNT(*) AS LineCount
+                FROM sales.OrderLine GROUP BY OrderId) lc ON lc.OrderId = o.OrderId
+    WHERE o.IsDeleted = 0;
+===END===
+===OBJECT:sales.vw_ProductSales:VIEW===
+-- ── Indexed (materialized) view — SCHEMABINDING + unique clustered index ─────
+CREATE VIEW sales.vw_ProductSales
+WITH SCHEMABINDING
+AS
+    SELECT ol.ProductId,
+           COUNT_BIG(*)        AS LineCount,
+           SUM(ol.Qty)         AS TotalQty,
+           SUM(ol.LineTotal)   AS TotalAmount
+    FROM sales.OrderLine ol
+    GROUP BY ol.ProductId;
+===END===

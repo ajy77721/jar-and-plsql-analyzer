@@ -1,0 +1,180 @@
+/* Explore → Transactions sub-view (T1/T2/T3 boundaries: table + graph) */
+
+.txn-tag {
+    display: inline-block; min-width: 26px; text-align: center;
+    padding: 1px 6px; border-radius: var(--radius-lg); font-size: 11px; font-weight: 800;
+    background: var(--accent); color: var(--text-inverse); letter-spacing: 0.3px;
+}
+.txn-tag.auto { background: var(--orange); color: var(--text-inverse); }
+.txn-badge-auto {
+    margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-md); font-size: 9px; font-weight: 800;
+    background: var(--badge-orange-bg); color: var(--badge-orange);
+}
+
+/* Scrollable container so 100s of transactions stay contained.
+   NOTE: do NOT set display on #exViewTxn — the .dt-subview / .dt-subview.active rules own its
+   visibility; forcing display here made the view show under every Explore tab. */
+#txnContainerTrace { flex: 1; overflow: auto; }
+
+/* Compact summary (replaces the long per-txn legend) */
+.txn-summary { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 10px; }
+.txn-sum-chip {
+    display: inline-flex; align-items: center; padding: 3px 10px; border-radius: var(--radius-xl);
+    font-size: 11px; font-weight: 700; background: var(--bg-secondary, var(--badge-blue-bg)); color: var(--text);
+    border: 1px solid var(--border);
+}
+.txn-sum-chip.commit   { background: var(--badge-green-bg); color: var(--badge-green); border-color: var(--badge-green-bg); }
+.txn-sum-chip.rollback { background: var(--badge-red-bg); color: var(--badge-red); border-color: var(--badge-red-bg); }
+.txn-sum-chip.sp       { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent-subtle); }
+.txn-sum-chip.auto     { background: var(--badge-orange-bg); color: var(--badge-orange); border-color: var(--badge-orange-bg); }
+.txn-sum-chip.open     { background: var(--badge-orange-bg); color: var(--badge-orange); border-color: var(--badge-orange-bg); }
+
+/* Pager */
+.txn-pager { margin: 4px 0 10px; }
+
+/* Table view */
+.txn-table th, .txn-table td { font-size: 12px; vertical-align: top; }
+.txn-close { font-weight: 800; }
+.txn-open-flag { color: var(--badge-orange); font-weight: 700; }
+.txn-row td[onclick]:hover { text-decoration: underline; }
+
+/* Graph / timeline view */
+.txn-graph { display: flex; flex-direction: column; gap: 14px; padding: 6px 2px 14px; }
+.txn-track {
+    border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius-md);
+    padding: 8px 12px; background: var(--bg-card, var(--bg-card));
+}
+.txn-track.auto { border-left-color: var(--badge-orange); margin-left: 22px; background: var(--badge-orange-bg); }
+.txn-track-tag { margin-bottom: 8px; }
+.txn-track-line { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 0; }
+
+.txn-node {
+    display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+    min-width: 96px; max-width: 160px; padding: 2px 4px; cursor: default;
+}
+.txn-node[onclick] { cursor: pointer; }
+.txn-node[onclick]:hover .txn-node-lbl { text-decoration: underline; }
+.txn-node-lbl { font-size: 10px; text-align: center; color: var(--text); line-height: 1.3; }
+
+.txn-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border-subtle); box-shadow: 0 0 0 1px var(--border); }
+.txn-dot.begin    { background: var(--accent); }
+.txn-dot.sp       { background: var(--accent-hover); border-radius: var(--radius-sm); }
+.txn-dot.commit   { background: var(--green); }
+.txn-dot.rollback { background: var(--red); }
+.txn-dot.open     { background: var(--orange); }
+
+/* Connector line between nodes */
+.txn-conn {
+    align-self: flex-start; margin-top: 7px; height: 2px; width: 26px;
+    background: var(--border); flex: 0 0 26px;
+}
+
+/* Active state for the Table/Graph toggle + proc name in graph track header */
+#txnViewTableBtn.active, #txnViewGraphBtn.active {
+    background: var(--accent) !important; color: var(--text-inverse) !important; border-color: var(--accent) !important;
+}
+.txn-track-proc { margin-left: 8px; font-size: 12px; font-weight: 700; color: var(--text); font-family: var(--font-mono); }
+
+.txn-implicit { font-size: 10px; color: var(--text-muted); font-style: italic; }
+
+/* Two mutually-exclusive exits in the graph: success COMMIT + error ROLLBACK */
+.txn-exit-tag { display: inline-block; font-size: 8px; font-weight: 800; border-radius: var(--radius); padding: 1px 6px; text-transform: uppercase; letter-spacing: 0.3px; }
+.txn-exit-tag.ok  { background: var(--badge-green-bg); color: var(--badge-green); }
+.txn-exit-tag.err { background: var(--badge-red-bg); color: var(--badge-red); }
+.txn-conn.alt { background: repeating-linear-gradient(90deg, var(--red) 0 4px, transparent 4px 8px); }
+
+.txn-op-kind { font-size: 9px; font-weight: 800; color: var(--text); background: var(--bg-inset); border-radius: var(--radius); padding: 0 5px; margin-left: 4px; }
+
+/* ── Per-transaction "Details" button + call-tree (snake) modal ── */
+.txn-detail-btn { font-size: 11px; padding: 2px 10px; }
+
+.txn-detail-modal { max-width: 1100px; width: 96vw; }
+.txn-detail-modal.fullscreen { max-width: 100vw; width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; }
+.txn-detail-modal.fullscreen .txn-snake { max-height: 66vh; }
+.txn-detail-modal .tds-header-left { display: flex; align-items: center; }
+.tds-header-btns { display: flex; gap: 4px; align-items: center; }
+.txn-detail-sub { font-size: 12px; color: var(--text); margin-bottom: 10px; }
+.txn-detail-sub b { font-weight: 700; }
+
+.txn-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); margin-bottom: 12px; }
+.txn-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.txn-legend i.txn-dot { display: inline-block; width: 11px; height: 11px; }
+
+/* Snake wrapper: ▲/▼ scroll buttons framing a fixed-height scroll box */
+.txn-snake-wrap { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-secondary, var(--badge-blue-bg)); }
+.txn-snake-btn {
+    border: none; border-bottom: 1px solid var(--border); background: var(--bg-card, var(--bg-card)); color: var(--accent, var(--accent));
+    font-size: 13px; padding: 5px 0; cursor: pointer; width: 100%; letter-spacing: 2px;
+}
+.txn-snake-btn.down { border-bottom: none; border-top: 1px solid var(--border); }
+.txn-snake-btn:hover { background: var(--accent-subtle); }
+
+/* Snake / boustrophedon flow — its own scroll region so the explainer panels stay in view */
+.txn-snake {
+    display: flex; flex-direction: column; gap: 0;
+    max-height: 44vh; overflow: auto;
+    padding: 12px;
+}
+/* Fixed 3-column grid: 3 equal card columns with narrow arrow columns between, so every row
+   aligns vertically no matter the card width. */
+.txn-snake-row { display: grid; grid-template-columns: 1fr 30px 1fr 30px 1fr; align-items: stretch; column-gap: 0; margin-bottom: 4px; }
+.txn-snake-arrow { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 18px; font-weight: 700; }
+.txn-snake-empty { visibility: hidden; }
+
+/* One turn column per row-break, on the side where the snake bends */
+.txn-snake-turn { font-size: 22px; color: var(--accent, var(--accent)); line-height: 1; margin: 2px 0 6px; }
+.txn-snake-turn.right { text-align: right; padding-right: calc(16.6% - 10px); }
+.txn-snake-turn.left  { text-align: left;  padding-left:  calc(16.6% - 10px); }
+
+.txn-snake-card {
+    min-width: 0; height: 100%;
+    border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 10px;
+    background: var(--bg-card, var(--bg-card));
+}
+.txn-snake-card.has-txn { border-color: var(--accent); box-shadow: 0 0 0 1px var(--focus-ring); background: var(--badge-blue-bg); }
+.txn-snake-name { font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--text); word-break: break-all; margin-bottom: 4px; }
+.txn-snake-name:hover { color: var(--accent); text-decoration: underline; }
+.txn-snake-nomark { font-size: 9px; color: var(--text-muted); font-style: italic; }
+.txn-snake-marks { display: flex; flex-direction: column; gap: 3px; }
+.txn-mark { display: flex; align-items: center; gap: 5px; }
+.txn-mark-lbl { font-size: 10px; font-weight: 700; color: var(--text); }
+.txn-mark[onclick]:hover .txn-mark-lbl { text-decoration: underline; }
+
+/* DB chip in the header + model badges */
+.txn-db-chip { margin-left: 10px; padding: 3px 10px; border-radius: var(--radius-xl); font-size: 11px; font-weight: 700; background: var(--badge-blue-bg); color: var(--badge-blue); }
+.txn-model-badge { margin-left: 8px; padding: 2px 8px; border-radius: var(--radius-md); font-size: 10px; font-weight: 800; background: var(--badge-green-bg); color: var(--badge-green); }
+
+/* Compact summary: chips + a one-line resolve + a one-line DB note */
+.txn-sum2 { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.txn-chip2 { padding: 3px 10px; border-radius: var(--radius-xl); font-size: 11px; font-weight: 700; background: var(--bg-secondary, var(--badge-blue-bg)); color: var(--text); border: 1px solid var(--border); }
+.txn-chip2.model    { background: var(--badge-green-bg); color: var(--badge-green); border-color: var(--badge-green-bg); letter-spacing: 0.5px; }
+.txn-chip2.commit   { background: var(--badge-green-bg); color: var(--badge-green); border-color: var(--badge-green-bg); }
+.txn-chip2.rollback { background: var(--badge-red-bg); color: var(--badge-red); border-color: var(--badge-red-bg); }
+.txn-chip2.open     { background: var(--badge-orange-bg); color: var(--badge-orange); border-color: var(--badge-orange-bg); }
+.txn-chip2.sp       { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent-subtle); }
+.txn-chip2.db       { background: var(--badge-blue-bg); color: var(--badge-blue); border-color: var(--badge-blue-bg); }
+.txn-resolve-line { font-size: 12.5px; line-height: 1.5; color: var(--text); margin-bottom: 6px; }
+.txn-db-line { font-size: 11.5px; line-height: 1.5; color: var(--text-muted); background: var(--bg-secondary, var(--badge-blue-bg)); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px 11px; margin-bottom: 12px; }
+.txn-good { color: var(--badge-green); font-weight: 800; }
+.txn-bad  { color: var(--badge-red); font-weight: 800; }
+
+/* Snake card head + operations */
+.txn-snake-card.host { border-color: var(--badge-green); box-shadow: 0 0 0 1px var(--focus-ring); background: var(--badge-green-bg); }
+.txn-snake-head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+.txn-snake-depth { flex: 0 0 auto; font-size: 9px; font-weight: 800; color: var(--badge-gray); background: var(--badge-gray-bg); border-radius: var(--radius-sm); padding: 1px 5px; }
+.txn-host-badge { font-size: 8px; font-weight: 800; color: var(--text-inverse); background: var(--green); border-radius: var(--radius); padding: 1px 6px; text-transform: uppercase; }
+.txn-snake-ops { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
+.txn-op-chip { font-size: 9px; font-weight: 800; color: var(--text-inverse); border-radius: var(--radius); padding: 1px 6px; cursor: pointer; font-family: var(--font-mono); }
+.txn-op-chip.INSERT { background: var(--green); color: var(--text-inverse); }
+.txn-op-chip.UPDATE { background: var(--blue); color: var(--text-inverse); }
+.txn-op-chip.DELETE { background: var(--red); color: var(--text-inverse); }
+.txn-op-chip.MERGE  { background: var(--accent-hover); color: var(--text-inverse); }
+.txn-op-chip:hover { filter: brightness(1.12); }
+.txn-op-more { font-size: 9px; font-weight: 700; color: var(--text-muted); align-self: center; }
+.txn-op-swatch { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-sm); background: var(--green); }
+
+/* Boundary node: a called proc that opens its own transaction (not expanded) */
+.txn-snake-card.nested { border-style: dashed; border-color: var(--badge-orange); background: var(--badge-orange-bg); }
+.txn-nested-note { font-size: 10px; font-weight: 700; color: var(--badge-orange); margin-top: 3px; }
+.txn-own-badge { font-size: 8px; font-weight: 800; color: var(--text-inverse); background: var(--orange); border-radius: var(--radius); padding: 1px 6px; text-transform: uppercase; white-space: nowrap; }
+.txn-nested-swatch { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-sm); border: 1.5px dashed var(--badge-orange); background: var(--badge-orange-bg); }

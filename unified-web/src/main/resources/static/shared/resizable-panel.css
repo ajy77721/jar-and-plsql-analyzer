@@ -1,0 +1,36 @@
+/* Draggable resize handle — TASK-REGISTRY §282. See resizable-panel.js for the
+   drag/persist logic; this is only the visual. Subtle at rest (matches the
+   calm design system — a hover tint from the existing --bg-hover token, not a
+   new color), but col-resize cursor on hover/active makes it discoverable. */
+.mdb-resize-handle {
+    width: 5px;
+    flex-shrink: 0;
+    align-self: stretch;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 5;
+    transition: background 0.15s ease;
+}
+.mdb-resize-handle:hover,
+.mdb-resize-handle.mdb-resize-active {
+    background: var(--bg-hover);
+}
+
+/* While dragging: lock the cursor/selection app-wide so fast mouse movement
+   past the handle's own 5px hit-area doesn't drop the drag or select text. */
+body.mdb-resizing {
+    cursor: col-resize;
+    user-select: none;
+}
+body.mdb-resizing * {
+    user-select: none;
+}
+
+/* Suspends the panel's own width transition (sidebar-toggle.css sets one, for
+   the collapse animation) while an actual drag is happening — otherwise the
+   panel visibly lags a few frames behind the cursor instead of tracking it
+   1:1, and a rect read right after mouseup can land mid-transition. */
+.mdb-resize-dragging {
+    transition: none !important;
+}

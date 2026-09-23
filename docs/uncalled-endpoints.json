@@ -1,0 +1,56 @@
+{
+ "WAR parity gap vs JAR": [
+  "POST   /api/war/wars/analyze-local",
+  "POST   /api/war/wars/{id}/fetch-catalog",
+  "GET    /api/war/wars/{id}/collections",
+  "POST   /api/war/wars/reanalyze-all",
+  "POST   /api/war/wars/{id}/reanalyze",
+  "POST   /api/war/wars/export-excel"
+ ],
+ "other": [
+  "GET    /api/parser/analyses/{name}/resolver/{type}",
+  "GET    /api/parser/analyses/{name}/claude/call-log",
+  "GET    /api/plsql/db/cached-source",
+  "GET    /api/plsql/config/dir",
+  "GET    /api/plsql/config/schemas",
+  "GET    /api/docs/{id}",
+  "GET    /api/plsql/analysis/jobs",
+  "GET    /api/plsql/analysis/jobs/{jobId}",
+  "POST   /api/plsql/analysis/jobs/{jobId}/cancel",
+  "GET    /api/plsql/source/file",
+  "GET    /api/sessions/summary",
+  "GET    /api/sessions/claude-stats",
+  "POST   /api/queue/reorder",
+  "GET    /api/jar/jars/{id}/external-links",
+  "GET    /api/jar/jars/{id}/external-links/pending",
+  "POST   /api/jar/jars/{id}/external-links/resolve",
+  "POST   /api/jars/{id}/chat",
+  "GET    /api/jars/{id}/chat/history",
+  "DELETE /api/jars/{id}/chat/history",
+  "GET    /api/jar/jars/{id}/flow/result/{runId}",
+  "GET    /api/jar/jars/settings/claude-test",
+  "POST   /api/jar/jars/analyze-local",
+  "POST   /api/jar/jars/{id}/fetch-catalog",
+  "POST   /api/jar/jars/reanalyze-all",
+  "POST   /api/jar/jars/{id}/reanalyze"
+ ],
+ "TableDetail tab never built": [
+  "GET    /api/parser/analyses/{name}/table-joins",
+  "GET    /api/parser/analyses/{name}/table-joins/summary",
+  "GET    /api/parser/analyses/{name}/table-columns",
+  "GET    /api/parser/analyses/{name}/table-columns/summary"
+ ],
+ "entity layer unconsumed (PLAN-09)": [
+  "GET    /api/parser/analyses/{name}/entities/tables/{table}/nodes",
+  "GET    /api/parser/analyses/{name}/entities/nodes/{nodeId}",
+  "GET    /api/parser/analyses/{name}/entities/nodes/{nodeId}/edges"
+ ],
+ "auth disabled by design (PLAN-12 4.3)": [
+  "POST   /api/auth/login",
+  "POST   /api/auth/logout",
+  "GET    /api/auth/status"
+ ],
+ "conversion": [
+  "POST   /api/conversion/convert"
+ ]
+}

@@ -1,0 +1,2446 @@
+package com.plsql.parser.flow;
+
+import com.plsql.parser.PlSqlParserEngine;
+import com.plsql.parser.model.*;
+import com.plsql.parser.multidb.Db2ProcedureParser;
+import com.plsql.parser.multidb.MySqlProcedureParser;
+import com.plsql.parser.multidb.PostgresProcedureParser;
+import com.plsql.parser.multidb.SqlServerProcedureParser;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Main orchestrator for recursive dependency analysis with flow-ordered output.
+ *
+ * Given an entry point (e.g. "PG_AC_EINVOICE.PC_IRBM_SUBMISSION" or "FN_SOME_FUNC"),
+ * it downloads the source from the database, parses it, finds external calls,
+ * and recursively crawls each dependency using BFS for flow ordering.
+ */
+public class DependencyCrawler {
+
+    private static final Logger log = LoggerFactory.getLogger(DependencyCrawler.class);
+
+    private final PlSqlParserEngine engine;
+    private final SourceDownloader downloader;
+    private final SchemaResolver schemaResolver;
+
+    private int maxDepth = -1;
+    private long timeoutPerEntryMs = 120_000;
+    private ArtifactStore store;
+    private ArtifactKey outputKey;
+    private String outputFolderName;
+    private NodeParseCache nodeCache;
+    private ParseResultCache parseResultCache;
+
+    // Cache of parse results: "OBJECT_NAME" -> ParseResult
+    private final Map<String, ParseResult> parseCache = new ConcurrentHashMap<>();
+
+    // Visited set to avoid infinite loops: "PACKAGE.SUBPROGRAM" or "STANDALONE_NAME"
+    private final Set<String> visited = Collections.synchronizedSet(new LinkedHashSet<>());
+
+    // Per-node DML records {fromNodeId, schemaUpper, tableUpper, opUpper} for every reachable
+    // node — used after the crawl to build additive FIRES_TRIGGER edges from a routine to the
+    // triggers on the tables it writes. (Additive: does not affect normal CALL edges.)
+    private final List<String[]> dmlRefs = Collections.synchronizedList(new ArrayList<>());
+
+    // Track which source objects have already had their parse errors reported so that
+    // multiple subprograms from the same package don't repeat the same errors N times.
+    private final Set<String> parseErrorsReported = Collections.synchronizedSet(new HashSet<>());
+
+    // Names confirmed absent from ALL_OBJECTS (cursor vars, collection types, etc.)
+    // Populated by a single batched ALL_OBJECTS query the first time a name has no source.
+    // Any name in this set is skipped instantly — zero DB round-trips per node.
+    private final Set<String> knownMissingObjects = Collections.synchronizedSet(new HashSet<>());
+    // Names queued for the next batch check (accumulated before the batch fires)
+    private final Set<String> pendingMissingCheck = Collections.synchronizedSet(new HashSet<>());
+    // Name -> canonical Oracle object_type returned by the bulk check (e.g. "PACKAGE BODY", "PROCEDURE").
+    // Used by nodeCache peek to probe exactly the right type in 1 call instead of 2 blind probes.
+    private final Map<String, String> knownObjectTypes = new ConcurrentHashMap<>();
+
+    // Fix C: unknown external call names deferred for one batched ALL_OBJECTS lookup.
+    // tryResolveFromDb previously fired 1 DB call per name during BFS (blocking ~400ms each).
+    // Now names accumulate here; flushPendingResolve() fires ONE query per BFS pass.
+    private final Set<String> pendingResolveCheck = Collections.synchronizedSet(new HashSet<>());
+    // Names already confirmed present (via batch or tryResolveFromDb) — never re-queried.
+    private final Set<String> resolvedPresentObjects = Collections.synchronizedSet(new HashSet<>());
+
+    // --- Top-level 3-phase timing (parse / discover / save) for the whole crawl() run ---
+    // "parse"    = ANTLR/dialect grammar parse of already-fetched source text (CPU-bound, local).
+    // "discover" = DB-backed source fetch + schema/table/trigger resolution (network-bound).
+    // "save"     = ChunkedFlowWriter/ArtifactStore writes (chunk writes, final result, merge).
+    // These wrap only the representative/dominant call sites in the main BFS loop, not every
+    // single call, per the intentionally lightweight scope of this instrumentation.
+    private final AtomicLong parseNanos = new AtomicLong();
+    private final AtomicLong discoverNanos = new AtomicLong();
+    private final AtomicLong saveNanos = new AtomicLong();
+
+    public DependencyCrawler(PlSqlParserEngine engine, SourceDownloader downloader,
+                             SchemaResolver schemaResolver) {
+        this.engine = engine;
+        this.downloader = downloader;
+        this.schemaResolver = schemaResolver;
+    }
+
+    public void setMaxDepth(int maxDepth) {
+        this.maxDepth = maxDepth;
+    }
+
+    public void setTimeoutPerEntryMs(long timeoutPerEntryMs) {
+        this.timeoutPerEntryMs = timeoutPerEntryMs;
+    }
+
+    /**
+     * Where the chunked output goes: the PARENT prefix, under which a folder named after the
+     * entry point (or {@link #setOutputFolderName}) is created. Both must be set together.
+     */
+    public void setOutputDir(ArtifactStore store, ArtifactKey outputKey) {
+        this.store = store;
+        this.outputKey = outputKey;
+    }
+
+    /**
+     * Explicit output folder name override. When set, the chunked writer uses this name
+     * instead of deriving it from the entry point — lets callers scope the folder
+     * (e.g. by project/env/connection) so analyses of the same object don't collide.
+     */
+    public void setOutputFolderName(String name) {
+        this.outputFolderName = name;
+    }
+
+    public void setNodeCache(NodeParseCache nodeCache) {
+        this.nodeCache = nodeCache;
+    }
+
+    public void setParseResultCache(ParseResultCache parseResultCache) {
+        this.parseResultCache = parseResultCache;
+    }
+
+    /**
+     * Crawl from the given entry point and produce a FlowResult.
+     *
+     * @param entryPoint e.g. "PG_AC_EINVOICE.PC_IRBM_SUBMISSION" or "FN_SOME_FUNC"
+     * @return FlowResult with complete call chain, schema-resolved references
+     */
+    public FlowResult crawl(String entryPoint) {
+        long startTime = System.currentTimeMillis();
+        String upperEntry = entryPoint.toUpperCase().trim();
+        String entrySchema = null;
+
+        // Reset state
+        visited.clear();
+        dmlRefs.clear();
+        pendingResolveCheck.clear();
+        resolvedPresentObjects.clear();
+        knownObjectTypes.clear();
+        parseNanos.set(0);
+        discoverNanos.set(0);
+        saveNanos.set(0);
+        List<String> errors = new ArrayList<>();
+        Map<String, SchemaTableInfo> tableInfoMap = new LinkedHashMap<>();
+        List<FlowEdge> edgeBatch = new ArrayList<>();
+        int maxDepthReached = 0;
+        int orderCounter = 0;
+
+        // Setup chunked writer if output dir is set
+        ChunkedFlowWriter chunkedWriter = null;
+        if (outputKey != null && store != null) {
+            try {
+                String safeName = (outputFolderName != null && !outputFolderName.isBlank())
+                        ? outputFolderName
+                        : upperEntry.replace(".", "_").replace("/", "_").replace("\\", "_");
+                ArtifactKey buildKey = outputKey.resolve(safeName);
+                chunkedWriter = new ChunkedFlowWriter(store, buildKey);
+                downloader.setLocalCacheDir(store, chunkedWriter.getSourcesKey());
+                log.info("[Crawler] Chunked output: " + buildKey);
+            } catch (IOException e) {
+                log.info("[Crawler] Failed to init chunked writer: " + e.getMessage());
+            }
+        }
+
+        // Parse entry point
+        String packageName = null;
+        String subprogramName;
+        if (upperEntry.contains(".")) {
+            String[] parts = upperEntry.split("\\.", 2);
+            packageName = parts[0];
+            subprogramName = parts[1];
+        } else {
+            subprogramName = upperEntry;
+        }
+
+        // Pre-warm transitive dependency cache
+        String entryObjForDeps = packageName != null ? packageName : subprogramName;
+        log.info("[Crawler] Pre-computing transitive dependencies for: " + entryObjForDeps);
+        // Never crawl Oracle built-in/system packages (DBMS_*, UTL_*, SYS.*, STANDARD, ...).
+        // Their source is wrapped, which forces the slow DBMS_METADATA fallback and adds
+        // needless DB round-trips.  Copy into a fresh mutable set (the resolver may return
+        // an immutable view).
+        Set<String> entryDeps = new java.util.LinkedHashSet<>();
+        for (String dep : schemaResolver.getTransitiveDependencies(entryObjForDeps)) {
+            if (!isBuiltInPackage(dep)) entryDeps.add(dep);
+        }
+        log.info("[Crawler] Found " + entryDeps.size() + " transitive dependencies");
+        prefetchSources(entryDeps);
+
+        // Populate object types (TABLE / VIEW / MATERIALIZED_VIEW) from the dialect catalog so
+        // referenced views/MVs are tagged (not defaulted to TABLE) in both per-node and aggregate
+        // table listings. No-op for Oracle (resolved via ALL_OBJECTS) and when unsupported.
+        try { schemaResolver.batchResolveObjectTypes(null); } catch (Exception e) {
+            log.info("[Crawler] object-type resolve skipped: " + e.getMessage());
+        }
+
+        // Fix B: after prefetch completes, bulk-resolve ALL table names found across every
+        // downloaded package in one single ALL_OBJECTS query.  Without this, resolveTableSchemas()
+        // called per-BFS-node fires an incremental batchResolveTableOwners each time (~40 queries).
+        bulkPreResolveAllTables();
+
+        Queue<BfsItem> queue = new LinkedList<>();
+        queue.add(new BfsItem(packageName, subprogramName, 0, null, null, 0));
+        int currentBfsDepth = 0;
+
+        while (!queue.isEmpty()) {
+            BfsItem item = queue.poll();
+
+            // Fix C: when BFS depth advances, flush all accumulated unknown call names in ONE
+            // ALL_OBJECTS IN(...) query.  This replaces ~270 individual tryResolveFromDb calls
+            // (each 400ms blocking) with 1-2 batch queries fired between BFS levels.
+            if (item.depth > currentBfsDepth) {
+                currentBfsDepth = item.depth;
+                flushPendingResolve();
+                // Flush standalone names queued by enqueueExternalCalls so they are
+                // confirmed present/absent before their BFS nodes are processed.
+                flushMissingBatch();
+            }
+            String visitKey = buildVisitKey(item.schema, item.packageName, item.subprogramName);
+            // Overloaded package member: distinguish by arg count so each overload becomes
+            // its own node (gated on the package actually having >1 overload of this name).
+            boolean isOverloaded = item.packageName != null && item.argCount >= 0
+                    && overloadCount(item.packageName, item.subprogramName) > 1;
+            if (isOverloaded) visitKey = visitKey + "#" + item.argCount;
+
+            if (visited.contains(visitKey)) continue;
+            visited.add(visitKey);
+
+            if (maxDepth >= 0 && item.depth > maxDepth) {
+                errors.add("Max depth " + maxDepth + " exceeded for: " + visitKey);
+                continue;
+            }
+
+            long elapsed = System.currentTimeMillis() - startTime;
+            if (elapsed > timeoutPerEntryMs * 10) {
+                errors.add("Overall timeout exceeded after " + elapsed + "ms");
+                break;
+            }
+
+            if (item.depth > maxDepthReached) maxDepthReached = item.depth;
+
+            // Mark progress
+            if (chunkedWriter != null) {
+                try { chunkedWriter.markProcessing(visitKey); } catch (IOException ignored) {}
+            }
+
+            long nodeStart = System.currentTimeMillis();
+            log.info("[Crawler] Processing: {} (depth={})", visitKey, item.depth);
+
+            // Check if this is a TYPE/SYNONYM/SEQUENCE — create stub node, don't try to parse
+            String resolvedType = schemaResolver.resolveObjectType(
+                    item.packageName != null ? item.packageName : item.subprogramName);
+            if (resolvedType != null && isNonParsableType(resolvedType)) {
+                String ownerSch = schemaResolver.resolveSchema(
+                        item.packageName != null ? item.packageName : item.subprogramName);
+                orderCounter++;
+                FlowNode stubNode = new FlowNode();
+                stubNode.setOrder(orderCounter);
+                stubNode.setDepth(item.depth);
+                stubNode.setSchema(ownerSch);
+                stubNode.setPackageName(item.packageName);
+                stubNode.setObjectName(item.subprogramName);
+                stubNode.setObjectType(resolvedType);
+                stubNode.setReadable(false);
+                stubNode.setMessage("Oracle " + resolvedType + " object - no parseable source");
+                stubNode.generateNodeId();
+                log.info("[Crawler] Stub node for " + resolvedType + ": " + visitKey);
+                if (chunkedWriter != null) {
+                    try {
+                        chunkedWriter.writeChunk(stubNode);
+                        chunkedWriter.markDone(visitKey);
+                    } catch (IOException ignored) {}
+                }
+                continue;
+            }
+
+            try {
+                // ── Node-level parse cache check ─────────────────────────────────────────
+                // Peek at source text (may trigger DB download if not yet cached).
+                // If the same source was fully parsed in a previous run the FlowNode JSON
+                // is restored from disk, its children enqueued, and ANTLR is skipped entirely.
+                if (nodeCache != null) {
+                    // Schema-qualify standalone lookups so same-named objects in different
+                    // schemas fetch the correct source (querySourceSqlServer parses "schema.name").
+                    // SQL Server only — Oracle's source query matches on the bare name.
+                    boolean sqlSrvPeek = downloader.getConnManager() != null && downloader.getConnManager().isSqlServer();
+                    String srcObjForCache = item.packageName != null ? item.packageName
+                            : (sqlSrvPeek && item.schema != null && !item.schema.isEmpty()
+                                ? item.schema + "." + item.subprogramName : item.subprogramName);
+
+                    // Skip the DB peek entirely if this pkg.sub is already known non-subprogram,
+                    // or if the standalone name has already been confirmed absent from ALL_OBJECTS
+                    // by a prior bulk batch check.  Without these guards, downloadSource fires
+                    // 2 DB calls (PROCEDURE + FUNCTION) each potentially waiting 30s for a
+                    // connection slot, causing 60s stalls per unknown name (e.g. C_ERROR_TEXT).
+                    boolean skipNodeCachePeek = false;
+                    if (item.packageName != null && item.subprogramName != null) {
+                        String compoundKey = (item.packageName + "." + item.subprogramName).toUpperCase();
+                        if (knownMissingObjects.contains(compoundKey)) skipNodeCachePeek = true;
+                    }
+                    if (!skipNodeCachePeek) {
+                        String standaloneKey = srcObjForCache.toUpperCase();
+                        if (knownMissingObjects.contains(standaloneKey)) skipNodeCachePeek = true;
+                    }
+
+                    // Prime the source downloader so we have the source text for the cache key.
+                    // downloadSource is idempotent — returns instantly from in-memory cache on hit.
+                    // If the bulk ALL_OBJECTS check already told us the exact object_type, use that
+                    // directly (1 DB call).  Otherwise fall back to the 2-probe blind sequence.
+                    String peekedSource = null;
+                    if (!skipNodeCachePeek) {
+                        String knownType = knownObjectTypes.get(srcObjForCache.toUpperCase());
+                        if (knownType != null) {
+                            peekedSource = downloader.downloadSource(srcObjForCache, knownType);
+                        } else {
+                            peekedSource = downloader.downloadSource(srcObjForCache,
+                                    item.packageName != null ? "PACKAGE BODY" : "PROCEDURE");
+                            if (peekedSource == null)
+                                peekedSource = downloader.downloadSource(srcObjForCache,
+                                        item.packageName != null ? "PACKAGE" : "FUNCTION");
+                        }
+                    }
+
+                    if (peekedSource != null) {
+                        FlowNode cachedNode = nodeCache.get(visitKey, peekedSource);
+                        if (cachedNode != null) {
+                            // Restore order/depth from current BFS position
+                            orderCounter++;
+                            cachedNode.setOrder(orderCounter);
+                            cachedNode.setDepth(item.depth);
+                            if (item.depth > maxDepthReached) maxDepthReached = item.depth;
+                            if (item.depth == 0 && cachedNode.getSchema() != null) {
+                                entrySchema = cachedNode.getSchema();
+                            }
+
+                            // Enqueue children from the cached call list
+                            String cachedOwnerSchema = cachedNode.getSchema();
+                            enqueueExternalCalls(cachedNode.getCalls(), item.depth,
+                                    item.packageName, item.subprogramName,
+                                    cachedOwnerSchema, queue, edgeBatch,
+                                    isOverloaded ? item.argCount : -1);
+                            aggregateTableInfo(tableInfoMap, cachedNode.getTableOperations(), visitKey);
+
+                            if (chunkedWriter != null) {
+                                long tSave0 = System.nanoTime();
+                                chunkedWriter.writeChunk(cachedNode);
+                                chunkedWriter.appendEdges(new ArrayList<>(edgeBatch), orderCounter);
+                                chunkedWriter.markDone(visitKey);
+                                writeNodeSource(chunkedWriter, cachedNode, cachedOwnerSchema);
+                                saveNanos.addAndGet(System.nanoTime() - tSave0);
+                            }
+                            log.info("[Crawler] Done (cache): {} in {}ms", visitKey, System.currentTimeMillis() - nodeStart);
+                            continue;
+                        }
+                    }
+                }
+
+                long parseStart = System.currentTimeMillis();
+                ParseResult parseResult = downloadAndParse(item.packageName, item.subprogramName, item.schema);
+                log.info("[Crawler] downloadAndParse({}) took {}ms", visitKey, System.currentTimeMillis() - parseStart);
+                if (parseResult == null) {
+                    // Last chance: check if SourceDownloader found it was a TYPE via DB
+                    String srcObj = item.packageName != null ? item.packageName : item.subprogramName;
+                    String cachedType = downloader.getCachedType(srcObj);
+                    if (cachedType != null && isNonParsableType(cachedType.replace(" ", "_"))) {
+                        String ownerSch = downloader.getOwner(srcObj);
+                        orderCounter++;
+                        FlowNode stubNode = new FlowNode();
+                        stubNode.setOrder(orderCounter);
+                        stubNode.setDepth(item.depth);
+                        stubNode.setSchema(ownerSch);
+                        stubNode.setPackageName(item.packageName);
+                        stubNode.setObjectName(item.subprogramName);
+                        stubNode.setObjectType(cachedType);
+                        stubNode.setReadable(false);
+                        stubNode.setMessage("Oracle " + cachedType + " object - no parseable source");
+                        stubNode.generateNodeId();
+                        log.info("[Crawler] Stub node for " + cachedType + ": " + visitKey);
+                        if (chunkedWriter != null) {
+                            try {
+                                chunkedWriter.writeChunk(stubNode);
+                                chunkedWriter.markDone(visitKey);
+                            } catch (IOException ignored) {}
+                        }
+                        continue;
+                    }
+                    log.info("[Crawler] No source found for: " + visitKey);
+                    if (chunkedWriter != null) {
+                        try { chunkedWriter.markFailed(visitKey, "no source"); } catch (IOException ignored) {}
+                    }
+                    // If the ENTRY object itself can't be found, surface a clear error instead of
+                    // a silent empty result (0 procs / 0 tables) — the usual cause is a wrong
+                    // procedure name for the selected database/connection.
+                    if (item.depth == 0) {
+                        String entryDisplay = item.packageName != null
+                                ? item.packageName + "." + item.subprogramName
+                                : item.subprogramName;
+                        String schemaHint = (item.schema != null && !item.schema.isBlank())
+                                ? " in schema " + item.schema : "";
+                        errors.add("Entry object '" + entryDisplay + "' not found" + schemaHint
+                                + " on the selected connection — verify the name exists in this database.");
+                    }
+                    continue;
+                }
+
+                SubprogramInfo targetSub = null;
+                ParsedObject targetObj = null;
+                String ownerSchema = null;
+
+                for (ParsedObject obj : parseResult.getObjects()) {
+                    String objName = obj.getName() != null ? obj.getName().toUpperCase() : "";
+                    if (item.packageName != null) {
+                        // Match: exact name, schema-prefixed, or synonym (downloaded source may
+                        // have a different package name than the call reference due to synonyms)
+                        boolean nameMatch = objName.equalsIgnoreCase(item.packageName)
+                                || objName.endsWith("." + item.packageName.toUpperCase());
+                        // Also accept if this is the only/first parsed object from the download
+                        // (synonym resolved to the real package name)
+                        if (!nameMatch && parseResult.getObjects().size() == 1
+                                && obj.getType() != null
+                                && obj.getType().toUpperCase().contains("PACKAGE")) {
+                            nameMatch = true;
+                        }
+                        if (nameMatch) {
+                            targetObj = obj;
+                            ownerSchema = resolveObjectSchema(
+                                    objName.isEmpty() ? item.packageName : objName,
+                                    obj.getSchema());
+                            SubprogramInfo firstMatch = null;
+                            for (SubprogramInfo sub : obj.getSubprograms()) {
+                                if (sub.getName() != null
+                                        && sub.getName().equalsIgnoreCase(item.subprogramName)) {
+                                    if (firstMatch == null) firstMatch = sub;
+                                    // Overload resolution by arity: pick the overload whose
+                                    // parameter count matches the call's argument count.
+                                    if (isOverloaded && item.argCount >= 0
+                                            && sub.getParameters() != null
+                                            && sub.getParameters().size() == item.argCount) {
+                                        targetSub = sub;
+                                        break;
+                                    }
+                                    if (!isOverloaded) { targetSub = sub; break; }
+                                }
+                            }
+                            if (targetSub == null) targetSub = firstMatch;
+                            if (targetSub != null) break;
+                        }
+                    } else {
+                        if (objName.equalsIgnoreCase(item.subprogramName)) {
+                            targetObj = obj;
+                            ownerSchema = resolveObjectSchema(item.subprogramName, obj.getSchema());
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback: if subprogram not found in parse, extract from raw source
+                if (targetSub == null && item.packageName != null && targetObj != null) {
+                    String rawSource = downloader.getCachedSource(item.packageName);
+                    if (rawSource != null) {
+                        String extracted = extractSubprogramSource(rawSource,
+                                item.subprogramName);
+                        if (extracted != null) {
+                            long tReparse0 = System.nanoTime();
+                            ParseResult reParsed = engine.parseContent(
+                                    "CREATE OR REPLACE PACKAGE BODY " + item.packageName
+                                    + " AS\n" + extracted + "\nEND " + item.packageName + ";\n/",
+                                    item.packageName + "_" + item.subprogramName + ".sql");
+                            parseNanos.addAndGet(System.nanoTime() - tReparse0);
+                            if (reParsed != null && !reParsed.getObjects().isEmpty()) {
+                                ParsedObject rpObj = reParsed.getObjects().get(0);
+                                for (SubprogramInfo sub : rpObj.getSubprograms()) {
+                                    if (sub.getName() != null
+                                            && sub.getName().equalsIgnoreCase(item.subprogramName)) {
+                                        targetSub = sub;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (item.depth == 0 && ownerSchema != null) {
+                    entrySchema = ownerSchema;
+                }
+
+                orderCounter++;
+                FlowNode node = new FlowNode();
+                node.setOrder(orderCounter);
+                node.setDepth(item.depth);
+                node.setSchema(ownerSchema);
+                node.setPackageName(item.packageName);
+                node.setObjectName(item.subprogramName);
+
+                // Check if source is wrapped/encrypted
+                String srcObjName = item.packageName != null ? item.packageName : item.subprogramName;
+                if (downloader.isWrapped(srcObjName)
+                        || PlSqlParserEngine.isWrappedSource(downloader.getCachedSource(srcObjName))) {
+                    node.setReadable(false);
+                    node.setMessage("Source is ENCRYPTED/WRAPPED - cannot be parsed");
+                }
+
+                edgeBatch.clear();
+
+                if (targetSub != null) {
+                    node.setObjectType(targetSub.getType());
+                    node.setLineStart(targetSub.getLineStart());
+                    node.setLineEnd(targetSub.getLineEnd());
+                    node.setParameters(targetSub.getParameters());
+                    node.setLocalVariables(targetSub.getLocalVariables());
+                    node.setStatements(targetSub.getStatements());
+                    node.setCursors(targetSub.getCursors());
+                    node.setDynamicSql(targetSub.getDynamicSql());
+                    node.setExceptionHandlers(targetSub.getExceptionHandlers());
+                    node.setExternalPackageVarRefs(targetSub.getExternalPackageVarRefs());
+                    node.setExternalPackageVarRefDetails(targetSub.getExternalPackageVarRefDetails());
+                    node.setAutonomousTransaction(targetSub.isPragmaAutonomousTransaction());
+
+                    List<CallInfo> resolvedCalls = filterLocalVarCalls(
+                            resolveCallSchemas(targetSub.getCalls(), ownerSchema),
+                            targetSub.getLocalVariables(), targetSub.getParameters(),
+                            packageLevelVars(targetObj));
+                    node.setCalls(resolvedCalls);
+                    List<TableOperationInfo> resolvedTableOps = resolveTableSchemas(targetSub.getTableOperations(), ownerSchema);
+                    node.setTableOperations(resolvedTableOps);
+                    aggregateTableInfo(tableInfoMap, resolvedTableOps, visitKey);
+                    enqueueExternalCalls(resolvedCalls, item.depth, item.packageName,
+                            item.subprogramName, ownerSchema, queue, edgeBatch,
+                            isOverloaded ? item.argCount : -1);
+
+                } else if (targetObj != null) {
+                    node.setObjectType(targetObj.getType());
+                    node.setLineStart(targetObj.getLineStart());
+                    node.setLineEnd(targetObj.getLineEnd());
+                    node.setParameters(targetObj.getParameters());
+                    if (targetObj.getTriggerEvent() != null) node.setTriggerEvent(targetObj.getTriggerEvent());
+                    if (targetObj.getTriggerTable() != null) node.setTriggerTable(targetObj.getTriggerTable());
+                    if (targetObj.getTriggerTiming() != null) node.setTriggerTiming(targetObj.getTriggerTiming());
+
+                    // When a specific subprogram within a package was requested but could not be
+                    // located by name, do NOT merge all other subprograms' data.  Merging the whole
+                    // package body would attribute every other proc's table accesses to this node,
+                    // corrupting usedBy in tables/index.json with wrong proc names and line numbers.
+                    // Instead, only carry package-level (init-section) ops and mark the node.
+                    boolean specificSubNotFound = item.packageName != null && item.subprogramName != null;
+                    if (specificSubNotFound) {
+                        log.warn("[Crawler] Subprogram '{}' not resolved in package '{}' — using package-level ops only to prevent cross-contamination",
+                                item.subprogramName, item.packageName);
+                        node.setMessage("Subprogram '" + item.subprogramName + "' not found in parsed package body — analysis may be incomplete");
+                        // Mark compound key so any future enqueue of this same pkg.sub is
+                        // skipped instantly without any DB call or connection stall.
+                        String compoundKey = (item.packageName + "." + item.subprogramName).toUpperCase();
+                        knownMissingObjects.add(compoundKey);
+                    }
+
+                    List<CallInfo> allCalls = new ArrayList<>(
+                            resolveCallSchemas(targetObj.getCalls(), ownerSchema));
+                    List<TableOperationInfo> allTableOps = new ArrayList<>(
+                            resolveTableSchemas(targetObj.getTableOperations(), ownerSchema));
+                    List<StatementInfo> allStatements = new ArrayList<>();
+                    List<CursorInfo> allCursors = new ArrayList<>();
+                    List<DynamicSqlInfo> allDynSql = new ArrayList<>();
+                    List<ExceptionHandlerInfo> allExHandlers = new ArrayList<>();
+                    List<String> allExtPkgVarRefs = new ArrayList<>();
+                    List<PackageVarRefInfo> allExtPkgVarRefDetails = new ArrayList<>();
+                    List<VariableInfo> allLocalVars = new ArrayList<>();
+
+                    if (targetObj.getStatements() != null) allStatements.addAll(targetObj.getStatements());
+                    if (targetObj.getCursors() != null) allCursors.addAll(targetObj.getCursors());
+                    if (targetObj.getDynamicSql() != null) allDynSql.addAll(targetObj.getDynamicSql());
+                    if (targetObj.getExceptionHandlers() != null) allExHandlers.addAll(targetObj.getExceptionHandlers());
+                    if (targetObj.getExternalPackageVarRefs() != null) allExtPkgVarRefs.addAll(targetObj.getExternalPackageVarRefs());
+                    if (targetObj.getExternalPackageVarRefDetails() != null) allExtPkgVarRefDetails.addAll(targetObj.getExternalPackageVarRefDetails());
+                    // Standalone routines (no nested subprograms — SQL Server / MySQL procs & functions,
+                    // Oracle standalone procs) keep their body variables in globalVariables; surface them
+                    // as the node's local variables. Packages are unaffected (they have subprograms).
+                    if ((targetObj.getSubprograms() == null || targetObj.getSubprograms().isEmpty())
+                            && targetObj.getGlobalVariables() != null) {
+                        allLocalVars.addAll(targetObj.getGlobalVariables());
+                    }
+
+                    if (!specificSubNotFound) {
+                        // Package-as-entry-point: aggregate all subprograms into this node
+                        List<SubprogramSummaryInfo> memberSummaries = new ArrayList<>();
+                        List<VariableInfo> pkgLevelVars = packageLevelVars(targetObj);
+                        for (SubprogramInfo sub : targetObj.getSubprograms()) {
+                            // Tag each item with the subprogram it came from so the UI can still
+                            // filter/drill into one member's own calls/tableOps/statements out of
+                            // this single aggregated node (see CallInfo/TableOperationInfo/
+                            // StatementInfo#getSubprogramName doc). Never set outside this branch.
+                            List<CallInfo> subCalls = filterLocalVarCalls(
+                                    resolveCallSchemas(sub.getCalls(), ownerSchema),
+                                    sub.getLocalVariables(), sub.getParameters(),
+                                    pkgLevelVars);
+                            for (CallInfo c : subCalls) c.setSubprogramName(sub.getName());
+                            allCalls.addAll(subCalls);
+                            List<TableOperationInfo> subTableOps = resolveTableSchemas(sub.getTableOperations(), ownerSchema);
+                            for (TableOperationInfo t : subTableOps) t.setSubprogramName(sub.getName());
+                            allTableOps.addAll(subTableOps);
+                            if (sub.getStatements() != null) {
+                                for (StatementInfo s : sub.getStatements()) s.setSubprogramName(sub.getName());
+                                allStatements.addAll(sub.getStatements());
+                            }
+                            if (sub.getCursors() != null) allCursors.addAll(sub.getCursors());
+                            if (sub.getDynamicSql() != null) allDynSql.addAll(sub.getDynamicSql());
+                            if (sub.getExceptionHandlers() != null) allExHandlers.addAll(sub.getExceptionHandlers());
+                            if (sub.getExternalPackageVarRefs() != null) {
+                                for (String ref : sub.getExternalPackageVarRefs()) {
+                                    if (!allExtPkgVarRefs.contains(ref)) allExtPkgVarRefs.add(ref);
+                                }
+                            }
+                            if (sub.getExternalPackageVarRefDetails() != null) {
+                                allExtPkgVarRefDetails.addAll(sub.getExternalPackageVarRefDetails());
+                            }
+                            if (sub.getLocalVariables() != null) allLocalVars.addAll(sub.getLocalVariables());
+                            if (sub.isPragmaAutonomousTransaction()) node.setAutonomousTransaction(true);
+                            memberSummaries.add(new SubprogramSummaryInfo(
+                                    sub.getName(), sub.getType(), sub.getLineStart(), sub.getLineEnd()));
+                        }
+                        node.setMembers(memberSummaries);
+                    }
+
+                    if (targetObj.isPragmaAutonomousTransaction()) node.setAutonomousTransaction(true);
+
+                    // Package-as-entry-point aggregation above concatenates the object's OWN
+                    // members first and then subprogram by subprogram, which is NOT source order:
+                    // a package body's initialization block sits at the END of the file but its
+                    // statements are ParsedObject-level (see PlSqlAnalysisVisitor.addStatement's
+                    // else-branch), so they land at the FRONT of these lists. Verified on a real
+                    // PKG_ORDER parse: statements came out UPDATE@18, COMMIT@19, SELECT@6,
+                    // COMMIT@7, ... — and every consumer that walks a node's statement/cursor list
+                    // in list order and calls the result a sequence (ChunkedFlowWriter's
+                    // transactionScope.statements, and its statement-derived cursor
+                    // OPEN/FETCH/CLOSE lifecycle list) then reported them out of execution order.
+                    // A final stable sort by line puts the aggregate back in true source order;
+                    // stable, so same-line entries keep the order the parser recorded them in.
+                    allStatements.sort(Comparator.comparingInt(StatementInfo::getLine));
+                    allTableOps.sort(Comparator.comparingInt(TableOperationInfo::getLine));
+                    allCursors.sort(Comparator.comparingInt(CursorInfo::getLine));
+
+                    node.setCalls(allCalls);
+                    node.setTableOperations(allTableOps);
+                    node.setStatements(allStatements);
+                    node.setCursors(allCursors);
+                    node.setDynamicSql(allDynSql);
+                    node.setExceptionHandlers(allExHandlers);
+                    // IDENTITY columns (SQL Server CREATE TABLE ... IDENTITY(seed,increment)) are
+                    // ParsedObject-level, not per-subprogram — no dialect that has packages/
+                    // subprograms (Oracle) also has this construct, so only the targetObj branch
+                    // needs it.
+                    if (targetObj.getIdentityColumns() != null) node.setIdentityColumns(targetObj.getIdentityColumns());
+                    // FOREIGN KEY constraints are ParsedObject-level for the same reason: they
+                    // come from ALTER TABLE / CREATE TABLE DDL, which is never nested inside a
+                    // subprogram, so there is nothing to aggregate across subprograms.
+                    if (targetObj.getForeignKeys() != null) node.setForeignKeys(targetObj.getForeignKeys());
+                    node.setExternalPackageVarRefs(allExtPkgVarRefs);
+                    node.setExternalPackageVarRefDetails(allExtPkgVarRefDetails);
+                    node.setLocalVariables(allLocalVars);
+
+                    aggregateTableInfo(tableInfoMap, allTableOps, visitKey);
+                    enqueueExternalCalls(allCalls, item.depth, item.packageName,
+                            item.subprogramName, ownerSchema, queue, edgeBatch,
+                            isOverloaded ? item.argCount : -1);
+
+                } else {
+                    // targetObj is null: package/object itself was not matched in the parse result.
+                    // Only aggregate package-level ops to avoid cross-proc table contamination.
+                    errors.add("Could not find specific subprogram '" + item.subprogramName
+                            + "' in parsed result for: " + visitKey);
+                    if (!parseResult.getObjects().isEmpty()) {
+                        ParsedObject firstObj = parseResult.getObjects().get(0);
+                        node.setObjectType(firstObj.getType());
+                        ownerSchema = resolveObjectSchema(
+                                item.packageName != null ? item.packageName : item.subprogramName,
+                                firstObj.getSchema());
+                        node.setSchema(ownerSchema);
+                        node.setMessage("Subprogram '" + item.subprogramName + "' not found in parsed package body — analysis may be incomplete");
+
+                        // Only include package-level (init-section) ops — do NOT merge all
+                        // subprograms here, as that would attribute unrelated procs' table accesses
+                        // to this node and corrupt usedBy in tables/index.json.
+                        List<CallInfo> objCalls = resolveCallSchemas(firstObj.getCalls(), ownerSchema);
+                        List<TableOperationInfo> objTableOps = resolveTableSchemas(firstObj.getTableOperations(), ownerSchema);
+                        List<StatementInfo> objStatements = firstObj.getStatements() != null
+                                ? new ArrayList<>(firstObj.getStatements()) : new ArrayList<>();
+
+                        node.setCalls(objCalls);
+                        node.setTableOperations(objTableOps);
+                        node.setStatements(objStatements);
+                        aggregateTableInfo(tableInfoMap, objTableOps, visitKey);
+                        enqueueExternalCalls(objCalls, item.depth, item.packageName,
+                                item.subprogramName, ownerSchema, queue, edgeBatch,
+                                isOverloaded ? item.argCount : -1);
+                    }
+                }
+
+                if (!node.isReadable()) {
+                    // Encrypted/wrapped — suppress parse errors
+                } else if (parseResult.getErrors() != null && !parseResult.getErrors().isEmpty()) {
+                    // Report parse errors once per source object (package/proc), not once per subprogram.
+                    // Multiple procs from the same package share the same ParseResult; without this guard
+                    // the same 82 errors would appear N times (once per calling proc in the analysis).
+                    String srcObjForErr = item.packageName != null ? item.packageName : item.subprogramName;
+                    if (parseErrorsReported.add(srcObjForErr.toUpperCase())) {
+                        // Check if source appears truncated (ALL_SOURCE returned incomplete pkb).
+                        String srcForTrunc = downloader.getCachedSource(srcObjForErr);
+                        if (isSourceTruncated(srcForTrunc)) {
+                            errors.add("[" + visitKey + "] Source appears TRUNCATED (ALL_SOURCE returned incomplete package body) — parse errors suppressed");
+                        } else {
+                            for (String err : parseResult.getErrors()) {
+                                errors.add("[" + visitKey + "] " + err);
+                            }
+                        }
+                    }
+                }
+
+                // Compute per-node metrics inline
+                if (node.getLineEnd() > 0 && node.getLineStart() > 0) {
+                    node.setLinesOfCode(node.getLineEnd() - node.getLineStart() + 1);
+                }
+                Map<String, Integer> stmtSummary = new LinkedHashMap<>();
+                if (node.getStatements() != null) {
+                    for (StatementInfo s : node.getStatements()) {
+                        String stype = s.getType() != null ? s.getType().toUpperCase() : "OTHER";
+                        stmtSummary.merge(stype, 1, Integer::sum);
+                    }
+                }
+                node.setStatementSummary(stmtSummary);
+
+                // Overloaded member: stamp the arity discriminator so its nodeId is distinct.
+                if (isOverloaded && targetSub != null) {
+                    int pc = targetSub.getParameters() != null ? targetSub.getParameters().size() : 0;
+                    node.setOverloadParamCount(pc);
+                }
+                node.generateNodeId();
+
+                // Record this node's write-DML (INSERT/UPDATE/DELETE/MERGE) so trigger edges can
+                // be attached later from the exact routine that performs the firing statement.
+                if (node.getTableOperations() != null) {
+                    for (TableOperationInfo t : node.getTableOperations()) {
+                        String op = t.getOperation() == null ? "" : t.getOperation().toUpperCase();
+                        if (op.startsWith("INSERT") || op.startsWith("UPDATE")
+                                || op.startsWith("DELETE") || op.startsWith("MERGE")) {
+                            dmlRefs.add(new String[]{
+                                    node.getNodeId(),
+                                    t.getSchema() == null ? "" : t.getSchema().toUpperCase(),
+                                    t.getTableName() == null ? "" : t.getTableName().toUpperCase(),
+                                    op });
+                        }
+                    }
+                }
+
+                // Persist node to parse cache so future analyses skip ANTLR for this node
+                if (nodeCache != null) {
+                    String srcObjForStore = item.packageName != null ? item.packageName : item.subprogramName;
+                    String storedSource = downloader.getCachedSource(srcObjForStore);
+                    if (storedSource != null) {
+                        nodeCache.put(visitKey, storedSource, node);
+                    }
+                }
+
+                // Write chunk to disk and flush from memory
+                if (chunkedWriter != null) {
+                    long tSave0 = System.nanoTime();
+                    try {
+                        chunkedWriter.writeChunk(node);
+                        chunkedWriter.appendEdges(new ArrayList<>(edgeBatch), orderCounter);
+                        chunkedWriter.markDone(visitKey);
+
+                        // Write source file for this node
+                        writeNodeSource(chunkedWriter, node, ownerSchema);
+                    } catch (IOException e) {
+                        errors.add("Chunk write error for " + visitKey + ": " + e.getMessage());
+                    } finally {
+                        saveNanos.addAndGet(System.nanoTime() - tSave0);
+                    }
+                }
+
+            } catch (Exception e) {
+                errors.add("Error processing " + visitKey + ": " + e.getMessage());
+                log.warn("[Crawler] Error processing {}: {}", visitKey, e.getMessage());
+                if (chunkedWriter != null) {
+                    try { chunkedWriter.markFailed(visitKey, e.getMessage()); } catch (IOException ignored) {}
+                }
+            } finally {
+                log.info("[Crawler] Done: {} in {}ms", visitKey, System.currentTimeMillis() - nodeStart);
+            }
+        }
+
+        // Final flush for any names accumulated in the last BFS level
+        flushPendingResolve();
+        flushMissingBatch();
+
+        // Write tables once after all nodes processed (was previously per-node — unnecessary rewrites)
+        if (chunkedWriter != null) {
+            long tSave0 = System.nanoTime();
+            try {
+                chunkedWriter.updateTables(tableInfoMap);
+                chunkedWriter.flushProgress();
+            } catch (IOException e) {
+                log.warn("[Crawler] Final tables write error: {}", e.getMessage());
+            } finally {
+                saveNanos.addAndGet(System.nanoTime() - tSave0);
+            }
+        }
+
+        // Discover triggers from DB for tables with DML operations
+        if (chunkedWriter != null) {
+            long tDiscover0 = System.nanoTime();
+            try {
+                TriggerDiscoverer triggerDiscoverer = new TriggerDiscoverer(downloader.getConnManager(), schemaResolver);
+                List<Map<String, Object>> dbTriggers = triggerDiscoverer.discover(tableInfoMap);
+                discoverNanos.addAndGet(System.nanoTime() - tDiscover0);
+                if (!dbTriggers.isEmpty()) {
+                    chunkedWriter.setDiscoveredTriggers(dbTriggers);
+                    log.info("[Crawler] Discovered " + dbTriggers.size()
+                            + " triggers from ALL_TRIGGERS for DML tables");
+                    // Promote discovered triggers into the call tree: a routine whose DML fires a
+                    // trigger gets an additive FIRES_TRIGGER edge to a trigger node (and, for
+                    // PostgreSQL, the trigger's handler function node via a TRIGGER_FN edge).
+                    emitTriggerNodesAndEdges(dbTriggers, chunkedWriter, errors, orderCounter);
+                }
+            } catch (Exception e) {
+                errors.add("Trigger discovery warning: " + e.getMessage());
+                log.info("[Crawler] Trigger discovery failed (non-fatal): " + e.getMessage());
+            }
+        }
+
+        // Final merge: read all chunks back and assemble FlowResult
+        if (chunkedWriter != null) {
+            long tSave0 = System.nanoTime();
+            try {
+                FlowResult result = chunkedWriter.mergeChunks(
+                        upperEntry, entrySchema,
+                        System.currentTimeMillis() - startTime,
+                        maxDepthReached, errors);
+                result.setDbCallCount(downloader.getConnManager() != null
+                        ? downloader.getConnManager().getDbCallCount() : 0);
+                result.setParseMs(parseNanos.get() / 1_000_000);
+                result.setDiscoverMs(discoverNanos.get() / 1_000_000);
+                result.setSaveMs(saveNanos.get() / 1_000_000);
+                // Compute callCount/statementSummary by streaming each node's chunk on demand
+                // (MID-026 final piece) — no longer needs result.getFlowNodes() resident.
+                Map<String, NodeMetrics> nodeMetrics =
+                        computeNodeMetrics(chunkedWriter, result.getCallGraph());
+                // Write final flow.json WITH metrics applied
+                chunkedWriter.writeFinalResult(result, nodeMetrics);
+                // Write schema resolver query results as separate JSONs
+                chunkedWriter.writeResolverData(schemaResolver);
+                saveNanos.addAndGet(System.nanoTime() - tSave0);
+                logTimingSummary(upperEntry, startTime);
+                return result;
+            } catch (IOException e) {
+                saveNanos.addAndGet(System.nanoTime() - tSave0);
+                String msg = "Chunk merge failed, falling back to in-memory (empty) result: " + e.getMessage();
+                log.warn("[Crawler] " + msg, e);
+                errors.add(msg);
+            }
+        }
+
+        // Fallback: in-memory result (no output dir)
+        FlowResult inMemResult = buildInMemoryResult(upperEntry, entrySchema, startTime,
+                maxDepthReached, errors, tableInfoMap);
+        logTimingSummary(upperEntry, startTime);
+        return inMemResult;
+    }
+
+    /**
+     * Logs a single grep-friendly summary line with the 3 top-level phase totals (parse /
+     * discover / save) plus overall wall-clock total for this crawl() run.
+     */
+    private void logTimingSummary(String entryName, long startTimeMs) {
+        long totalMs = System.currentTimeMillis() - startTimeMs;
+        long parseMs = parseNanos.get() / 1_000_000;
+        long discoverMs = discoverNanos.get() / 1_000_000;
+        long saveMs = saveNanos.get() / 1_000_000;
+        log.info("[timing] {}: parse={}ms discover={}ms save={}ms total={}ms",
+                entryName, parseMs, discoverMs, saveMs, totalMs);
+    }
+
+    private static String trigStr(Object o) { return o == null ? null : o.toString(); }
+
+    /**
+     * Turn discovered DB triggers into call-tree nodes + additive edges. For every reachable
+     * routine whose write-DML (INSERT/UPDATE/DELETE/MERGE) targets a trigger's table with a
+     * matching event, add a FIRES_TRIGGER edge routine -> trigger. For PostgreSQL, also add a
+     * TRIGGER_FN edge trigger -> handler-function and a node for that function so its logic
+     * enters the tree. Purely additive: normal CALL edges/nodes are untouched.
+     */
+    private void emitTriggerNodesAndEdges(List<Map<String, Object>> triggers,
+                                          ChunkedFlowWriter writer, List<String> errors, int startOrder) {
+        if (triggers == null || triggers.isEmpty() || writer == null) return;
+        boolean isPg = downloader.getConnManager() != null && downloader.getConnManager().isPostgres();
+        java.util.Set<String> emittedTrig = new java.util.HashSet<>();
+        java.util.Set<String> emittedFn   = new java.util.HashSet<>();
+        int order = startOrder;
+
+        for (Map<String, Object> t : triggers) {
+            String name = trigStr(t.get("name"));
+            if (name == null || name.isBlank()) continue;
+            String schema  = trigStr(t.get("schema"));
+            String table   = trigStr(t.get("tableName"));
+            String event   = trigStr(t.get("event"));
+            String timing  = trigStr(t.get("timing"));
+            String def     = trigStr(t.get("definition"));
+            String tableU  = table == null ? "" : table.toUpperCase();
+            String eventU  = event == null ? "" : event.toUpperCase();
+            java.util.Set<String> events = new java.util.LinkedHashSet<>();
+            for (String e : eventU.split("[,/ ]+")) if (!e.isBlank()) events.add(e.trim());
+
+            // A trigger only ever fires if some reachable DML statement against its table
+            // actually performs an operation matching its own triggering_event. Skip the
+            // trigger entirely (node + edges) when no such DML exists in this call graph —
+            // otherwise it would appear as a spuriously "reachable" orphan node with a
+            // finite depth even though its triggering event never fires.
+            boolean anyMatchingDml = false;
+            for (String[] d : dmlRefs) {
+                if (!tableU.equals(d[2])) continue;
+                String op = d[3];
+                if (op.startsWith("MERGE") || events.isEmpty() || events.stream().anyMatch(op::startsWith)) {
+                    anyMatchingDml = true;
+                    break;
+                }
+            }
+            if (!anyMatchingDml) continue;
+
+            // ── trigger node ──────────────────────────────────────────────────────────
+            FlowNode tn = new FlowNode();
+            tn.setSchema(schema);
+            tn.setPackageName("TRG");           // namespace triggers so ids never clash with routines
+            tn.setObjectName(name);
+            tn.setObjectType("TRIGGER");
+            tn.setTriggerTable(tableU);
+            tn.setTriggerEvent(eventU);
+            tn.setTriggerTiming(timing);
+            tn.setReadable(true);
+            tn.setDepth(1);
+            tn.generateNodeId();
+            String trigId = tn.getNodeId();
+            if (!emittedTrig.add(trigId)) continue;
+            tn.setOrder(++order);
+            try {
+                if (def != null && !def.isBlank()) {
+                    tn.setLineStart(1);
+                    tn.setLineEnd(def.split("\\r?\\n").length);
+                    tn.setLinesOfCode(def.split("\\r?\\n").length);
+                    // Source filename must match the UI convention "schema.package.object.sql"
+                    // (dot-separated), NOT the "$"-separated nodeId, or "view source" 404s.
+                    writer.writeSourceFile((schema != null ? schema : "") + ".TRG." + name + ".sql", def);
+                }
+                writer.writeChunk(tn);
+            } catch (IOException ex) {
+                errors.add("Trigger node write failed for " + name + ": " + ex.getMessage());
+            }
+
+            // ── FIRES_TRIGGER edges from every routine whose matching DML hits this table ──
+            List<FlowEdge> tedges = new ArrayList<>();
+            java.util.Set<String> seenFrom = new java.util.HashSet<>();
+            for (String[] d : dmlRefs) {
+                if (!tableU.equals(d[2])) continue;
+                String op = d[3];
+                boolean match = op.startsWith("MERGE") || events.isEmpty()
+                        || events.stream().anyMatch(op::startsWith);
+                if (!match) continue;
+                if (!seenFrom.add(d[0])) continue;
+                FlowEdge e = new FlowEdge();
+                e.setFromNodeId(d[0]);
+                e.setToNodeId(trigId);
+                e.setToSchema(schema);
+                e.setToObject(name);
+                e.setEdgeType("FIRES_TRIGGER");
+                e.setDepth(2);
+                tedges.add(e);
+            }
+
+            // ── PostgreSQL: trigger -> handler function (make the function a reachable node) ──
+            if (isPg) {
+                String fnName   = trigStr(t.get("functionName"));
+                String fnSchema = trigStr(t.get("functionSchema"));
+                if (fnName != null && !fnName.isBlank()) {
+                    FlowNode fnNode = new FlowNode();
+                    fnNode.setSchema(fnSchema != null ? fnSchema : schema);
+                    fnNode.setObjectName(fnName);
+                    fnNode.setObjectType("FUNCTION");
+                    fnNode.setReadable(true);
+                    fnNode.setDepth(2);
+                    fnNode.generateNodeId();
+                    String fnId = fnNode.getNodeId();
+                    if (emittedFn.add(fnId)) {
+                        try {
+                            String fnSrc = downloader.downloadAny(fnName);
+                            if (fnSrc != null && !fnSrc.isBlank()) {
+                                fnNode.setLineStart(1);
+                                fnNode.setLineEnd(fnSrc.split("\\r?\\n").length);
+                                fnNode.setLinesOfCode(fnSrc.split("\\r?\\n").length);
+                                writer.writeSourceFile((fnSchema != null ? fnSchema : schema) + "." + fnName + ".sql", fnSrc);
+                            }
+                            fnNode.setOrder(++order);
+                            writer.writeChunk(fnNode);
+                        } catch (Exception ex) {
+                            errors.add("Trigger fn node write failed for " + fnName + ": " + ex.getMessage());
+                        }
+                    }
+                    FlowEdge fe = new FlowEdge();
+                    fe.setFromNodeId(trigId);
+                    fe.setToNodeId(fnId);
+                    fe.setToSchema(fnSchema != null ? fnSchema : schema);
+                    fe.setToObject(fnName);
+                    fe.setEdgeType("TRIGGER_FN");
+                    fe.setDepth(2);
+                    tedges.add(fe);
+                }
+            }
+
+            try {
+                if (!tedges.isEmpty()) writer.appendEdges(tedges, ++order);
+            } catch (IOException ex) {
+                errors.add("Trigger edges write failed for " + name + ": " + ex.getMessage());
+            }
+        }
+        log.info("[Crawler] Emitted trigger nodes+edges for " + emittedTrig.size() + " triggers");
+    }
+
+    private void writeNodeSource(ChunkedFlowWriter writer, FlowNode node, String ownerSchema) {
+        try {
+            String schema = ownerSchema != null ? ownerSchema : "UNKNOWN";
+            String objName = node.getObjectName() != null ? node.getObjectName() : "UNKNOWN";
+            String pkgName = node.getPackageName();
+
+            if (pkgName != null && !pkgName.isEmpty()) {
+                String source = downloader.getCachedSource(pkgName);
+                if (source != null) {
+                    // Write extracted subprogram
+                    String fileName = schema + "." + pkgName + "." + objName + ".sql";
+                    if (!writer.sourceExists(fileName) && node.getLineStart() > 0 && node.getLineEnd() > 0) {
+                        String[] lines = source.split("\\r?\\n");
+                        int start = Math.max(0, node.getLineStart() - 1);
+                        int end = Math.min(lines.length, node.getLineEnd());
+                        StringBuilder extracted = new StringBuilder();
+                        extracted.append("-- Extracted from ").append(schema).append(".").append(pkgName).append("\n");
+                        extracted.append("-- Lines ").append(node.getLineStart()).append(" to ").append(node.getLineEnd()).append("\n\n");
+                        for (int i = start; i < end; i++) {
+                            extracted.append(lines[i]).append("\n");
+                        }
+                        writer.writeSourceFile(fileName, extracted.toString());
+                    }
+                    // Write full package body once
+                    String pkbFile = schema + "." + pkgName + ".pkb";
+                    if (!writer.sourceExists(pkbFile)) {
+                        writer.writeSourceFile(pkbFile, source);
+                    }
+                }
+            } else {
+                // Try bare name first (Oracle), then the schema-qualified key — SQL Server / DB2
+                // standalone objects are fetched+cached under "SCHEMA.NAME", so a bare lookup
+                // would miss and the sub-proc source would never be written (source-not-found).
+                String source = downloader.getCachedSource(objName);
+                String typeKey = objName;
+                if (source == null && schema != null && !"UNKNOWN".equals(schema)) {
+                    String q = schema + "." + objName;
+                    String qs = downloader.getCachedSource(q);
+                    if (qs != null) { source = qs; typeKey = q; }
+                }
+                if (source != null) {
+                    String ext = "sql";
+                    String type = downloader.getCachedType(typeKey);
+                    if ("FUNCTION".equals(type)) ext = "fnc";
+                    else if ("PROCEDURE".equals(type)) ext = "prc";
+                    String fileName = schema + "." + objName + "." + ext;
+                    if (!writer.sourceExists(fileName)) {
+                        writer.writeSourceFile(fileName, source);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.info("[Crawler] Source write error: " + e.getMessage());
+        }
+    }
+
+    private FlowResult buildInMemoryResult(String entryPoint, String entrySchema,
+                                            long startTime, int maxDepthReached,
+                                            List<String> errors,
+                                            Map<String, SchemaTableInfo> tableInfoMap) {
+        FlowResult result = new FlowResult();
+        result.setEntryPoint(entryPoint);
+        result.setEntrySchema(entrySchema);
+        result.setAllTables(new ArrayList<>(tableInfoMap.values()));
+        result.setMaxDepthReached(maxDepthReached);
+        result.setErrors(errors);
+        result.setCrawlTimeMs(System.currentTimeMillis() - startTime);
+        result.setDbCallCount(downloader.getConnManager() != null
+                ? downloader.getConnManager().getDbCallCount() : 0);
+        result.setParseMs(parseNanos.get() / 1_000_000);
+        result.setDiscoverMs(discoverNanos.get() / 1_000_000);
+        result.setSaveMs(saveNanos.get() / 1_000_000);
+        return result;
+    }
+
+    /**
+     * Compute per-node metrics: linesOfCode, callCount, calledBy, statementSummary.
+     */
+    /**
+     * MID-026 (§111→§177): used to mutate {@code linesOfCode}/{@code statementSummary}/
+     * {@code callCount}/{@code calledBy} onto the {@code FlowNode} instances in {@code nodes} in
+     * place, which {@code ChunkedFlowWriter.writeApiFiles}'s remaining two per-node loops then read
+     * off those same object instances later — shared mutable object identity as the data-passing
+     * mechanism between this class and that one, which breaks the moment nodes are streamed
+     * one-at-a-time and discarded rather than kept resident as a full list. {@code linesOfCode}
+     * itself needed no change — it is already set earlier, during node construction (see
+     * {@code DependencyCrawler}'s own other {@code setLinesOfCode} call sites), so recomputing it
+     * here was a harmless no-op; kept as-is. {@code calledBy} is dead output — grepped every reader
+     * in {@code ChunkedFlowWriter} and found none, the same "never actually written into any real
+     * artifact" shape as MID-102's own {@code calledBy} finding at the entity-reader level — dropped
+     * entirely rather than threaded through for nothing. Only {@code statementSummary}/
+     * {@code callCount} are real, read outputs, and now return via an explicit map keyed by node id
+     * instead of an in-place mutation, so a future streaming rewrite of {@code writeApiFiles} does
+     * not need to keep every {@code FlowNode} resident just to read these two fields back later.
+     */
+    /**
+     * MID-026 (final piece) — was {@code computeNodeMetrics(List<FlowNode> nodes, ...)}, which
+     * required the caller to hold every node's full body resident. Converted to stream each node's
+     * body from its chunk file on demand via {@link ChunkedFlowWriter#buildChunkIndex()}/
+     * {@link ChunkedFlowWriter#readNodeChunk}, the same primitive the writer's own bounded-conversion
+     * series (§166-177) already proved correct — this is the first caller outside
+     * {@code ChunkedFlowWriter} itself to use it. The old {@code linesOfCode} recomputation loop was
+     * dropped entirely rather than converted: §177 already established it was a harmless no-op
+     * (the value is set earlier, during node construction) that nothing downstream depends on this
+     * method for.
+     */
+    private Map<String, NodeMetrics> computeNodeMetrics(ChunkedFlowWriter writer, List<FlowEdge> edges)
+            throws IOException {
+        Map<String, ArtifactKey> chunkIndex = writer.buildChunkIndex();
+        Set<String> nodeIds = chunkIndex.keySet();
+
+        Map<String, Map<String, Integer>> statementSummaries = new LinkedHashMap<>();
+        for (String nodeId : nodeIds) {
+            FlowNode n = writer.readNodeChunk(nodeId, chunkIndex);
+            if (n == null) continue;
+            Map<String, Integer> stmtSummary = new LinkedHashMap<>();
+            if (n.getStatements() != null) {
+                for (StatementInfo s : n.getStatements()) {
+                    String type = s.getType() != null ? s.getType().toUpperCase() : "OTHER";
+                    stmtSummary.merge(type, 1, Integer::sum);
+                }
+            }
+            statementSummaries.put(nodeId, stmtSummary);
+        }
+
+        // Compute callCount from edges
+        Map<String, Integer> callCounts = new LinkedHashMap<>();
+
+        for (FlowEdge e : edges) {
+            String toId = e.getToNodeId();
+            if (toId == null) continue;
+
+            // Match toNodeId against actual nodes (edges have partial nodeId without params)
+            String matchedToId = findMatchingNodeId(toId, nodeIds);
+            if (matchedToId != null) {
+                callCounts.merge(matchedToId, 1, Integer::sum);
+            }
+        }
+
+        Map<String, NodeMetrics> result = new LinkedHashMap<>();
+        for (String nodeId : nodeIds) {
+            result.put(nodeId, new NodeMetrics(
+                    statementSummaries.getOrDefault(nodeId, Map.of()),
+                    callCounts.getOrDefault(nodeId, 0)));
+        }
+        return result;
+    }
+
+    /**
+     * {@code computeNodeMetrics}'s own explicit output shape — see that method's own doc comment
+     * for why this replaced in-place {@code FlowNode} mutation.
+     */
+    public record NodeMetrics(Map<String, Integer> statementSummary, int callCount) {
+    }
+
+    /**
+     * MID-026 — retyped from {@code Map<String, FlowNode>} to {@code Set<String>}: this method
+     * only ever reads the key set (confirmed directly), never a node's body, so
+     * {@code computeNodeMetrics}'s own conversion away from holding full bodies didn't need to
+     * change this signature's real contract, only its declared type.
+     */
+    private String findMatchingNodeId(String edgeId, Set<String> nodeIds) {
+        if (nodeIds.contains(edgeId)) return edgeId;
+        for (String nid : nodeIds) {
+            if (nid.startsWith(edgeId + "$") || nid.startsWith(edgeId + "_")) return nid;
+        }
+        return null;
+    }
+
+    /**
+     * Returns true if the fetched source looks truncated (cut off mid-body) for the ACTIVE
+     * dialect. The decision is delegated to that dialect's own SourceFetchStrategy — there is
+     * no cross-dialect logic here, because whether truncation is even possible depends entirely
+     * on how each dialect retrieves source (Oracle ALL_SOURCE chunks can truncate; MySQL/DB2/
+     * SQL Server fetch complete text; Postgres is judged by dollar-quote balance).
+     */
+    private boolean isSourceTruncated(String source) {
+        if (source == null || source.isBlank()) return false;
+        String dbType = (downloader.getConnManager() != null)
+                ? downloader.getConnManager().getDbType() : null;
+        return com.plsql.parser.multidb.SourceFetchStrategyFactory.get(dbType).isTruncated(source);
+    }
+
+    /**
+     * Download source from DB and parse it. Results are cached:
+     *   1. In-memory parseCache (fastest — within same run)
+     *   2. Disk parseResultCache keyed on source MD5 (skips ANTLR on re-runs if source unchanged)
+     */
+    private ParseResult downloadAndParse(String packageName, String subprogramName) {
+        return downloadAndParse(packageName, subprogramName, null);
+    }
+
+    private ParseResult downloadAndParse(String packageName, String subprogramName, String schema) {
+        String objectName = packageName != null ? packageName : subprogramName;
+        // Standalone objects: qualify the cache key by schema so same-named objects in
+        // different schemas don't reuse each other's parse. The FETCH name is schema-qualified
+        // ONLY for SQL Server, whose source query parses a "schema.name" hint; Oracle's source
+        // query matches on the bare object name, so a "SCHEMA.NAME" fetch would find nothing.
+        boolean standaloneWithSchema = packageName == null && schema != null && !schema.isEmpty();
+        boolean isSqlServer = downloader.getConnManager() != null && downloader.getConnManager().isSqlServer();
+        String fetchName = (standaloneWithSchema && isSqlServer) ? schema + "." + subprogramName : subprogramName;
+        String cacheKey = (standaloneWithSchema ? (schema + "$" + subprogramName) : objectName).toUpperCase();
+
+        // Fast-skip: confirmed absent from Oracle via prior ALL_OBJECTS batch check
+        if (knownMissingObjects.contains(cacheKey)) {
+            log.debug("[Crawler] Skipping confirmed-missing object: {}", objectName);
+            return null;
+        }
+
+        // Fast-skip: compound pkg.sub key confirmed as non-subprogram (e.g. package constant)
+        if (packageName != null && subprogramName != null) {
+            String compoundKey = (packageName + "." + subprogramName).toUpperCase();
+            if (knownMissingObjects.contains(compoundKey)) {
+                log.debug("[Crawler] Skipping confirmed non-subprogram: {}", compoundKey);
+                return null;
+            }
+        }
+
+        // In-memory cache — instant hit within same run
+        ParseResult cached = parseCache.get(cacheKey);
+        if (cached != null) return cached;
+
+        String source = null;
+        long tDiscover0 = System.nanoTime();
+        if (packageName != null) {
+            source = downloader.downloadPackageBody(packageName);
+            if (source == null) source = downloader.downloadPackageSpec(packageName);
+        } else {
+            source = downloader.downloadAny(fetchName);
+        }
+        discoverNanos.addAndGet(System.nanoTime() - tDiscover0);
+
+        if (source == null) {
+            // Queue this name for the next ALL_OBJECTS batch check, then run the batch.
+            // This fires at most once per unique unknown name — confirms cursor vars /
+            // collection types / local identifiers so they are never re-queried.
+            pendingMissingCheck.add(cacheKey);
+            flushMissingBatch();
+            log.info("[Crawler] No source found for: " + objectName);
+            return null;
+        }
+
+        // Disk parse cache — skip ANTLR if same source was parsed in any prior run
+        if (parseResultCache != null) {
+            ParseResult diskCached = parseResultCache.get(source);
+            if (diskCached != null) {
+                parseCache.put(cacheKey, diskCached);
+                log.info("[Crawler] ParseCache HIT (skipped ANTLR) for {}", objectName);
+                return diskCached;
+            }
+        }
+
+        // Parse — use the dialect-specific parser for MySQL/SQL Server, ANTLR PL/SQL for Oracle
+        long t0 = System.currentTimeMillis();
+        long tParse0 = System.nanoTime();
+        ParseResult result;
+        if (downloader.getConnManager() != null && downloader.getConnManager().isMySQL()) {
+            String mySqlSchema = downloader.getConnManager().getMySqlSchema();
+            result = new MySqlProcedureParser().parse(source, objectName, mySqlSchema);
+            log.info("[Crawler] MySQL parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
+        } else if (downloader.getConnManager() != null && downloader.getConnManager().isSqlServer()) {
+            String sqlServerSchema = downloader.getConnManager().getSqlServerSchema();
+            result = new SqlServerProcedureParser().parse(source, objectName, sqlServerSchema);
+            log.info("[Crawler] SQL Server parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
+        } else if (downloader.getConnManager() != null && downloader.getConnManager().isDB2()) {
+            String db2Schema = downloader.getConnManager().getDb2Schema();
+            result = new Db2ProcedureParser().parse(source, objectName, db2Schema);
+            log.info("[Crawler] DB2 parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
+        } else if (downloader.getConnManager() != null && downloader.getConnManager().isPostgres()) {
+            String pgSchema = downloader.getConnManager().getPostgresSchema();
+            result = new PostgresProcedureParser().parse(source, objectName, pgSchema);
+            log.info("[Crawler] Postgres parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
+        } else {
+            result = engine.parseContent(source, objectName + ".sql");
+            log.info("[Crawler] ANTLR parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
+        }
+        parseNanos.addAndGet(System.nanoTime() - tParse0);
+        parseCache.put(cacheKey, result);
+
+        // Persist to disk so next run skips ANTLR for same source
+        if (parseResultCache != null && result != null) {
+            parseResultCache.put(source, result);
+        }
+
+        return result;
+    }
+
+    /**
+     * Prefetch sources for all transitive dependencies concurrently, then warm
+     * parseCache from disk so bulkPreResolveAllTables() has real data to work with.
+     */
+    private void prefetchSources(Set<String> depNames) {
+        if (depNames == null || depNames.isEmpty()) return;
+        int threads = Math.min(6, depNames.size());
+        ExecutorService pool = Executors.newFixedThreadPool(threads,
+                r -> { Thread t = new Thread(r, "src-prefetch"); t.setDaemon(true); return t; });
+        for (String name : depNames) {
+            String upperName = name.toUpperCase();
+            if (parseCache.containsKey(upperName) || knownMissingObjects.contains(upperName)) continue;
+            if (isBuiltInPackage(name)) continue; // never prefetch Oracle system packages
+            final String n = name;
+            pool.submit(() -> {
+                try {
+                    String src = downloader.downloadSource(n, "PACKAGE BODY");
+                    if (src == null) src = downloader.downloadSource(n, "PROCEDURE");
+                    if (src == null) downloader.downloadSource(n, "FUNCTION");
+                } catch (Exception ignored) {}
+            });
+        }
+        pool.shutdown();
+        try {
+            // Wait for all downloads so bulkPreResolveAllTables sees the full sourceCache.
+            pool.awaitTermination(120, TimeUnit.SECONDS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("[Crawler] Prefetch interrupted after timeout");
+        }
+        log.info("[Crawler] Prefetch done for {} objects", depNames.size());
+
+        // Warm parseCache from disk for every source that was just downloaded.
+        // Without this, bulkPreResolveAllTables() has nothing to scan on the first run
+        // (parseCache is empty until BFS processes each node).
+        if (parseResultCache != null) {
+            int warmed = 0;
+            for (String name : depNames) {
+                String upperName = name.toUpperCase();
+                if (parseCache.containsKey(upperName)) continue;
+                String src = downloader.getCachedSource(name);
+                if (src == null) continue;
+                ParseResult pr = parseResultCache.get(src);
+                if (pr != null) {
+                    parseCache.put(upperName, pr);
+                    warmed++;
+                }
+            }
+            if (warmed > 0) {
+                log.info("[Crawler] ParseCache warmed from disk: {} entries", warmed);
+            }
+        }
+    }
+
+    /**
+     * Batch-check all pending unknown names against ALL_OBJECTS in one query.
+     * Names not found as PACKAGE/PROCEDURE/FUNCTION/PACKAGE BODY are added to
+     * knownMissingObjects so subsequent BFS nodes skip them without any DB call.
+     */
+    private void flushMissingBatch() {
+        if (pendingMissingCheck.isEmpty()) return;
+        Set<String> batch;
+        synchronized (pendingMissingCheck) {
+            if (pendingMissingCheck.isEmpty()) return;
+            batch = new HashSet<>(pendingMissingCheck);
+            pendingMissingCheck.clear();
+        }
+        // Remove any that turned out to have source (already in parseCache)
+        batch.removeIf(parseCache::containsKey);
+        if (batch.isEmpty()) return;
+
+        // MySQL / SQL Server have no ALL_OBJECTS — treat all pending names as potentially
+        // present so the source downloader gets a chance to fetch them from the catalog views
+        if (downloader.getConnManager() != null
+                && (downloader.getConnManager().isMySQL() || downloader.getConnManager().isSqlServer() || downloader.getConnManager().isDB2() || downloader.getConnManager().isPostgres())) {
+            resolvedPresentObjects.addAll(batch);
+            return;
+        }
+
+        java.sql.Connection conn = null;
+        try {
+            conn = downloader.getConnManager().getAnyConnection();
+            List<String> nameList = new ArrayList<>(batch);
+            int batchSize = 500;
+            // name -> best object_type found in our schemas (PACKAGE BODY preferred over PACKAGE)
+            Map<String, String> foundInOracle = new HashMap<>();
+            for (int i = 0; i < nameList.size(); i += batchSize) {
+                List<String> sub = nameList.subList(i, Math.min(i + batchSize, nameList.size()));
+                String ph = String.join(",", java.util.Collections.nCopies(sub.size(), "?"));
+                // Include owner filter so we only count objects our schemas can actually download.
+                // Return object_type so nodeCache peek can target exactly the right type (1 call vs 2).
+                // PACKAGE BODY ranks first (most specific) so it wins when both PACKAGE and PACKAGE BODY exist.
+                String sql = "SELECT object_name, object_type FROM all_objects " +
+                        "WHERE object_name IN (" + ph + ") " +
+                        "AND object_type IN ('PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION') " +
+                        "AND owner IN (" + buildSchemaInClause() + ") " +
+                        "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
+                downloader.getConnManager().incrementDbCalls();
+                try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (int j = 0; j < sub.size(); j++) ps.setString(j + 1, sub.get(j));
+                    try (java.sql.ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String name = rs.getString(1).toUpperCase();
+                            String type = rs.getString(2).toUpperCase();
+                            // First row wins (PACKAGE BODY preferred due to ORDER BY)
+                            foundInOracle.putIfAbsent(name, type);
+                        }
+                    }
+                }
+            }
+            downloader.getConnManager().returnToPool(conn);
+            conn = null;
+            // Populate type cache for present objects; mark absent ones as missing
+            for (String name : batch) {
+                String type = foundInOracle.get(name);
+                if (type != null) {
+                    knownObjectTypes.put(name, type);
+                } else {
+                    knownMissingObjects.add(name);
+                }
+            }
+            log.info("[Crawler] MissingBatch: checked={} existInOracle={} markedMissing={}",
+                    batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
+        } catch (Exception e) {
+            log.warn("[Crawler] MissingBatch check failed: {}", e.getMessage());
+        } finally {
+            // Never leak the connection/permit on error (would starve the pool over time).
+            if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
+        }
+    }
+
+    /**
+     * Fix C: Flush all accumulated unknown external-call names in ONE ALL_OBJECTS IN(...)
+     * query.  Names confirmed present in Oracle are added to resolvedPresentObjects so
+     * enqueueExternalCalls lets them through on the next BFS pass.
+     * Names absent are added to knownMissingObjects so they are skipped permanently.
+     * Called once per BFS depth advance — replaces ~270 individual tryResolveFromDb calls.
+     */
+    private void flushPendingResolve() {
+        if (pendingResolveCheck.isEmpty()) return;
+        Set<String> batch;
+        synchronized (pendingResolveCheck) {
+            if (pendingResolveCheck.isEmpty()) return;
+            batch = new HashSet<>(pendingResolveCheck);
+            pendingResolveCheck.clear();
+        }
+        // Skip names already resolved by prior batches or that have source in parseCache
+        batch.removeIf(n -> resolvedPresentObjects.contains(n)
+                || knownMissingObjects.contains(n)
+                || parseCache.containsKey(n));
+        if (batch.isEmpty()) return;
+
+        // MySQL / SQL Server have no ALL_OBJECTS — assume all pending call targets are present
+        if (downloader.getConnManager() != null
+                && (downloader.getConnManager().isMySQL() || downloader.getConnManager().isSqlServer() || downloader.getConnManager().isDB2() || downloader.getConnManager().isPostgres())) {
+            resolvedPresentObjects.addAll(batch);
+            return;
+        }
+
+        java.sql.Connection conn = null;
+        try {
+            conn = downloader.getConnManager().getAnyConnection();
+            List<String> nameList = new ArrayList<>(batch);
+            // name -> best object_type (PACKAGE BODY preferred)
+            Map<String, String> foundInOracle = new HashMap<>();
+            int batchSize = 500;
+            for (int i = 0; i < nameList.size(); i += batchSize) {
+                List<String> sub = nameList.subList(i, Math.min(i + batchSize, nameList.size()));
+                String ph = String.join(",", java.util.Collections.nCopies(sub.size(), "?"));
+                String sql = "SELECT object_name, object_type FROM all_objects "
+                        + "WHERE object_name IN (" + ph + ") "
+                        + "AND object_type IN ('PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION') "
+                        + "AND owner IN (" + buildSchemaInClause() + ") "
+                        + "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
+                downloader.getConnManager().incrementDbCalls();
+                try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (int j = 0; j < sub.size(); j++) ps.setString(j + 1, sub.get(j));
+                    try (java.sql.ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String name = rs.getString(1).toUpperCase();
+                            String type = rs.getString(2).toUpperCase();
+                            foundInOracle.putIfAbsent(name, type);
+                        }
+                    }
+                }
+            }
+            downloader.getConnManager().returnToPool(conn);
+            conn = null;
+            for (String name : batch) {
+                String type = foundInOracle.get(name);
+                if (type != null) {
+                    resolvedPresentObjects.add(name);
+                    knownObjectTypes.put(name, type);
+                    schemaResolver.tryResolveFromDb(name); // populate schema map (already attempted guard inside)
+                } else {
+                    knownMissingObjects.add(name);
+                }
+            }
+            log.info("[Crawler] PendingResolve flush: checked={} found={} missing={}",
+                    batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
+        } catch (Exception e) {
+            // Fall back: try each name individually so we don't silently drop valid calls
+            log.warn("[Crawler] flushPendingResolve batch failed ({}), falling back to individual lookups", e.getMessage());
+            for (String name : batch) {
+                if (schemaResolver.tryResolveFromDb(name)) {
+                    resolvedPresentObjects.add(name);
+                } else {
+                    knownMissingObjects.add(name);
+                }
+            }
+        } finally {
+            // Never leak the connection/permit on error (would starve the pool over time).
+            if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
+        }
+    }
+
+    /**
+     * Fix B: After prefetchSources completes, every ParseResult in parseCache is available.
+     * Collect ALL table names referenced across every cached parse result and fire ONE
+     * batchResolveTableOwners call.  Without this, resolveTableSchemas() called per BFS node
+     * fires an incremental query each time a new table name is seen (~40 separate DB calls).
+     */
+    private void bulkPreResolveAllTables() {
+        // Oracle-only optimization (uses ALL_OBJECTS / ALL_TAB_COLUMNS). MySQL and SQL Server
+        // resolve tables from parse results directly, so skip the Oracle catalog pre-resolve.
+        if (downloader.getConnManager() != null
+                && (downloader.getConnManager().isMySQL() || downloader.getConnManager().isSqlServer() || downloader.getConnManager().isDB2() || downloader.getConnManager().isPostgres())) return;
+        Set<String> allTableNames = new LinkedHashSet<>();
+        for (ParseResult pr : parseCache.values()) {
+            if (pr == null) continue;
+            for (com.plsql.parser.model.ParsedObject obj : pr.getObjects()) {
+                collectTableNamesFromOps(obj.getTableOperations(), allTableNames);
+                for (com.plsql.parser.model.SubprogramInfo sub : obj.getSubprograms()) {
+                    collectTableNamesFromOps(sub.getTableOperations(), allTableNames);
+                }
+            }
+        }
+        if (allTableNames.isEmpty()) return;
+        long t0 = System.currentTimeMillis();
+        schemaResolver.batchResolveTableOwners(allTableNames);
+        log.info("[Crawler] BulkPreResolveAllTables: {} table names resolved in {}ms",
+                allTableNames.size(), System.currentTimeMillis() - t0);
+    }
+
+    private void collectTableNamesFromOps(
+            List<com.plsql.parser.model.TableOperationInfo> ops, Set<String> out) {
+        if (ops == null) return;
+        for (com.plsql.parser.model.TableOperationInfo op : ops) {
+            if (op.getTableName() != null && !op.getTableName().isEmpty()) {
+                String n = op.getTableName().toUpperCase();
+                if (!n.contains(".")) out.add(n);
+                else out.add(n.split("\\.", 2)[1]); // strip schema prefix
+            }
+        }
+    }
+
+    /** Build a comma-separated quoted IN-clause for configured schemas. */
+    private String buildSchemaInClause() {
+        StringBuilder sb = new StringBuilder();
+        List<String> schemas = schemaResolver.getConfiguredSchemas();
+        for (int i = 0; i < schemas.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append("'").append(schemas.get(i).replace("'", "''")).append("'");
+        }
+        return sb.length() > 0 ? sb.toString() : "'UNKNOWN'";
+    }
+
+    /**
+     * Resolve the schema for calls in the list.
+     */
+    /**
+     * Drop "calls" whose unqualified name matches a declared local variable or parameter of
+     * the routine. Such references are variable uses — e.g. collection indexing {@code v_ids(i)}
+     * or {@code v_ids.COUNT} in a FORALL — not routine calls, so they must not create phantom
+     * stub nodes/edges in the flow.
+     */
+    private List<CallInfo> filterLocalVarCalls(List<CallInfo> calls,
+                                               List<VariableInfo> locals, List<ParameterInfo> params) {
+        return filterLocalVarCalls(calls, locals, params, null);
+    }
+
+    /**
+     * The owning package/object's own top-level variables that a bare, unqualified
+     * {@code identifier(args)}/{@code identifier.method} reference inside any of its subprograms
+     * could actually be resolving to (as opposed to a real call). Mirrors
+     * {@code PlSqlAnalysisVisitor.isDeclaredVariableInScope}, which excludes exactly these two
+     * lists at parse time for the subprogram it is currently visiting: package-level variables
+     * declared in a PACKAGE_BODY/PACKAGE_SPEC ({@link ParsedObject#getPackageVariables()}) and,
+     * for standalone routines with no nested subprograms, body-level variables
+     * ({@link ParsedObject#getGlobalVariables()}). A whole-package crawl aggregates calls from
+     * every subprogram into one node without re-running that parse-time check per subprogram
+     * pair, so this list has to be supplied explicitly to {@link #filterLocalVarCalls} here.
+     */
+    private List<VariableInfo> packageLevelVars(ParsedObject obj) {
+        if (obj == null) return null;
+        List<VariableInfo> combined = new ArrayList<>();
+        if (obj.getPackageVariables() != null) combined.addAll(obj.getPackageVariables());
+        if (obj.getGlobalVariables() != null) combined.addAll(obj.getGlobalVariables());
+        return combined;
+    }
+
+    /**
+     * Same as {@link #filterLocalVarCalls(List, List, List)} but also excludes names matching
+     * the owning package's global/package-level variables (e.g. a package-level collection
+     * declared in the package spec/body and indexed from many different subprograms — such a
+     * reference is never in any single subprogram's own locals/params, so without this the
+     * package-aggregation crawl path leaked it through as a bogus external call).
+     */
+    private List<CallInfo> filterLocalVarCalls(List<CallInfo> calls,
+                                               List<VariableInfo> locals, List<ParameterInfo> params,
+                                               List<VariableInfo> globals) {
+        if (calls == null || calls.isEmpty()) return calls;
+        Set<String> names = new HashSet<>();
+        if (locals != null) for (VariableInfo v : locals) if (v.getName() != null) names.add(v.getName().toUpperCase());
+        if (params != null) for (ParameterInfo p : params) if (p.getName() != null) names.add(p.getName().toUpperCase());
+        if (globals != null) for (VariableInfo v : globals) if (v.getName() != null) names.add(v.getName().toUpperCase());
+        if (names.isEmpty()) return calls;
+        List<CallInfo> out = new ArrayList<>();
+        for (CallInfo c : calls) {
+            if (c.getPackageName() == null && c.getName() != null
+                    && names.contains(c.getName().toUpperCase())) {
+                continue;   // variable reference, not a routine call
+            }
+            out.add(c);
+        }
+        return out;
+    }
+
+    private List<CallInfo> resolveCallSchemas(List<CallInfo> calls, String ownerSchema) {
+        if (calls == null) return new ArrayList<>();
+        List<CallInfo> resolved = new ArrayList<>();
+        for (CallInfo call : calls) {
+            // Create a copy to avoid modifying original
+            CallInfo rc = new CallInfo();
+            rc.setType(call.getType());
+            rc.setPackageName(call.getPackageName());
+            rc.setName(call.getName());
+            rc.setLine(call.getLine());
+            rc.setArguments(call.getArguments());
+
+            // Resolve schema
+            if (call.getSchema() != null && !call.getSchema().isEmpty()) {
+                rc.setSchema(call.getSchema());
+            } else {
+                String target = call.getPackageName() != null
+                        ? call.getPackageName() : call.getName();
+                if (target != null) {
+                    String resolvedSchema = schemaResolver.resolveSchema(target, null, null);
+                    rc.setSchema(resolvedSchema != null ? resolvedSchema : ownerSchema);
+                }
+            }
+            resolved.add(rc);
+        }
+        return resolved;
+    }
+
+    /**
+     * Resolve schemas for table operations.
+     */
+    private List<TableOperationInfo> resolveTableSchemas(List<TableOperationInfo> ops,
+                                                          String ownerSchema) {
+        if (ops == null) return new ArrayList<>();
+
+        List<String> unresolvedNames = new ArrayList<>();
+        for (TableOperationInfo op : ops) {
+            if ((op.getSchema() == null || op.getSchema().isEmpty()) && op.getTableName() != null
+                    && !op.getTableName().contains(".")) {
+                unresolvedNames.add(op.getTableName());
+            }
+        }
+        if (!unresolvedNames.isEmpty()) {
+            schemaResolver.batchResolveTableOwners(unresolvedNames);
+        }
+
+        List<TableOperationInfo> resolved = new ArrayList<>();
+        for (TableOperationInfo op : ops) {
+            TableOperationInfo rt = new TableOperationInfo();
+            rt.setTableName(op.getTableName());
+            rt.setOperation(op.getOperation());
+            rt.setLine(op.getLine());
+            rt.setAlias(op.getAlias());
+            rt.setJoins(op.getJoins());
+            // Copy EVERY field, not a chosen few. This method rebuilds the operation to resolve
+            // its schema, and anything not copied here is silently lost — which is exactly what
+            // happened to the column detail: the enricher filled it, this dropped it, and
+            // tables.json came out with zero column rows while the logs said 100% parsed.
+            rt.setSqlText(op.getSqlText());
+            rt.setColumnUsages(op.getColumnUsages());
+            rt.setDdl(op.getDdl());
+            rt.setObjectType(op.getObjectType());
+            rt.setSubqueryContext(op.getSubqueryContext());
+            rt.setDbLink(op.getDbLink());
+            rt.setMergeClause(op.getMergeClause());
+            rt.setColumnsParsed(op.getColumnsParsed());
+            rt.setWhereFilters(op.getWhereFilters());
+            rt.setPredicateScope(op.getPredicateScope());
+            rt.setReturningColumns(op.getReturningColumns());
+            rt.setSubprogramName(op.getSubprogramName());
+
+            // Resolve schema
+            String resolvedName = op.getTableName();
+            if (op.getSchema() != null && !op.getSchema().isEmpty()) {
+                rt.setSchema(op.getSchema());
+            } else if (resolvedName != null) {
+                if (resolvedName.contains(".")) {
+                    String[] parts = resolvedName.split("\\.", 2);
+                    String candidate = schemaResolver.resolveSchema(parts[1], "TABLE", parts[0]);
+                    if (candidate != null) {
+                        rt.setSchema(candidate);
+                        rt.setTableName(parts[1]);
+                        resolvedName = parts[1];
+                    } else {
+                        rt.setSchema(parts[0].toUpperCase());
+                        rt.setTableName(parts[1]);
+                        resolvedName = parts[1];
+                    }
+                } else {
+                    String resolvedSchema = schemaResolver.resolveSchema(resolvedName, "TABLE", null);
+                    rt.setSchema(resolvedSchema != null ? resolvedSchema : ownerSchema);
+                }
+            }
+
+            // Resolve objectType (TABLE, VIEW, MATERIALIZED VIEW)
+            if (resolvedName != null) {
+                String objType = schemaResolver.resolveObjectType(resolvedName.toUpperCase());
+                rt.setObjectType(objType != null ? objType : "TABLE");
+            }
+            resolved.add(rt);
+        }
+        return resolved;
+    }
+
+    /**
+     * Aggregate table operation info into the global map.
+     */
+    private void aggregateTableInfo(Map<String, SchemaTableInfo> tableInfoMap,
+                                     List<TableOperationInfo> tableOps,
+                                     String referencedBy) {
+        if (tableOps == null) return;
+        for (TableOperationInfo op : tableOps) {
+            String schema = op.getSchema() != null ? op.getSchema() : "UNKNOWN";
+            String tableName = op.getTableName() != null ? op.getTableName().toUpperCase() : "UNKNOWN";
+            String key = schema + "." + tableName;
+
+            SchemaTableInfo info = tableInfoMap.computeIfAbsent(key, k -> {
+                SchemaTableInfo sti = new SchemaTableInfo();
+                sti.setSchema(schema);
+                sti.setTableName(tableName);
+                // Try to resolve the object type
+                String objType = schemaResolver.resolveObjectType(tableName);
+                sti.setObjectType(objType != null ? objType : "TABLE");
+                return sti;
+            });
+
+            if (op.getOperation() != null) {
+                info.getOperations().add(op.getOperation().toUpperCase());
+            }
+            if (op.getLine() > 0) {
+                info.getLines().add(op.getLine());
+            }
+            if (referencedBy != null) {
+                info.getReferencedBy().add(referencedBy);
+            }
+            foldColumnUsage(info, op, referencedBy);
+            if (op.getDdl() != null && !op.getDdl().isEmpty()) {
+                info.getDdl().addAll(op.getDdl());
+            }
+        }
+    }
+
+    /** Line numbers kept per column. A column touched everywhere does not need every line. */
+    private static final int MAX_COLUMN_LINES = 25;
+
+    /**
+     * Folds a statement's column detail into the table's per-column summary.
+     *
+     * <p>One row per column rather than per statement: a table with hundreds of statements against
+     * it would otherwise carry hundreds of near-identical rows onto its page — the same duplication
+     * that had to be pooled out of the JAR analysis document, and unreadable as well as large.
+     */
+    private void foldColumnUsage(SchemaTableInfo info, TableOperationInfo op, String referencedBy) {
+        if (op.getColumnUsages() == null || op.getColumnUsages().isEmpty()) return;
+        for (com.plsqlanalyzer.parser.model.ColumnUsage u : op.getColumnUsages()) {
+            String col = u.getColumnName();
+            // A computed select item (`SUM(x)`) has no column name; it belongs to the statement,
+            // not to a column of this table.
+            if (col == null || col.isBlank() || "*".equals(col)) continue;
+            String key = col.toUpperCase();
+            TableColumnUsage tc = null;
+            for (TableColumnUsage existing : info.getColumns()) {
+                if (key.equalsIgnoreCase(existing.getColumnName())) { tc = existing; break; }
+            }
+            if (tc == null) {
+                tc = new TableColumnUsage(key);
+                info.getColumns().add(tc);
+            }
+            if (u.getUsage() != null) tc.getUsages().add(u.getUsage());
+            if (u.getValueSource() != null) tc.getValueSources().add(u.getValueSource());
+            if (u.getIntoVariable() != null) tc.getIntoVariables().add(u.getIntoVariable());
+            if (referencedBy != null) tc.getReferencedBy().add(referencedBy);
+            // addLine keeps the true distinct count even past the cap, so the page can say
+            // "showing 25 of 112" instead of presenting a sample as if it were the whole set.
+            tc.addLine(u.getLineNumber(), MAX_COLUMN_LINES);
+            if (tc.getSampleExpression() == null && u.getExpression() != null
+                    && !u.getExpression().equalsIgnoreCase(col)) {
+                tc.setSampleExpression(u.getExpression());
+            }
+        }
+    }
+
+    /**
+     * Enqueue external calls for BFS processing.
+     * Uses ALL_DEPENDENCIES to validate that the call is a real dependency,
+     * filtering out false positives like record field accesses and type references.
+     */
+    private void enqueueExternalCalls(List<CallInfo> calls, int currentDepth,
+                                       String callerPackage, String callerObject,
+                                       String callerSchema,
+                                       Queue<BfsItem> queue, List<FlowEdge> callGraph) {
+        enqueueExternalCalls(calls, currentDepth, callerPackage, callerObject, callerSchema,
+                queue, callGraph, -1);
+    }
+
+    private void enqueueExternalCalls(List<CallInfo> calls, int currentDepth,
+                                       String callerPackage, String callerObject,
+                                       String callerSchema,
+                                       Queue<BfsItem> queue, List<FlowEdge> callGraph,
+                                       int callerOverloadArity) {
+        if (calls == null) return;
+
+        String sourceObject = callerPackage != null ? callerPackage : callerObject;
+
+        for (CallInfo call : calls) {
+            String callType = call.getType();
+            boolean isInternal = "INTERNAL".equalsIgnoreCase(callType);
+            boolean isExternal = "EXTERNAL".equalsIgnoreCase(callType);
+
+            if (!isExternal && !isInternal) {
+                continue;
+            }
+
+            String targetPackage = call.getPackageName();
+            String targetObject = call.getName();
+
+            if (targetObject == null || targetObject.isEmpty()) {
+                continue;
+            }
+
+            // For internal calls, the target is within the same package
+            if (isInternal) {
+                if (callerPackage == null) continue;
+                targetPackage = callerPackage;
+            }
+
+            // Reclassify: EXTERNAL with no package may be internal to caller's package
+            if (isExternal && targetPackage == null && callerPackage != null) {
+                String rawSource = downloader.getCachedSource(callerPackage);
+                if (rawSource != null && hasSubprogram(rawSource, targetObject)) {
+                    targetPackage = callerPackage;
+                    isExternal = false;
+                    isInternal = true;
+                }
+            }
+
+            // Cross-schema standalone call: a "OWNER.OBJECT" reference where the first identifier
+            // is a real schema/owner rather than a package. Oracle qualifies calls to standalone
+            // procedures/functions in another schema as OWNER.OBJECT (e.g.
+            // ANALYZER_REF.USP_REF_LOG). Without this, OWNER is treated as a package name, found
+            // absent from ALL_OBJECTS, and the whole call is dropped. When OWNER matches a
+            // configured schema, reinterpret it as the target schema of a standalone object so the
+            // object is crawled and appears as a reachable node in that schema.
+            // Cross-schema standalone call detection. The "package" segment may actually be a
+            // SCHEMA/owner qualifying a standalone procedure/function in another schema. This
+            // applies both when the segment already matches a configured schema and when it is an
+            // unknown name that turns out to be a foreign owner the login user can read (probed via
+            // ALL_OBJECTS). Only probe unknown segments — a known package/object short-circuits so
+            // normal same-schema package calls are never misclassified or charged an extra query.
+            String crossSchemaOwner = null;
+            if (isExternal && targetPackage != null && targetObject != null
+                    && !targetPackage.equalsIgnoreCase(callerPackage)
+                    && !isBuiltInPackage(targetPackage)) {
+                String pkgUpper = targetPackage.toUpperCase();
+                boolean isConfiguredSchema = schemaResolver.getConfiguredSchemas() != null
+                        && schemaResolver.getConfiguredSchemas().contains(pkgUpper);
+                boolean pkgIsKnownRoutineContainer = schemaResolver.isKnownObject(pkgUpper)
+                        || downloader.getCachedSource(pkgUpper) != null
+                        || knownObjectTypes.containsKey(pkgUpper);
+                boolean crossSchema = isConfiguredSchema;
+                if (!crossSchema && !pkgIsKnownRoutineContainer
+                        && schemaResolver.isForeignOwnerObject(pkgUpper, targetObject)) {
+                    crossSchema = true;
+                }
+                if (crossSchema) {
+                    crossSchemaOwner = pkgUpper;
+                    schemaResolver.registerDiscoveredSchema(pkgUpper);
+                    targetPackage = null;
+                }
+            }
+
+            if (isBuiltInPackage(targetPackage) || isBuiltInFunction(targetObject)) {
+                continue;
+            }
+
+            // Skip compound pkg.sub keys already confirmed as non-subprogram.
+            if (targetPackage != null && targetObject != null) {
+                String compoundKey = (targetPackage + "." + targetObject).toUpperCase();
+                if (knownMissingObjects.contains(compoundKey)) continue;
+            }
+
+            // If we already have the package source in memory (prefetched or previously parsed),
+            // verify the named subprogram actually exists before paying any DB cost.
+            // Package-level constants/variables (e.g. CBM.CONTRACT_NO) are parsed by ANTLR
+            // as zero-arg call statements — hasSubprogram catches them instantly from cache.
+            if (targetPackage != null && targetObject != null && call.getArguments() == 0) {
+                String cachedSrc = downloader.getCachedSource(targetPackage);
+                if (cachedSrc != null && !hasSubprogram(cachedSrc, targetObject)) {
+                    String compoundKey = (targetPackage + "." + targetObject).toUpperCase();
+                    knownMissingObjects.add(compoundKey);
+                    log.debug("[Crawler] Skipping non-subprogram reference: {}.{}", targetPackage, targetObject);
+                    continue;
+                }
+            }
+
+            // For external calls, validate against schema resolver.
+            // Only filter if resolver positively has dep data for the source.
+            if (isExternal) {
+                String targetToCheck = targetPackage != null ? targetPackage : targetObject;
+                if (schemaResolver.hasDependencyData(sourceObject)
+                        && !schemaResolver.isDependency(sourceObject, targetToCheck)
+                        && !schemaResolver.isKnownObject(targetToCheck)) {
+                    String upperTarget = targetToCheck.toUpperCase();
+                    // Fix C: batch all unknown names; resolvedPresentObjects is populated by
+                    // flushPendingResolve() which fires ONE ALL_OBJECTS IN(...) between BFS levels.
+                    if (knownMissingObjects.contains(upperTarget)) continue;
+                    if (resolvedPresentObjects.contains(upperTarget)) {
+                        // Already confirmed present in a prior batch — allow through
+                    } else {
+                        // Queue for next batch resolve. Enqueue the BFS item optimistically;
+                        // if the name turns out absent, downloadAndParse fast-skips via
+                        // knownMissingObjects after the batch fires before the node is processed.
+                        pendingResolveCheck.add(upperTarget);
+                        // Fall through — still enqueue so no calls are lost
+                    }
+                }
+            }
+
+            // Schema-aware key for standalone targets so same-named routines in different
+            // schemas resolve to distinct nodes (no package → schema disambiguates).
+            // For a cross-schema standalone call the owner IS the target schema (the call's own
+            // schema field carries the caller's schema as a fallback, so it must not win here).
+            String targetSchema = crossSchemaOwner != null ? crossSchemaOwner
+                    : ((targetPackage == null && call.getSchema() != null && !call.getSchema().isEmpty())
+                        ? call.getSchema() : null);
+            // Overloaded target: the edge must carry the SAME arity discriminator as the
+            // callee node so it resolves to the correct overload (else edge → missing node).
+            boolean targetOverloaded = targetPackage != null && call.getArguments() >= 0
+                    && overloadCount(targetPackage, targetObject) > 1;
+            int edgeArity = targetOverloaded ? call.getArguments() : -1;
+
+            String visitKey = buildVisitKey(targetSchema, targetPackage, targetObject);
+            if (targetOverloaded) visitKey = visitKey + "#" + call.getArguments();
+            if (visited.contains(visitKey)) {
+                addCallEdge(callGraph, callerSchema, callerPackage, callerObject,
+                        targetSchema != null ? targetSchema
+                                : (call.getSchema() != null ? call.getSchema() : callerSchema),
+                        targetPackage, targetObject,
+                        call.getLine(), currentDepth, edgeArity, callerOverloadArity);
+                continue;
+            }
+
+            addCallEdge(callGraph, callerSchema, callerPackage, callerObject,
+                    targetSchema != null ? targetSchema
+                            : (call.getSchema() != null ? call.getSchema() : callerSchema),
+                    targetPackage, targetObject,
+                    call.getLine(), currentDepth, edgeArity, callerOverloadArity);
+
+            // Pre-queue names for bulk ALL_OBJECTS existence check before download:
+            //
+            // Case A — standalone (no package): e.g. C_ERROR_TEXT
+            //   Add the name itself. If absent from Oracle → skip at nodeCache peek.
+            //
+            // Case B — compound pkg.sub (e.g. CRP.CONTRACT_NO) where CRP source is NOT
+            //   yet in memory: add the PACKAGE NAME "CRP". The bulk check confirms whether
+            //   CRP exists in Oracle at all. If absent → knownMissingObjects("CRP") → both
+            //   nodeCache peek and downloadAndParse skip instantly, zero DB calls.
+            //   If CRP exists → download proceeds; hasSubprogram then eliminates CONTRACT_NO.
+            String upperPkg = targetPackage != null ? targetPackage.toUpperCase() : null;
+            String upperObj = targetObject != null ? targetObject.toUpperCase() : null;
+            if (upperPkg == null && upperObj != null) {
+                // Case A: standalone
+                if (!knownMissingObjects.contains(upperObj) && !resolvedPresentObjects.contains(upperObj)) {
+                    pendingMissingCheck.add(upperObj);
+                }
+            } else if (upperPkg != null) {
+                // Case B: compound — pre-check the package name if source not yet cached
+                if (!knownMissingObjects.contains(upperPkg)
+                        && !knownObjectTypes.containsKey(upperPkg)
+                        && downloader.getCachedSource(upperPkg) == null) {
+                    pendingMissingCheck.add(upperPkg);
+                }
+            }
+
+            // Carry the ACTUAL call-site arg count on the work item (not edgeArity, which is
+            // -1 until the callee's package is parsed). The arity is only consulted at poll time
+            // when overloadCount confirms the member is overloaded — by which point the package
+            // is parsed — so an overloaded member reached first at a shallow depth still keys to
+            // its correct #N node instead of a duplicate arity-less node.
+            int itemArity = call.getArguments() >= 0 ? call.getArguments() : edgeArity;
+            queue.add(new BfsItem(targetPackage, targetObject, targetSchema, currentDepth + 1,
+                    callerPackage, callerObject, call.getLine(), itemArity));
+        }
+    }
+
+    /**
+     * Add a call edge to the call graph.
+     */
+    private void addCallEdge(List<FlowEdge> callGraph,
+                              String fromSchema, String fromPackage, String fromObject,
+                              String toSchema, String toPackage, String toObject,
+                              int line, int depth) {
+        addCallEdge(callGraph, fromSchema, fromPackage, fromObject,
+                toSchema, toPackage, toObject, line, depth, -1, -1);
+    }
+
+    private void addCallEdge(List<FlowEdge> callGraph,
+                              String fromSchema, String fromPackage, String fromObject,
+                              String toSchema, String toPackage, String toObject,
+                              int line, int depth, int toOverloadArity) {
+        addCallEdge(callGraph, fromSchema, fromPackage, fromObject,
+                toSchema, toPackage, toObject, line, depth, toOverloadArity, -1);
+    }
+
+    /**
+     * MID-026 call-graph phantom-root fix (confirmed on the real
+     * ORACLE~ORACLEDEMO~LOCAL~ERP_USP_RUN_CYCLE corpus): an overloaded node (e.g.
+     * {@code COMPUTE_TOTAL}, crawled as distinct {@code __1}/{@code __2} arity variants) that is
+     * itself the SOURCE of an outgoing call previously had its {@code fromNodeId} built with no
+     * arity suffix at all — {@code buildNodeId(fromSchema, fromPkg, fromObject)} alone — which
+     * matches no real node (only the {@code __N} variants exist). That phantom id had no key in
+     * {@code node_id_map.json} either, so it was unresolvable downstream, and any "never appears
+     * as a to" root-detection heuristic (client-side call-graph rendering) misclassified it as a
+     * second graph root. Fixed by mirroring the existing {@code toOverloadArity} handling on the
+     * FROM side via this new {@code fromOverloadArity} parameter, fed by the current BFS item's
+     * own already-computed {@code isOverloaded}/{@code item.argCount} (the node being processed
+     * IS the "from" side for every edge emitted while processing it).
+     */
+    private void addCallEdge(List<FlowEdge> callGraph,
+                              String fromSchema, String fromPackage, String fromObject,
+                              String toSchema, String toPackage, String toObject,
+                              int line, int depth, int toOverloadArity, int fromOverloadArity) {
+        FlowEdge edge = new FlowEdge();
+        edge.setFromSchema(fromSchema);
+        edge.setFromPackage(fromPackage);
+        edge.setFromObject(fromObject);
+        edge.setToSchema(toSchema);
+        edge.setToPackage(toPackage);
+        edge.setToObject(toObject);
+        edge.setLine(line);
+        edge.setDepth(depth);
+
+        // Build nodeIds — for FROM, also check visited set to resolve package
+        String fromPkg = fromPackage;
+        if (fromPkg == null && fromObject != null) {
+            String visitKey = fromObject.toUpperCase();
+            for (String v : visited) {
+                if (v.endsWith("." + visitKey)) {
+                    fromPkg = v.substring(0, v.length() - visitKey.length() - 1);
+                    break;
+                }
+            }
+        }
+        String fromNodeId = buildNodeId(fromSchema, fromPkg, fromObject);
+        if (fromOverloadArity >= 0) fromNodeId = fromNodeId + "__" + fromOverloadArity;
+        edge.setFromNodeId(fromNodeId);
+        // Overloaded target: append the arity discriminator so this edge points at the
+        // matching overload node (buildShortId appends the same "__<paramCount>").
+        String toNodeId = buildNodeId(toSchema, toPackage, toObject);
+        if (toOverloadArity >= 0) toNodeId = toNodeId + "__" + toOverloadArity;
+        edge.setToNodeId(toNodeId);
+        callGraph.add(edge);
+    }
+
+    private String buildNodeId(String schema, String pkg, String object) {
+        StringBuilder sb = new StringBuilder();
+        if (schema != null && !schema.isEmpty()) sb.append(schema);
+        if (pkg != null && !pkg.isEmpty()) sb.append("$").append(pkg);
+        if (object != null && !object.isEmpty()) sb.append("$").append(object);
+        return sb.toString().toUpperCase().replaceAll("[^A-Z0-9_$]", "_");
+    }
+
+    /**
+     * Resolve the schema for a given object, using the SchemaResolver
+     * and falling back to the source downloader's owner cache.
+     */
+    private String resolveObjectSchema(String objectName, String parsedSchema) {
+        // If the parser already found a schema, use it
+        if (parsedSchema != null && !parsedSchema.isEmpty()) {
+            return parsedSchema.toUpperCase();
+        }
+
+        // Try schema resolver
+        String resolved = schemaResolver.resolveSchema(objectName);
+        if (resolved != null) {
+            return resolved;
+        }
+
+        // Try the source downloader's owner cache
+        String owner = downloader.getOwner(objectName);
+        if (owner != null) {
+            return owner.toUpperCase();
+        }
+
+        return null;
+    }
+
+    /**
+     * Build a visit key for the visited set.
+     */
+    private String buildVisitKey(String packageName, String subprogramName) {
+        return buildVisitKey(null, packageName, subprogramName);
+    }
+
+    /**
+     * Count subprograms in the ALREADY-PARSED package that share this name. A result of
+     * &gt;1 means the member is genuinely overloaded (same name, different signatures), which
+     * gates all overload-splitting logic so non-overloaded members stay byte-identical.
+     * A routine with default parameters is a SINGLE subprogram → count 1 → never split.
+     */
+    /**
+     * Parse source with the active dialect's parser (no DB access, no disk cache side effects).
+     * Used to resolve overload counts on demand when a package is referenced before the BFS has
+     * parsed it (see overloadCount) — avoids a bare, arity-less duplicate node for an overloaded
+     * member that is first reached at a shallow depth.
+     */
+    private ParseResult parseDialect(String source, String objectName) {
+        DbConnectionManager cm = downloader.getConnManager();
+        if (cm != null && cm.isMySQL())      return new MySqlProcedureParser().parse(source, objectName, cm.getMySqlSchema());
+        if (cm != null && cm.isSqlServer())  return new SqlServerProcedureParser().parse(source, objectName, cm.getSqlServerSchema());
+        if (cm != null && cm.isDB2())        return new Db2ProcedureParser().parse(source, objectName, cm.getDb2Schema());
+        if (cm != null && cm.isPostgres())   return new PostgresProcedureParser().parse(source, objectName, cm.getPostgresSchema());
+        return engine.parseContent(source, objectName + ".sql");
+    }
+
+    private int overloadCount(String packageName, String subName) {
+        if (packageName == null || subName == null) return 0;
+        ParseResult pr = parseCache.get(packageName.toUpperCase());
+        if (pr == null) {
+            // Not parsed yet (member reached before its package's BFS node). Parse the already
+            // prefetched source on demand so overload detection is order-independent. The result
+            // is cached, so the eventual package node reuses it (no extra parse cost).
+            String src = downloader.getCachedSource(packageName);
+            if (src != null && !src.isBlank()) {
+                try {
+                    pr = parseDialect(src, packageName);
+                    if (pr != null) parseCache.put(packageName.toUpperCase(), pr);
+                } catch (Exception e) {
+                    return 0;
+                }
+            }
+        }
+        if (pr == null || pr.getObjects() == null) return 0;
+        int n = 0;
+        for (ParsedObject o : pr.getObjects()) {
+            if (o.getSubprograms() == null) continue;
+            for (SubprogramInfo s : o.getSubprograms()) {
+                if (s.getName() != null && s.getName().equalsIgnoreCase(subName)) n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Build the BFS de-dup key. Package members keep the historical PACKAGE.SUB key
+     * (unchanged — Oracle's dominant case). For STANDALONE objects (no package: all
+     * SQL Server, Oracle standalone routines) the schema is included so same-named
+     * objects in different schemas (e.g. sales.fn_X vs hr.fn_X) are NOT treated as the
+     * same node and never overwrite each other.
+     */
+    private String buildVisitKey(String schema, String packageName, String subprogramName) {
+        if (packageName != null && !packageName.isEmpty()) {
+            return packageName.toUpperCase() + "." + subprogramName.toUpperCase();
+        }
+        // Standalone: use "$" (the node-id separator), NOT "." — a "." prefix would be
+        // mistaken for a package by addCallEdge's fromPkg heuristic (which scans for ".OBJ").
+        String prefix = (schema != null && !schema.isEmpty()) ? schema.toUpperCase() + "$" : "";
+        return prefix + subprogramName.toUpperCase();
+    }
+
+    /**
+     * Check if an object type is non-parseable (TYPE, SYNONYM, SEQUENCE, etc.)
+     */
+    private boolean isNonParsableType(String objectType) {
+        if (objectType == null) return false;
+        String upper = objectType.toUpperCase().replace(" ", "_");
+        return upper.equals("TYPE") || upper.equals("TYPE_BODY")
+                || upper.equals("SYNONYM") || upper.equals("SEQUENCE")
+                || upper.equals("TABLE") || upper.equals("VIEW")
+                || upper.equals("MATERIALIZED_VIEW") || upper.equals("INDEX")
+                || upper.equals("LIBRARY") || upper.equals("JAVA_CLASS");
+    }
+
+    private boolean hasSubprogram(String source, String name) {
+        if (source == null || name == null) return false;
+        String pat = "(?i)(?:PROCEDURE|FUNCTION)\\s+" + Pattern.quote(name) + "\\b";
+        return Pattern.compile(pat).matcher(source).find();
+    }
+
+    /**
+     * Extract a single subprogram source from a package body using regex.
+     * Matches PROCEDURE/FUNCTION name ... END name; patterns.
+     */
+    private String extractSubprogramSource(String source, String subName) {
+        if (source == null || subName == null) return null;
+        // Try with END subName; first
+        String pat = "(?is)((?:PROCEDURE|FUNCTION)\\s+" + Pattern.quote(subName)
+                + "\\b.*?END\\s+" + Pattern.quote(subName) + "\\s*;)";
+        Matcher m = Pattern.compile(pat).matcher(source);
+        if (m.find()) {
+            return m.group(1);
+        }
+
+        // Fallback: find start of subprogram, then find the matching END;
+        // by counting BEGIN/END nesting
+        String startPat = "(?i)(PROCEDURE|FUNCTION)\\s+" + Pattern.quote(subName) + "\\b";
+        Matcher startM = Pattern.compile(startPat).matcher(source);
+        if (startM.find()) {
+            int startIdx = startM.start();
+            // Find the first BEGIN after the declaration
+            String afterDecl = source.substring(startIdx);
+            int nestLevel = 0;
+            boolean foundFirstBegin = false;
+            int pos = 0;
+            // Tokenize to find balanced BEGIN/END
+            Pattern tokenPat = Pattern.compile("(?i)\\b(BEGIN|END)\\b");
+            Matcher tokenM = tokenPat.matcher(afterDecl);
+            while (tokenM.find()) {
+                String token = tokenM.group(1).toUpperCase();
+                if ("BEGIN".equals(token)) {
+                    nestLevel++;
+                    foundFirstBegin = true;
+                } else if ("END".equals(token) && foundFirstBegin) {
+                    nestLevel--;
+                    if (nestLevel == 0) {
+                        // Find the semicolon after END
+                        int endPos = tokenM.end();
+                        int semiIdx = afterDecl.indexOf(';', endPos);
+                        if (semiIdx >= 0) {
+                            return afterDecl.substring(0, semiIdx + 1);
+                        }
+                        return afterDecl.substring(0, endPos);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Check if a package name is a known Oracle built-in.
+     */
+    private boolean isBuiltInPackage(String packageName) {
+        if (packageName == null) return false;
+        String upper = packageName.toUpperCase();
+        return upper.startsWith("DBMS_")
+                || upper.startsWith("UTL_")
+                || upper.startsWith("SYS.")
+                || upper.equals("STANDARD")
+                || upper.equals("DBMS_OUTPUT")
+                || upper.equals("DBMS_LOB")
+                || upper.equals("DBMS_SQL")
+                || upper.equals("DBMS_UTILITY")
+                || upper.equals("DBMS_SESSION")
+                || upper.equals("DBMS_LOCK")
+                || upper.equals("DBMS_SCHEDULER")
+                || upper.equals("DBMS_METADATA")
+                || upper.equals("DBMS_XMLDOM")
+                || upper.equals("DBMS_XMLPARSER")
+                || upper.equals("DBMS_XMLGEN")
+                || upper.equals("DBMS_CRYPTO")
+                || upper.equals("DBMS_RANDOM")
+                || upper.equals("DBMS_APPLICATION_INFO")
+                || upper.equals("APEX_JSON")
+                || upper.equals("APEX_WEB_SERVICE")
+                || upper.equals("HTF")
+                || upper.equals("HTP")
+                || upper.equals("OWA_UTIL");
+    }
+
+    /**
+     * Check if a function name is a known Oracle built-in function.
+     */
+    private boolean isBuiltInFunction(String funcName) {
+        if (funcName == null) return false;
+        String upper = funcName.toUpperCase();
+        return upper.equals("NVL")
+                || upper.equals("NVL2")
+                || upper.equals("DECODE")
+                || upper.equals("TO_CHAR")
+                || upper.equals("TO_DATE")
+                || upper.equals("TO_NUMBER")
+                || upper.equals("TO_TIMESTAMP")
+                || upper.equals("SUBSTR")
+                || upper.equals("INSTR")
+                || upper.equals("LENGTH")
+                || upper.equals("REPLACE")
+                || upper.equals("TRIM")
+                || upper.equals("LTRIM")
+                || upper.equals("RTRIM")
+                || upper.equals("UPPER")
+                || upper.equals("LOWER")
+                || upper.equals("INITCAP")
+                || upper.equals("LPAD")
+                || upper.equals("RPAD")
+                || upper.equals("ROUND")
+                || upper.equals("TRUNC")
+                || upper.equals("MOD")
+                || upper.equals("ABS")
+                || upper.equals("CEIL")
+                || upper.equals("FLOOR")
+                || upper.equals("POWER")
+                || upper.equals("SQRT")
+                || upper.equals("SYSDATE")
+                || upper.equals("SYSTIMESTAMP")
+                || upper.equals("CURRENT_DATE")
+                || upper.equals("CURRENT_TIMESTAMP")
+                || upper.equals("ADD_MONTHS")
+                || upper.equals("MONTHS_BETWEEN")
+                || upper.equals("LAST_DAY")
+                || upper.equals("NEXT_DAY")
+                || upper.equals("EXTRACT")
+                || upper.equals("COALESCE")
+                || upper.equals("NULLIF")
+                || upper.equals("GREATEST")
+                || upper.equals("LEAST")
+                || upper.equals("CASE")
+                || upper.equals("CAST")
+                || upper.equals("COUNT")
+                || upper.equals("SUM")
+                || upper.equals("AVG")
+                || upper.equals("MIN")
+                || upper.equals("MAX")
+                || upper.equals("LISTAGG")
+                || upper.equals("ROW_NUMBER")
+                || upper.equals("RANK")
+                || upper.equals("DENSE_RANK")
+                || upper.equals("ROWNUM")
+                || upper.equals("ROWID")
+                || upper.equals("RAISE_APPLICATION_ERROR")
+                || upper.equals("SQL%ROWCOUNT")
+                || upper.equals("SQL%FOUND")
+                || upper.equals("SQL%NOTFOUND")
+                || upper.equals("SQLCODE")
+                || upper.equals("SQLERRM")
+                || upper.equals("USER")
+                || upper.equals("SYS_CONTEXT")
+                || upper.equals("REGEXP_LIKE")
+                || upper.equals("REGEXP_REPLACE")
+                || upper.equals("REGEXP_SUBSTR")
+                || upper.equals("REGEXP_INSTR")
+                || upper.equals("XMLTYPE")
+                || upper.equals("XMLELEMENT")
+                || upper.equals("XMLFOREST")
+                || upper.equals("XMLAGG")
+                || upper.equals("XMLQUERY")
+                || upper.equals("EXISTSNODE")
+                || upper.equals("CONCAT")
+                || upper.equals("TO_CLOB")
+                || upper.equals("TO_BLOB")
+                || upper.equals("TO_BINARY_FLOAT")
+                || upper.equals("TO_BINARY_DOUBLE")
+                || upper.equals("CHARTOROWID")
+                || upper.equals("ROWIDTOCHAR")
+                || upper.equals("HEXTORAW")
+                || upper.equals("RAWTOHEX")
+                || upper.equals("NUMTODSINTERVAL")
+                || upper.equals("NUMTOYMINTERVAL")
+                || upper.equals("INTERVAL")
+                || upper.equals("EMPTY_BLOB")
+                || upper.equals("EMPTY_CLOB")
+                || upper.equals("SIGN")
+                || upper.equals("LOG")
+                || upper.equals("EXP")
+                || upper.equals("DUMP")
+                || upper.equals("VSIZE")
+                || upper.equals("UID")
+                || upper.equals("USERENV")
+                || upper.equals("ORA_HASH")
+                || upper.equals("STANDARD_HASH")
+                || upper.equals("SYS_GUID");
+    }
+
+    /**
+     * BFS queue item.
+     */
+    private static class BfsItem {
+        final String packageName;
+        final String subprogramName;
+        final String schema;          // target schema (standalone objects) for schema-aware visitKey
+        final int depth;
+        final String callerPackage;
+        final String callerObject;
+        final int callLine;
+        final int argCount;           // call-site argument count (for overload resolution); -1 = unknown
+
+        BfsItem(String packageName, String subprogramName, int depth,
+                String callerPackage, String callerObject, int callLine) {
+            this(packageName, subprogramName, null, depth, callerPackage, callerObject, callLine, -1);
+        }
+
+        BfsItem(String packageName, String subprogramName, String schema, int depth,
+                String callerPackage, String callerObject, int callLine) {
+            this(packageName, subprogramName, schema, depth, callerPackage, callerObject, callLine, -1);
+        }
+
+        BfsItem(String packageName, String subprogramName, String schema, int depth,
+                String callerPackage, String callerObject, int callLine, int argCount) {
+            this.packageName = packageName;
+            this.subprogramName = subprogramName;
+            this.schema = schema;
+            this.depth = depth;
+            this.callerPackage = callerPackage;
+            this.callerObject = callerObject;
+            this.callLine = callLine;
+            this.argCount = argCount;
+        }
+    }
+}

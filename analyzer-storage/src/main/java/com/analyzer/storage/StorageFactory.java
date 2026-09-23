@@ -1,0 +1,386 @@
+package com.analyzer.storage;
+
+import com.analyzer.storage.mongo.MongoArtifactStore;
+import com.analyzer.storage.mongo.MongoConnection;
+import com.analyzer.storage.s3.S3ArtifactStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3ClientBuilder;
+
+import java.net.URI;
+import java.nio.file.Path;
+
+/**
+ * Builds the {@link ArtifactStore} for the configured mode.
+ *
+ * <p>One place decides which implementation is in use. Callers receive an {@code ArtifactStore}
+ * and must not be able to tell what backs it — the moment a caller branches on the mode, the
+ * abstraction has failed.
+ */
+public final class StorageFactory {
+
+    private static final Logger log = LoggerFactory.getLogger(StorageFactory.class);
+
+    private StorageFactory() {
+    }
+
+    /**
+     * Where artifacts live, for whichever backend is selected.
+     *
+     * <p>This used to be {@code (StorageMode, Path dataRoot)}, which could not express S3 at all:
+     * a {@link Path} has no room for a bucket, a region, a key prefix, or an endpoint override.
+     * Every call site in the application was ready for object storage while this one type still
+     * forced a local filesystem shape — so the settings carry mode-specific fields, and
+     * {@link #validate()} refuses a combination that cannot work rather than failing later with a
+     * confusing error.
+     *
+     * @param mode      which backend to build
+     * @param dataRoot  LOCAL only: the filesystem root. Ignored in S3 mode.
+     * @param bucket    S3 only: bucket name. Required in S3 mode.
+     * @param prefix    S3 only: key prefix within the bucket, e.g. {@code data}. May be blank,
+     *                  meaning artifacts sit at the bucket root.
+     * @param region    S3 only: region id. Blank means the AWS default provider chain decides.
+     * @param endpoint  S3 only: endpoint override for S3-compatible stores. Blank means real S3.
+     * @param mongoUri  MONGODB and HYBRID: connection string. Required in mongodb/hybrid mode.
+     * @param mongoDatabase MONGODB and HYBRID: database name. Required in mongodb/hybrid mode.
+     * @param inlineThreshold MONGODB and HYBRID: bytes at or below which an artifact lives in the
+     *                  manifest document rather than GridFS. 0 means the default. In HYBRID mode
+     *                  this only governs the Mongo half's own inline-vs-GridFS split; it is
+     *                  unrelated to {@code bigThreshold} below.
+     * @param bigThreshold HYBRID only: bytes at or above which an artifact is routed to S3 instead
+     *                  of MongoDB. 0 means the default ({@code HybridArtifactStore.DEFAULT_BIG_THRESHOLD}).
+     *                  Both {@code bucket}/{@code prefix}/{@code region}/{@code endpoint} (S3) and
+     *                  {@code mongoUri}/{@code mongoDatabase} (Mongo) are populated at once in this
+     *                  mode — the one case where the S3 fields and the Mongo fields are both live
+     *                  on the same {@code Settings} simultaneously.
+     */
+    public record Settings(StorageMode mode, Path dataRoot,
+                           String bucket, String prefix, String region, String endpoint,
+                           String mongoUri, String mongoDatabase, int inlineThreshold,
+                           long bigThreshold) {
+
+        /**
+         * As {@link #local(Path)}, from a plain string.
+         *
+         * <p>Named {@code localAt} rather than overloading {@code local}: an existing caller
+         * passes {@code local(null)}, and adding a {@code String} overload made that call
+         * ambiguous. Overloading on two reference types is a trap whenever null is a legal
+         * argument, and the compiler is right to refuse it.
+         *
+         * <p>Exists so callers outside this module never have to touch {@code java.nio.file}.
+         * {@code DirectFileIoGateTest} fails the build on a single {@code Path.of} outside
+         * {@code analyzer-storage}, and rightly: the rule is what lets the product run against S3
+         * or MongoDB with nothing on local disk. Without this overload, every CLI that accepts a
+         * directory argument would need an allowlist exemption to convert it — an exemption
+         * granted for a reason that has nothing to do with reading files directly.
+         */
+        public static Settings localAt(String dataRoot) {
+            return local(Path.of(dataRoot));
+        }
+
+        public static Settings local(Path dataRoot) {
+            return new Settings(StorageMode.LOCAL, dataRoot, null, null, null, null, null, null, 0, 0);
+        }
+
+        public static Settings s3(String bucket, String prefix, String region, String endpoint) {
+            return new Settings(StorageMode.S3, null, bucket, prefix, region, endpoint, null, null, 0, 0);
+        }
+
+        /**
+         * MongoDB artifact storage.
+         *
+         * <p>{@code prefix} shares the {@code data} default with {@link #s3}, and deliberately: the
+         * manifest {@code _id} is the same {@code ArtifactKey.s3Key(prefix)} string S3 uses, so
+         * identical prefixes mean a mode flip needs no key rewriting, which is what makes PLAN-09's
+         * rollback a property change rather than a migration.
+         *
+         * @param inlineThreshold 0 for {@link com.analyzer.storage.mongo.MongoArtifactStore#DEFAULT_INLINE_THRESHOLD}
+         */
+        public static Settings mongodb(String uri, String database, String prefix, int inlineThreshold) {
+            return new Settings(StorageMode.MONGODB, null, null, prefix, null, null,
+                    uri, database, inlineThreshold, 0);
+        }
+
+        /**
+         * Both backends at once: small artifacts in MongoDB, big ones in S3.
+         *
+         * <p>{@code prefix} is shared between the two halves, the same "identical prefixes need no
+         * key rewriting" reasoning as {@link #mongodb}, doubled: it is what a mode flip from
+         * {@code hybrid} to plain {@code s3} or plain {@code mongodb} (or back) needs to stay
+         * key-compatible with whichever half already holds a given artifact.
+         *
+         * @param inlineThreshold 0 for {@link com.analyzer.storage.mongo.MongoArtifactStore#DEFAULT_INLINE_THRESHOLD}
+         *                        — the Mongo half's own inline-vs-GridFS split, unrelated to
+         *                        {@code bigThreshold}
+         * @param bigThreshold    0 for {@code HybridArtifactStore.DEFAULT_BIG_THRESHOLD} — the
+         *                        Mongo-vs-S3 split
+         */
+        public static Settings hybrid(String bucket, String prefix, String region, String endpoint,
+                                       String mongoUri, String mongoDatabase, int inlineThreshold,
+                                       long bigThreshold) {
+            return new Settings(StorageMode.HYBRID, null, bucket, prefix, region, endpoint,
+                    mongoUri, mongoDatabase, inlineThreshold, bigThreshold);
+        }
+
+        /** Normalised prefix with no leading or trailing slash; empty means the bucket root. */
+        public String normalisedPrefix() {
+            if (prefix == null) return "";
+            return prefix.replaceAll("^/+", "").replaceAll("/+$", "");
+        }
+
+        /**
+         * Fails fast on a configuration that cannot work.
+         *
+         * <p>Misconfigured storage otherwise surfaces as a puzzling error deep inside an analysis
+         * run, long after startup. Better to refuse to boot with a message naming the property.
+         */
+        public Settings validate() {
+            switch (mode) {
+                case LOCAL -> {
+                    if (dataRoot == null) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is local but no data root was given. Set app.data-dir.");
+                    }
+                }
+                case S3 -> {
+                    if (bucket == null || bucket.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is s3 but no bucket was given. Set app.storage.s3.bucket.");
+                    }
+                }
+                case MONGODB -> {
+                    if (mongoUri == null || mongoUri.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is mongodb but no URI was given. Set app.storage.mongodb.uri.");
+                    }
+                    if (mongoDatabase == null || mongoDatabase.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is mongodb but no database was given. "
+                                + "Set app.storage.mongodb.database.");
+                    }
+                    // Refuse at boot rather than at the first artifact that crosses the line. The
+                    // ceiling keeps the manifest document — bounded at threshold + ~200 B — clear
+                    // of the 16 MB BSON limit, and below PLAN-06's 12 MB entity-document soft limit
+                    // so the two guards cannot disagree.
+                    if (inlineThreshold < 0
+                            || inlineThreshold > com.analyzer.storage.mongo.MongoArtifactStore.MAX_INLINE_THRESHOLD) {
+                        throw new IllegalArgumentException(
+                                "app.storage.mongodb.inline-threshold must be between 0 (default) and "
+                                + com.analyzer.storage.mongo.MongoArtifactStore.MAX_INLINE_THRESHOLD
+                                + " bytes, was " + inlineThreshold);
+                    }
+                }
+                case HYBRID -> {
+                    if (bucket == null || bucket.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is hybrid but no bucket was given. Set app.storage.s3.bucket.");
+                    }
+                    if (mongoUri == null || mongoUri.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is hybrid but no Mongo URI was given. "
+                                + "Set app.storage.mongodb.uri.");
+                    }
+                    if (mongoDatabase == null || mongoDatabase.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "Storage mode is hybrid but no Mongo database was given. "
+                                + "Set app.storage.mongodb.database.");
+                    }
+                    if (inlineThreshold < 0
+                            || inlineThreshold > com.analyzer.storage.mongo.MongoArtifactStore.MAX_INLINE_THRESHOLD) {
+                        throw new IllegalArgumentException(
+                                "app.storage.mongodb.inline-threshold must be between 0 (default) and "
+                                + com.analyzer.storage.mongo.MongoArtifactStore.MAX_INLINE_THRESHOLD
+                                + " bytes, was " + inlineThreshold);
+                    }
+                    if (bigThreshold < 0) {
+                        throw new IllegalArgumentException(
+                                "app.storage.hybrid.big-threshold must be >= 0 (0 = default), was "
+                                + bigThreshold);
+                    }
+                }
+            }
+            return this;
+        }
+    }
+
+    /**
+     * Builds settings from the same inputs a CLI has: a mode string and a local root, with S3
+     * details taken from the environment.
+     *
+     * <p>Entry points outside Spring used to call {@code Settings.local(...)} directly, which
+     * pinned them to the filesystem no matter what {@code app.storage.mode} said — so a CLI run
+     * would quietly write locally while the web app wrote to the bucket. Both now resolve the mode
+     * through here.
+     *
+     * @param modeProp  mode string; blank means local
+     * @param localRoot filesystem root, used only in local mode
+     */
+    public static Settings settingsFor(String modeProp, Path localRoot) {
+        StorageMode mode = StorageMode.parse(modeProp);
+        return switch (mode) {
+            case LOCAL -> Settings.local(localRoot);
+            case S3 -> Settings.s3(env("APP_STORAGE_S3_BUCKET", "app.storage.s3.bucket", null),
+                                   env("APP_STORAGE_S3_PREFIX", "app.storage.s3.prefix", "data"),
+                                   env("APP_STORAGE_S3_REGION", "app.storage.s3.region", null),
+                                   env("APP_STORAGE_S3_ENDPOINT", "app.storage.s3.endpoint", null));
+            case MONGODB -> Settings.mongodb(
+                    env("APP_STORAGE_MONGODB_URI", "app.storage.mongodb.uri", null),
+                    env("APP_STORAGE_MONGODB_DATABASE", "app.storage.mongodb.database", null),
+                    env("APP_STORAGE_MONGODB_PREFIX", "app.storage.mongodb.prefix", "data"),
+                    intEnv("APP_STORAGE_MONGODB_INLINE_THRESHOLD",
+                           "app.storage.mongodb.inline-threshold", 0));
+            case HYBRID -> Settings.hybrid(
+                    env("APP_STORAGE_S3_BUCKET", "app.storage.s3.bucket", null),
+                    env("APP_STORAGE_S3_PREFIX", "app.storage.s3.prefix", "data"),
+                    env("APP_STORAGE_S3_REGION", "app.storage.s3.region", null),
+                    env("APP_STORAGE_S3_ENDPOINT", "app.storage.s3.endpoint", null),
+                    env("APP_STORAGE_MONGODB_URI", "app.storage.mongodb.uri", null),
+                    env("APP_STORAGE_MONGODB_DATABASE", "app.storage.mongodb.database", null),
+                    intEnv("APP_STORAGE_MONGODB_INLINE_THRESHOLD",
+                           "app.storage.mongodb.inline-threshold", 0),
+                    longEnv("APP_STORAGE_HYBRID_BIG_THRESHOLD",
+                           "app.storage.hybrid.big-threshold", 0));
+        };
+    }
+
+    /** As {@link #env}, for the one numeric setting. A non-numeric value is a boot failure. */
+    private static int intEnv(String envVar, String sysProp, int fallback) {
+        String v = env(envVar, sysProp, null);
+        if (v == null) return fallback;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(sysProp + " must be an integer byte count, was '" + v + "'");
+        }
+    }
+
+    /** As {@link #intEnv}, for a byte count that may exceed {@code int} range. */
+    private static long longEnv(String envVar, String sysProp, long fallback) {
+        String v = env(envVar, sysProp, null);
+        if (v == null) return fallback;
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(sysProp + " must be an integer byte count, was '" + v + "'");
+        }
+    }
+
+    /** System property wins over environment variable, mirroring Spring's own precedence. */
+    private static String env(String envVar, String sysProp, String fallback) {
+        String v = System.getProperty(sysProp);
+        if (v == null || v.isBlank()) v = System.getenv(envVar);
+        return (v == null || v.isBlank()) ? fallback : v;
+    }
+
+    /**
+     * Every store is wrapped in {@link CredentialGuardStore}. It is applied here, once, rather
+     * than left to each backend, so a future implementation cannot be added without it.
+     */
+    public static ArtifactStore create(Settings settings) {
+        return create(settings, null);
+    }
+
+    /**
+     * As {@link #create(Settings)}, reusing a connection pool the caller already owns.
+     *
+     * <p>Only {@code mongodb} mode uses it, and only because the Mongo store and the Mongo
+     * repository are chosen by two independent properties and can both be on: sharing one
+     * {@link MongoConnection} is what keeps that configuration to a single pool. A null connection —
+     * every non-Spring entry point, and every non-Mongo mode — makes this identical to
+     * {@link #create(Settings)}.
+     *
+     * <p>The {@link CredentialGuardStore} wrapper is applied here, once, for every mode. It is not
+     * left to each backend, so a future implementation cannot be added without it: C4 says
+     * {@code plsql-config.yaml} and {@code plsql-env-config.yaml} hold plaintext production
+     * passwords and must never reach shared storage, and a Mongo collection is shared storage in
+     * exactly the way a bucket is.
+     */
+    public static ArtifactStore create(Settings settings, MongoConnection mongoConnection) {
+        return new CredentialGuardStore(createBackend(settings.validate(), mongoConnection));
+    }
+
+    private static ArtifactStore createBackend(Settings settings, MongoConnection mongoConnection) {
+        return switch (settings.mode()) {
+            case LOCAL -> {
+                Path root = settings.dataRoot().toAbsolutePath().normalize();
+                log.info("Storage mode: LOCAL — files under {}", root);
+                yield new LocalArtifactStore(root);
+            }
+            case S3 -> {
+                String p = settings.normalisedPrefix();
+                log.info("Storage mode: S3 — s3://{}/{}", settings.bucket(), p);
+                yield new S3ArtifactStore(buildClient(settings), settings.bucket(), p);
+            }
+            case MONGODB -> {
+                String p = settings.normalisedPrefix();
+                int threshold = settings.inlineThreshold() > 0
+                        ? settings.inlineThreshold()
+                        : MongoArtifactStore.DEFAULT_INLINE_THRESHOLD;
+                MongoConnection conn = mongoConnection != null && mongoConnection.configured()
+                        ? mongoConnection
+                        : MongoConnection.open(settings.mongoUri(), settings.mongoDatabase());
+                MongoArtifactStore store = new MongoArtifactStore(
+                        conn.database(), p, threshold, "artifacts", 100_000L);
+                store.ensureIndexes();
+                // The URI is logged with any inline credentials redacted. Nothing else about a Mongo
+                // connection string is secret, and an operator debugging a cutover needs to see
+                // which host and database they actually connected to.
+                log.info("Storage mode: MONGODB — {}/{} prefix='{}' inline-threshold={} bytes",
+                        conn.redactedUri(), settings.mongoDatabase(), p, threshold);
+                yield store;
+            }
+            case HYBRID -> {
+                String p = settings.normalisedPrefix();
+                int inlineThreshold = settings.inlineThreshold() > 0
+                        ? settings.inlineThreshold()
+                        : MongoArtifactStore.DEFAULT_INLINE_THRESHOLD;
+                long bigThreshold = settings.bigThreshold() > 0
+                        ? settings.bigThreshold()
+                        : com.analyzer.storage.hybrid.HybridArtifactStore.DEFAULT_BIG_THRESHOLD;
+                MongoConnection conn = mongoConnection != null && mongoConnection.configured()
+                        ? mongoConnection
+                        : MongoConnection.open(settings.mongoUri(), settings.mongoDatabase());
+                MongoArtifactStore mongoStore = new MongoArtifactStore(
+                        conn.database(), p, inlineThreshold, "artifacts", 100_000L);
+                mongoStore.ensureIndexes();
+                S3ArtifactStore s3Store = new S3ArtifactStore(buildClient(settings), settings.bucket(), p);
+                log.info("Storage mode: HYBRID — mongo={}/{} s3=s3://{}/{} prefix='{}' "
+                                + "inline-threshold={} bytes big-threshold={} bytes",
+                        conn.redactedUri(), settings.mongoDatabase(), settings.bucket(), p, p,
+                        inlineThreshold, bigThreshold);
+                yield new com.analyzer.storage.hybrid.HybridArtifactStore(mongoStore, s3Store, bigThreshold);
+            }
+        };
+    }
+
+    /**
+     * Builds the SDK client.
+     *
+     * <p>Credentials come from {@link DefaultCredentialsProvider} and nowhere else — there is
+     * deliberately no property for an access key, so no secret can land in a config file this
+     * application writes or serves, and none is ever logged.
+     *
+     * <p>The synchronous Apache HTTP client is selected explicitly. The SDK would otherwise pick
+     * whatever is on the classpath, and a Spring Boot fat jar already carries a Netty that the
+     * async client would clash with.
+     */
+    private static S3Client buildClient(Settings settings) {
+        S3ClientBuilder b = S3Client.builder()
+                .httpClientBuilder(ApacheHttpClient.builder())
+                .credentialsProvider(DefaultCredentialsProvider.create());
+        if (settings.region() != null && !settings.region().isBlank()) {
+            b.region(Region.of(settings.region().trim()));
+        }
+        if (settings.endpoint() != null && !settings.endpoint().isBlank()) {
+            // S3-compatible stores (MinIO, LocalStack) address buckets by path, not by
+            // virtual-host subdomain.
+            b.endpointOverride(URI.create(settings.endpoint().trim()))
+             .forcePathStyle(true);
+        }
+        return b.build();
+    }
+}

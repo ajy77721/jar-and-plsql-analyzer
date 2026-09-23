@@ -1,0 +1,615 @@
+/* ==========================================================================
+   MongoDB Theme — modelled on MongoDB Compass / LeafyGreen.
+
+   DESIGN RULE, read this before adding a token:
+   Compass reads as calm because it uses very FEW fills. Panels are
+   separated by a 1px border, not by a different background. So:
+
+       3 surfaces   page / panel / sunken
+       3 text tones primary / secondary / muted
+       1 border     everything is separated by this one line colour
+       green        used sparingly — primary action + selection only
+
+   Do NOT add a fourth surface or a second border colour. If two areas need to
+   read as different, give them a border, not a new fill. Every extra fill is
+   what made this UI look patchy before.
+
+   Layer 1 (--mdb-*)  raw LeafyGreen ramp, theme-invariant, never used directly.
+   Layer 2 (semantic) what component CSS uses; re-pointed under [data-theme=dark].
+   ========================================================================== */
+
+:root {
+    /* ---- Layer 1: brand ramp (theme-invariant) ---------------------------- */
+    --mdb-green-spring:     #00ED64;
+    --mdb-green-base:       #00684A;
+    --mdb-green-evergreen:  #023430;
+    --mdb-green-dark:       #00593F;
+    --mdb-green-light1:     #71F6BA;
+    --mdb-green-light2:     #C0FAE6;
+    --mdb-green-light3:     #E3FCF7;
+
+    --mdb-black:            #001E2B;
+    --mdb-gray-dark3:       #112733;
+    --mdb-gray-dark2:       #1C2D38;
+    --mdb-gray-dark1:       #3D4F58;
+    --mdb-gray-base:        #5C6C75;
+    --mdb-gray-light1:      #889397;
+    --mdb-gray-light2:      #C1C7C6;
+    --mdb-gray-light3:      #E8EDEB;
+    --mdb-white:            #FFFFFF;
+
+    --mdb-red-base:         #DB3030;
+    --mdb-red-dark2:        #970606;
+    --mdb-red-light2:       #FFCDC7;
+    --mdb-red-light3:       #FFEAE5;
+
+    --mdb-yellow-base:      #FFC010;
+    --mdb-yellow-dark2:     #944F01;
+    --mdb-yellow-light2:    #FFEC9E;
+    --mdb-yellow-light3:    #FEF7DB;
+
+    --mdb-blue-base:        #016BF8;
+    --mdb-blue-dark2:       #083C90;
+    --mdb-blue-light2:      #C3E7FE;
+    --mdb-blue-light3:      #E1F7FF;
+
+    --mdb-purple-base:      #5E0C9E;
+    --mdb-purple-light2:    #F1D4FD;
+    --mdb-purple-light3:    #F9EBFF;
+
+    /* ======================================================================
+       Layer 2 — LIGHT (default). Compass look.
+       ====================================================================== */
+
+    /* ---- THE THREE SURFACES. There are no others. ------------------------
+       Reverted to real Compass values (verified against actual Compass screenshots the user
+       provided) after a brief "4 colours only, all-gray" experiment last turn turned out to
+       contradict what real Compass actually does (primary buttons ARE green there, not gray —
+       see --accent below). */
+    --bg:                   #F9FBFA;   /* 1. page canvas                     */
+    --bg-card:              #FFFFFF;   /* 2. panels, cards, modals, top bar  */
+    --bg-inset:             #F1F4F3;   /* 3. sunken: code, stripes, wells    */
+
+    /* Aliases — deliberately collapsed onto the three above, NOT new fills. */
+    --bg-elevated:          var(--bg-card);
+    --bg-subtle:            var(--bg-inset);
+    --bg-top-bar:           var(--bg-card);
+    --bg-hover:             var(--bg-inset);
+    --bg-selected:          var(--mdb-green-light3);
+    --bg-overlay:           rgba(0, 30, 43, 0.45);
+
+    /* ---- Chrome (sidebar / nav) — light, like Compass --------------------
+       Previously dark; that dark leaked into 470 non-sidebar usages and was
+       the main source of the patchy look. Now it simply IS the panel surface. */
+    --sidebar-bg:           var(--bg-card);
+    --sidebar-hover:        var(--bg-inset);
+    --sidebar-text:         var(--text);
+    --sidebar-muted:        var(--text-muted);
+    --sidebar-border:       var(--border);
+    --sidebar-active:       var(--accent);
+    --sidebar-active-bg:    var(--mdb-green-light3);
+    --sidebar-active-text:  var(--accent);
+
+    /* ---- THE THREE TEXT TONES -------------------------------------------
+       All three clear WCAG AA (4.5:1) on all three surfaces. gray-light1
+       (#889397) is deliberately NOT used for copy — it is a placeholder grey
+       and only reaches ~3:1 here, and --text-muted alone has ~890 usages. */
+    --text:                 var(--mdb-black);       /* headings, body       */
+    --text-secondary:       var(--mdb-gray-dark1);  /* labels, sub-copy     */
+    --text-muted:           var(--mdb-gray-base);   /* hints, meta, counts  */
+    --text-disabled:        var(--mdb-gray-light1); /* truly disabled only  */
+    --text-inverse:         var(--mdb-white);       /* ONLY on solid colour */
+    --text-link:            var(--accent);
+
+    /* ---- THE ONE BORDER -------------------------------------------------- */
+    --border:               var(--mdb-gray-light3);
+    --border-subtle:        var(--border);
+    --border-strong:        var(--mdb-gray-light2);  /* inputs only         */
+    --border-focus:         var(--accent);
+
+    /* ---- Accent — sparing: primary action + selection --------------------
+       Real Compass: primary buttons (Save/Create/Run/Find) ARE green; only secondary/utility
+       buttons (Export/Refresh/Options/Explain) are the neutral gray-with-border look. This is
+       that green, restored after last turn's "everything gray" experiment turned out to not match
+       real Compass. Secondary buttons get their gray look from `.btn` itself (bg-card/border), not
+       from this token. */
+    --accent:               var(--mdb-green-base);
+    --accent-hover:         var(--mdb-green-dark);
+    --accent-active:        var(--mdb-green-evergreen);
+    --accent-subtle:        var(--mdb-green-light3);
+    --accent-on:            var(--mdb-white);
+    --focus-ring:           rgba(0, 104, 74, 0.35);
+
+    /* ---- Status — solid (icons, dots, solid chips) ----------------------- */
+    --green:                var(--mdb-green-base);
+    --red:                  var(--mdb-red-base);
+    --orange:               var(--mdb-yellow-dark2);
+    --yellow:               var(--mdb-yellow-base);
+    --blue:                 var(--mdb-blue-base);
+    --purple:               var(--mdb-purple-base);
+    --teal:                 #0F766E;
+    --pink:                 #C2268A;
+
+    /* Ink for solid saturated fills. --text-inverse (white in light / near-black in
+       dark) clears 4.5:1 on --accent/--green/--red/--blue/--orange/--purple/--teal/
+       --pink in BOTH themes, so it is the ink for those. --yellow is the exception:
+       it is light in both themes (#FFC010 / #FFEC9E), so white ink on it is 1.6:1.
+       --on-yellow is therefore dark in both themes. Measured: 10.5:1 light,
+       14.5:1 dark. Do not use --text-inverse on a yellow fill. */
+    --on-yellow:            var(--mdb-black);
+
+    /* Hover/press wash for controls that sit ON a saturated fill (e.g. the icon
+       buttons in the chat header, which sits on the accent gradient). --bg-hover
+       is a page-surface tint and disappears there, so this is the only correct
+       fill for that case. Light fill -> lighten; dark fill -> darken. */
+    --wash-on-solid:        rgba(255, 255, 255, 0.22);
+
+    /* ---- Status — badges: pale tint + accessible ink --------------------- */
+    --badge-green-bg:       var(--mdb-green-light3);
+    --badge-green:          var(--mdb-green-base);
+    --badge-blue-bg:        var(--mdb-blue-light3);
+    --badge-blue:           var(--mdb-blue-dark2);
+    --badge-orange-bg:      var(--mdb-yellow-light3);
+    --badge-orange:         var(--mdb-yellow-dark2);
+    --badge-yellow-bg:      var(--mdb-yellow-light3);
+    --badge-yellow:         var(--mdb-yellow-dark2);
+    --badge-red-bg:         var(--mdb-red-light3);
+    --badge-red:            var(--mdb-red-dark2);
+    --badge-purple-bg:      var(--mdb-purple-light3);
+    --badge-purple:         var(--mdb-purple-base);
+    --badge-teal-bg:        var(--mdb-green-light2);
+    --badge-teal:           #0F766E;
+    --badge-gray-bg:        var(--bg-inset);
+    --badge-gray:           var(--text-secondary);
+
+    /* ---- Categorical series (graphs, charts, node types) ----------------- */
+    --cat-1:                #00684A;
+    --cat-2:                #016BF8;
+    --cat-3:                #944F01;
+    --cat-4:                #5E0C9E;
+    --cat-5:                #0F766E;
+    --cat-6:                #B03A2E;
+    --cat-7:                #3D4F58;
+    --cat-8:                #C2268A;
+
+    /* ---- Code / syntax --------------------------------------------------- */
+    --code-bg:              var(--bg-inset);
+    --code-text:            var(--text);
+    --code-keyword:         var(--mdb-purple-base);
+    --code-string:          var(--mdb-green-base);
+    --code-comment:         var(--text-muted);
+    --code-number:          var(--mdb-yellow-dark2);
+
+    /* ---- Elevation — RM is flat; shadows only for true overlays ---------- */
+    --shadow-sm:            0 1px 2px rgba(0, 30, 43, 0.06);
+    --shadow:               0 2px 6px rgba(0, 30, 43, 0.08);
+    --shadow-lg:            0 8px 24px rgba(0, 30, 43, 0.12);
+    /* Directional variants. The three tokens above all cast downward, so panels
+       docked to the bottom edge (log viewer, sidebar progress) and drawers that
+       slide in from the right (chat) had to hardcode their own rgba(0,0,0,...)
+       — which then stayed a light-theme shadow in dark. These two keep them
+       theme-aware. */
+    --shadow-up:            0 -8px 24px rgba(0, 30, 43, 0.12);
+    --shadow-left:          -8px 0 24px rgba(0, 30, 43, 0.12);
+
+    /* ---- Legacy aliases — referenced but never defined before ------------ */
+    --bg-primary:    var(--bg-card);
+    --bg-secondary:  var(--bg-inset);
+    --bg-tertiary:   var(--bg-inset);
+    --bg-alt:        var(--bg-inset);
+    --text-primary:  var(--text);
+    --text-dim:      var(--text-muted);
+    --border-color:  var(--border);
+    --hover:         var(--bg-hover);
+
+    /* Legacy aliases still referenced by jar/style.css and jar/css/chatbox.css.
+       These were used 79 times WITHOUT a fallback while never being declared, so every
+       affected declaration was invalid and the element silently inherited whatever was
+       above it — cards with no background, meta text in body colour instead of muted.
+       That is the "mixed up" appearance. Defining them here fixes all 79 at once and keeps
+       them theme-aware in both light and dark. */
+    --card-bg:       var(--bg-card);
+    --muted:         var(--text-muted);
+    --surface:       var(--bg-elevated);
+
+    /* ---- Non-colour tokens ----------------------------------------------- */
+    --radius-sm:            4px;
+    --radius:               6px;
+    --radius-md:            8px;
+    --radius-lg:            10px;
+    --radius-xl:            12px;
+    --font-mono:            'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    --font-sans:            -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --transition:           0.15s;
+}
+
+/* ==========================================================================
+   DARK — same discipline: 3 surfaces, 3 text tones, 1 border.
+   ========================================================================== */
+
+[data-theme="dark"] {
+    --bg:                   var(--mdb-black);      /* 1. page canvas        */
+    --bg-card:              var(--mdb-gray-dark3); /* 2. panels             */
+    --bg-inset:             #06212E;               /* 3. sunken             */
+
+    --bg-elevated:          var(--bg-card);
+    --bg-subtle:            var(--bg-inset);
+    --bg-top-bar:           var(--bg-card);
+    --bg-hover:             rgba(232, 237, 235, 0.07);
+    --bg-selected:          rgba(0, 237, 100, 0.14);
+    --bg-overlay:           rgba(0, 12, 18, 0.65);
+
+    --sidebar-bg:           var(--bg-card);
+    --sidebar-hover:        var(--bg-hover);
+    --sidebar-text:         var(--text);
+    --sidebar-muted:        var(--text-muted);
+    --sidebar-border:       var(--border);
+    --sidebar-active:       var(--accent);
+    --sidebar-active-bg:    rgba(0, 237, 100, 0.14);
+    --sidebar-active-text:  var(--accent);
+
+    --text:                 var(--mdb-gray-light3);
+    --text-secondary:       var(--mdb-gray-light2);
+    --text-muted:           var(--mdb-gray-light1);
+    --text-disabled:        var(--mdb-gray-base);
+    --text-inverse:         var(--mdb-black);
+    --text-link:            var(--accent);
+
+    --border:               var(--mdb-gray-dark1);
+    --border-subtle:        var(--border);
+    --border-strong:        var(--mdb-gray-base);
+    --border-focus:         var(--accent);
+
+    --accent:               var(--mdb-green-spring);
+    --accent-hover:         var(--mdb-green-light1);
+    --accent-active:        var(--mdb-green-light2);
+    --accent-subtle:        rgba(0, 237, 100, 0.14);
+    --accent-on:            var(--mdb-black);
+    --focus-ring:           rgba(0, 237, 100, 0.45);
+
+    --green:                var(--mdb-green-spring);
+    --red:                  #FF6960;
+    --orange:               var(--mdb-yellow-base);
+    --yellow:               var(--mdb-yellow-light2);
+    --blue:                 #0498EC;
+    --purple:               #CC8FF5;
+    --teal:                 #2DC4B2;
+    --pink:                 #F177C4;
+    --on-yellow:            var(--mdb-black);  /* see light block for rationale */
+    /* Dark theme's saturated fills are LIGHT (spring green, etc.), so the wash
+       that sits on them must darken, not lighten. See light block. */
+    --wash-on-solid:        rgba(0, 30, 43, 0.22);
+
+    --badge-green-bg:       rgba(0, 237, 100, 0.15);
+    --badge-green:          var(--mdb-green-light1);
+    --badge-blue-bg:        rgba(4, 152, 236, 0.18);
+    --badge-blue:           #7FD3FF;
+    --badge-orange-bg:      rgba(255, 192, 16, 0.15);
+    --badge-orange:         var(--mdb-yellow-light2);
+    --badge-yellow-bg:      rgba(255, 192, 16, 0.15);
+    --badge-yellow:         var(--mdb-yellow-light2);
+    --badge-red-bg:         rgba(255, 105, 96, 0.15);
+    --badge-red:            #FFA9A2;
+    --badge-purple-bg:      rgba(204, 143, 245, 0.15);
+    --badge-purple:         #E3BFFA;
+    --badge-teal-bg:        rgba(45, 196, 178, 0.15);
+    --badge-teal:           #7FE3D6;
+    --badge-gray-bg:        rgba(232, 237, 235, 0.08);
+    --badge-gray:           var(--mdb-gray-light2);
+
+    --cat-1:                #00ED64;
+    --cat-2:                #0498EC;
+    --cat-3:                #FFC010;
+    --cat-4:                #CC8FF5;
+    --cat-5:                #2DC4B2;
+    --cat-6:                #FF6960;
+    --cat-7:                #C1C7C6;
+    --cat-8:                #F177C4;
+
+    --code-bg:              var(--bg-inset);
+    --code-text:            var(--text);
+    --code-keyword:         #CC8FF5;
+    --code-string:          var(--mdb-green-light1);
+    --code-comment:         var(--text-muted);
+    --code-number:          var(--mdb-yellow-base);
+
+    --shadow-sm:            0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow:               0 2px 6px rgba(0, 0, 0, 0.45);
+    --shadow-lg:            0 8px 24px rgba(0, 0, 0, 0.55);
+    --shadow-up:            0 -8px 24px rgba(0, 0, 0, 0.55);
+    --shadow-left:          -8px 0 24px rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]):not([data-theme="dark"]) { color-scheme: dark; }
+}
+
+/* ==========================================================================
+   Theme toggle button (injected by shared/theme-toggle.js)
+   ========================================================================== */
+
+.mdb-theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background var(--transition), color var(--transition),
+                border-color var(--transition);
+}
+
+.mdb-theme-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.mdb-theme-toggle:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
+.mdb-theme-toggle--floating {
+    /* Third slot (after sidebar-toggle, help-btn) in the shared bottom-left action cluster:
+     * sidebar-toggle, help, theme, chatbot — grouped together bottom-left on every page
+     * instead of docking into a page's top bar (which put it top-right on parser/plsql
+     * only). TASK-REGISTRY §251 built the sidebar-toggle slot this comment anticipated,
+     * so theme moved from the 2nd slot (84px) to the 3rd (140px). */
+    position: fixed;
+    left: 140px;
+    bottom: 28px;
+    z-index: 1200;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    box-shadow: var(--shadow-lg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mdb-theme-toggle { transition: none; }
+}
+
+/* ==========================================================================
+   Shared top-right action cluster: export + log, grouped together, opposite
+   the bottom-left cluster (sidebar-toggle, help, theme) and the chatbot (which
+   floats alone bottom-right). TASK-REGISTRY §274 moved this cluster from
+   bottom-right to top-right per explicit user direction.
+
+   .global-export-fab is the page's existing "Export" button (parser/plsql topbar) pulled
+   out of the top bar and floated next to the shared log FAB (../shared/log-fab.css, itself
+   floated top-right) instead of sitting inline in the page chrome.
+
+   .global-logs-hidden is a page's own inline "Logs" button, hidden because every page
+   already loads the shared log FAB, which covers the same job — this avoids two different
+   log viewers/buttons on one page.
+   ========================================================================== */
+.global-export-fab {
+    position: fixed;
+    right: 92px;
+    /* TASK-REGISTRY §275 — top now driven by shared/floating-fab-position.js, which measures
+       the real topbar/detail-header content on each page and sets this custom property; the
+       60px fallback below only applies before that script's first measurement runs (or on a
+       screen with no header container, e.g. the home screen). */
+    top: var(--fab-top-offset, 60px);
+    z-index: 1190;
+    height: 40px;
+    padding: 0 16px;
+    border-radius: 20px;
+}
+
+/* TASK-REGISTRY §276 — floating (position:fixed) kept finding new content to collide with no
+ * matter how the offset was computed (§274 hardcoded, §275 measured at runtime). Reparented into
+ * the header's own normal document flow instead (shared/inline-fab.js); this class un-fixes the
+ * position so the browser lays out surrounding header content around it, the way any other
+ * button in that row already does — collision becomes structurally impossible, not just unlikely.
+ */
+.fab-inline.global-export-fab {
+    position: static;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 8px;
+    vertical-align: middle;
+    box-shadow: var(--shadow-lg);
+}
+
+.global-logs-hidden {
+    display: none !important;
+}
+
+/*
+ * In-flight action controls (shared/ui-busy.js).
+ *
+ * `el.disabled = true` only works on real form controls, and several action "buttons" in this UI
+ * are `<span class="btn">` with an inline onclick — assigning `.disabled` to a span does nothing
+ * and the click still fires. This class is what actually makes those inert, so it must accompany
+ * every busy state rather than being decoration.
+ */
+/* Keyed on .is-busy only, never on [aria-busy]: aria-busy is legitimate on a loading *container*,
+   and making containers pointer-events:none would break scrolling inside a loading panel. */
+.is-busy {
+    pointer-events: none;
+    opacity: 0.6;
+    cursor: progress;
+}
+
+/* Truncation disclosure (JA.utils.capNote). A cap the reader cannot see is the same defect as the
+   silent server-side truncation it comes from. */
+.cap-note {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-left: 6px;
+    white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Truncation notices on the call-graph renderers.
+ *
+ * Deliberately prominent. A graph trimmed to fit that looks identical to a complete one is a wrong
+ * answer, not a partial one; the whole value of capping the renderers is that the reader is told.
+ * Lives here rather than in a per-page stylesheet because all three renderers use the same class
+ * and only this file is loaded by every page that has one.
+ * --------------------------------------------------------------------------------------------- */
+.cg-truncated {
+    margin: 10px 0;
+    padding: 8px 12px;
+    border-left: 3px solid #d08700;
+    background: rgba(208, 135, 0, 0.10);
+    border-radius: 3px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+/* ==========================================================================
+   Global Search find-toolbar (Notepad++-style: Match case / Whole word /
+   Regex), shared by jar/js/search.js, plsql/js/search.js, parser/js/search.js.
+   One definition so all three apps' toggle buttons look identical.
+   ========================================================================== */
+.srch-toggle-btn {
+    min-width: 30px;
+    height: 30px;
+    padding: 0 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+.srch-toggle-btn:hover { background: var(--bg-hover); }
+.srch-toggle-btn.active {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* ==========================================================================
+   Global Search results table (jar/plsql/parser js/search.js) — explicit
+   4-segment layout per user direction: (1) search textbar, (2) pagination
+   detail bar as its own row, (3+4) a real fixed-width table so columns never
+   shift width based on content and the Matched column gets the most room.
+   ========================================================================== */
+/* Fully self-contained — search.js no longer applies `.to-table` (a shared class used by
+ * several OTHER, unrelated list views per app, each with its own table-layout:auto styling)
+ * or `.lp-item` (a shared class used by the sidebar's flex-row list, display:flex) to its
+ * table/rows. Both were found, live, to silently collide with and break this table's fixed
+ * column layout when the OTHER page's rule happened to load after this one. Base table +
+ * row styling that used to come from `.to-table`/`.lp-item` is ported in below under these
+ * dedicated, search-only class names instead, so no other page's CSS can ever touch this. */
+/* Explicit user direction: rows should be horizontally SCROLLABLE to read full text, not
+ * ellipsis-truncated. table-layout:auto (not fixed) lets each column grow to fit its real
+ * content — including a long "Matched" snippet — up to the natural content width, so once that
+ * exceeds the modal's available width, the table itself becomes wider than its scroll container
+ * (`overflow:auto` on the wrapping div in `_ensureOverlay`) and a real horizontal scrollbar
+ * appears. The col widths below are MIN width hints only (auto layout treats them as a floor,
+ * not a cap), keeping narrow columns from collapsing to their header text width while still
+ * letting Matched grow freely.
+ */
+.srch-table {
+    table-layout: auto;
+    width: 100%;
+    min-width: 900px;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.srch-table thead {
+    background: var(--bg-top-bar, var(--bg-card));
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+.srch-table th {
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.srch-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    white-space: nowrap; /* no wrap/ellipsis — full text stays on one line, scroll to read it */
+}
+.srch-table col.srch-col-type   { min-width: 90px; }
+.srch-table col.srch-col-name   { min-width: 200px; }
+.srch-table col.srch-col-schema { min-width: 90px; }
+.srch-table col.srch-col-line   { min-width: 60px; }
+.srch-table col.srch-col-matched{ min-width: 460px; }
+/* Replaces `.lp-item` on result <tr>s: plain table-row semantics + hover, nothing else. */
+.srch-row { cursor: pointer; }
+.srch-row:hover td { background: var(--bg-hover); }
+.srch-row.active td { background: var(--accent-subtle); }
+
+/* Real bug, found live: Parser's search pager rendered completely unstyled (raw browser
+ * buttons/select, everything jammed onto one line — "277 items 50/page «‹123456›") because
+ * `shared/tableFramework.js`'s generic `_renderPager` markup (`.page-info`/`.page-size`/
+ * `.page-btns`) was only ever styled under `.pager` (plsql/jar's per-app CSS) — Parser's own
+ * per-app pagination CSS uses a DIFFERENT class name for this, `.pagination-bar`, for its other
+ * (non-search) tables, so `.pager` had no matching rule there at all. Styling the pager fully
+ * under `.srch-pagerbar` here — the dedicated, search-only class already added to the pager's
+ * markup in all 3 apps — means the search pager never again depends on whichever per-app class
+ * name happens to exist (or not) for other, unrelated tables. */
+.srch-pagerbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.srch-pagerbar .page-info { font-weight: 600; }
+.srch-pagerbar .page-size select {
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+}
+.srch-pagerbar .page-btns { display: flex; gap: 2px; align-items: center; }
+.srch-pagerbar .page-btns button {
+    min-width: 28px;
+    height: 24px;
+    font-size: 11px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.srch-pagerbar .page-btns button:hover:not(:disabled) { background: var(--accent); color: var(--text-inverse); }
+.srch-pagerbar .page-btns button:disabled { opacity: 0.3; cursor: default; }
+.srch-pagerbar .page-btns button.active { background: var(--accent); color: var(--text-inverse); font-weight: 700; border-color: var(--accent); }
+
+/* ==========================================================================
+   Table "kind" badges (actual table vs. SQL Server temp table / table
+   variable) — Tables tab + Global Search results, PA.classifyTableKind
+   (shared/tableFramework.js). Small pill, not a big fill — same discipline
+   as every other status badge in this app.
+   ========================================================================== */
+.kind-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    vertical-align: middle;
+    white-space: nowrap;
+}
+.kind-badge.kind-local-temp  { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.kind-badge.kind-global-temp { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.kind-badge.kind-variable    { background: var(--badge-blue-bg);   color: var(--badge-blue); }

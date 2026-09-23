@@ -1,0 +1,147 @@
+.cfg-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg-overlay); z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+}
+.cfg-modal {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 1240px; max-width: 96vw; height: 86vh;
+    display: flex; flex-direction: column;
+    box-shadow: var(--shadow-lg);
+}
+.cfg-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.cfg-header h2 { font-size: 15px; font-weight: 700; color: var(--accent); margin: 0; }
+.cfg-body {
+    display: flex; flex: 1; min-height: 0; overflow: hidden; gap: 0;
+}
+.cfg-panel { padding: 12px; overflow-y: auto; }
+.cfg-col-projects {
+    width: 220px; border-right: 1px solid var(--border); flex-shrink: 0;
+    background: var(--bg);
+}
+.cfg-col-envs {
+    width: 260px; border-right: 1px solid var(--border); flex-shrink: 0;
+}
+.cfg-col-detail { flex: 1; }
+
+.cfg-section-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px; font-size: 12px; font-weight: 700; color: var(--text-muted);
+}
+.cfg-empty {
+    text-align: center; padding: 40px 20px;
+    color: var(--text-muted); font-size: 12px;
+}
+
+.cfg-item {
+    position: relative; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 6px; cursor: pointer;
+    transition: border-color var(--transition);
+}
+.cfg-item:hover { border-color: var(--accent); }
+.cfg-item.active { border-color: var(--accent); background: var(--bg-hover); }
+.cfg-item-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.cfg-item-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.cfg-item-meta { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+.cfg-del {
+    position: absolute; top: 6px; right: 6px; background: none; border: none;
+    font-size: 12px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
+    color: var(--text-muted); padding: 2px 4px; border-radius: var(--radius-sm);
+}
+.cfg-item:hover .cfg-del { opacity: 1; }
+.cfg-del:hover { color: var(--badge-red); background: var(--badge-red-bg); }
+.cfg-zone {
+    font-size: 10px; padding: 1px 6px; border-radius: var(--radius-md);
+    background: var(--badge-teal-bg); color: var(--badge-teal);
+    font-weight: 600;
+}
+
+.cfg-conn-list { display: flex; flex-direction: column; gap: 6px; }
+.cfg-conn-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; transition: border-color var(--transition);
+}
+.cfg-conn-item:hover { border-color: var(--accent); }
+/* allow the left block (name + full connection string) to shrink & wrap,
+   and keep the right-side badges from being pushed off / truncating the URL */
+.cfg-conn-item > div:first-child { min-width: 0; flex: 1; }
+.cfg-conn-item > div:first-child > div { min-width: 0; }
+.cfg-conn-item .cfg-item-desc {
+    white-space: normal; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;
+}
+.cfg-conn-item > div:last-child { flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.cfg-conn-status {
+    width: 22px; height: 22px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0;
+}
+.cfg-conn-status.ok { background: var(--badge-green-bg); color: var(--green); }
+.cfg-conn-status.untested { background: var(--badge-gray-bg); color: var(--badge-gray); }
+.cfg-conn-type-badge {
+    font-size: 9px; padding: 1px 6px; border-radius: var(--radius-sm); font-weight: 600;
+    background: var(--badge-blue-bg); color: var(--badge-blue);
+}
+.cfg-conn-role-badge {
+    font-size: 9px; padding: 1px 6px; border-radius: var(--radius-sm); font-weight: 600;
+    background: var(--badge-orange-bg); color: var(--badge-orange);
+}
+
+.cfg-form { padding: 4px 0; }
+.cfg-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.cfg-row label {
+    width: 110px; font-size: 12px; font-weight: 600;
+    color: var(--text-muted); flex-shrink: 0;
+}
+.cfg-inp {
+    flex: 1; padding: 6px 10px; font-size: 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); color: var(--text);
+    outline: none; transition: border-color var(--transition);
+}
+.cfg-inp:focus { border-color: var(--accent); }
+.cfg-type-fields { margin-top: 4px; }
+
+.cfg-test-ok {
+    margin-top: 10px; font-size: 12px; color: var(--green);
+    padding: 8px; background: var(--badge-green-bg); border-radius: var(--radius);
+}
+.cfg-test-fail {
+    margin-top: 10px; font-size: 12px; color: var(--badge-red);
+    padding: 8px; background: var(--badge-red-bg); border-radius: var(--radius);
+}
+
+/* ── Add Project / Add Environment form modal (replaces browser prompt) ── */
+.cfm-overlay {
+    position: fixed; inset: 0; background: var(--badge-blue-bg);
+    display: flex; align-items: center; justify-content: center; z-index: 4000;
+}
+.cfm-box {
+    background: var(--bg-card, var(--bg-card)); border-radius: var(--radius-xl); width: 420px; max-width: 92vw;
+    box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.cfm-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; font-weight: 700; font-size: 14px;
+    border-bottom: 1px solid var(--border); background: var(--bg-secondary, var(--badge-blue-bg));
+}
+.cfm-x { border: none; background: none; font-size: 20px; cursor: pointer; color: var(--text-muted); line-height: 1; }
+.cfm-x:hover { color: var(--text); }
+.cfm-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.cfm-row { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.cfm-row > span { font-weight: 600; color: var(--text); }
+.cfm-row input, .cfm-row select {
+    font-size: 13px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: var(--radius-md); background: var(--bg-secondary, var(--bg)); color: var(--text); width: 100%;
+}
+.cfm-row input:focus, .cfm-row select:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.cfm-err { color: var(--red); font-size: 12px; min-height: 14px; }
+.cfm-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+
+/* Locked datasource note in the connection form */
+.db-locked-note { margin-left: 8px; font-size: 11px; color: var(--text-muted); font-style: italic; }

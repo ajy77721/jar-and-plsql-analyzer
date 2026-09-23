@@ -1,0 +1,154 @@
+/* API Activity button + panel.
+ *
+ * 4th slot in the shared bottom-left action cluster (sidebar-toggle 28px, help 84px,
+ * theme 140px) — chatbot moved to bottom-right alone (see chatbox.css), which is what
+ * frees 196px here rather than colliding with any of the three.
+ */
+.api-activity-btn {
+    position: fixed;
+    left: 196px;
+    bottom: 28px;
+    z-index: 9990;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent);
+    color: var(--text-inverse);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 4px 16px var(--focus-ring);
+    transition: all .2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.api-activity-btn:hover { transform: translateY(-2px); }
+.api-activity-btn--active { background: var(--green, #059669); }
+
+.api-activity-icon { display: inline-block; }
+.api-activity-btn--active .api-activity-icon { animation: api-activity-spin 1.1s linear infinite; }
+@keyframes api-activity-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.api-activity-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 3px;
+    border-radius: 8px;
+    background: #dc2626;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+}
+
+.api-activity-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: var(--bg-overlay);
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-start;
+    padding: 24px;
+}
+
+.api-activity-panel {
+    width: 480px;
+    max-width: calc(100vw - 48px);
+    max-height: 70vh;
+    background: var(--sidebar-bg);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: var(--shadow-up, 0 -8px 30px rgba(0,0,0,.3));
+    overflow: hidden;
+}
+
+.api-activity-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--sidebar-border);
+}
+.api-activity-title { font-size: 14px; font-weight: 700; color: var(--sidebar-text); }
+.api-activity-close {
+    background: none; border: none; cursor: pointer;
+    font-size: 20px; line-height: 1; color: var(--sidebar-muted);
+    padding: 2px 6px;
+}
+.api-activity-close:hover { color: var(--sidebar-text); }
+
+.api-activity-body {
+    overflow-y: auto;
+    padding: 12px 16px 16px;
+}
+.api-activity-section { margin-bottom: 16px; }
+.api-activity-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--sidebar-muted);
+    margin-bottom: 6px;
+}
+.api-activity-list { display: flex; flex-direction: column; gap: 6px; }
+.api-activity-empty {
+    font-size: 12px;
+    color: var(--sidebar-muted);
+    padding: 8px 0;
+    font-style: italic;
+}
+
+.api-activity-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--sidebar-hover);
+    border: 1px solid var(--sidebar-border);
+}
+.api-activity-row-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--sidebar-muted);
+}
+.api-activity-row--pending .api-activity-row-dot { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,.25); }
+.api-activity-row--success .api-activity-row-dot { background: #10b981; }
+.api-activity-row--error .api-activity-row-dot { background: #dc2626; }
+
+.api-activity-row-main { flex: 1 1 auto; min-width: 0; }
+.api-activity-row-label {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--sidebar-text);
+    word-break: break-word;
+}
+.api-activity-row-meta {
+    font-size: 11px;
+    color: var(--sidebar-muted);
+    margin-top: 2px;
+}
+.api-activity-row-side {
+    flex: 0 0 auto;
+    text-align: right;
+}
+.api-activity-row-time {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--sidebar-text);
+}
+.api-activity-row-status {
+    font-size: 10.5px;
+    color: var(--sidebar-muted);
+    text-transform: uppercase;
+}
+.api-activity-row--error .api-activity-row-status { color: #dc2626; }
+.api-activity-row--success .api-activity-row-status { color: #10b981; }

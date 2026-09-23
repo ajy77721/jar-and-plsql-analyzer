@@ -1,0 +1,372 @@
+package com.analyzer.queue;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jaranalyzer.model.EndpointInfo;
+import com.jaranalyzer.service.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.LocalHandle;
+
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.function.BiConsumer;
+
+@Component
+public class JarAnalysisExecutor {
+
+    private static final Logger log = LoggerFactory.getLogger(JarAnalysisExecutor.class);
+
+    private final JarParserService parserService;
+    private final CallGraphService callGraphService;
+    private final PersistenceService persistenceService;
+    private final ProgressService progressService;
+    private final ClaudeAnalysisService claudeAnalysisService;
+    private final SourceEnrichmentService sourceEnrichmentService;
+    private final MongoCatalogService mongoCatalogService;
+    private final DomainConfigLoader domainConfigLoader;
+    private final com.jaranalyzer.extapi.ExternalApiLinkService externalApiLinkService;
+    private final RepositoryStereotypeResolver repositoryStereotypeResolver;
+    private final com.analyzer.repo.EntityIngestTrigger entityIngest;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ArtifactStore store;
+
+    /**
+     * The global domain config, {@code {data}/config/domain-config.json}.
+     *
+     * <p>The config directory is a subtree of the data root (DirPropertyResolver sets
+     * {@code app.config-dir} to {@code {data}/config}) and the store is rooted at the data root, so
+     * this is an ordinary key. The previous code rebuilt the directory from the
+     * {@code app.config-dir} property with {@code Path.of(...)} plus a parent-directory search —
+     * exactly the pattern that keeps working locally and silently bypasses the store elsewhere.
+     */
+    private static final ArtifactKey GLOBAL_DOMAIN_CONFIG_KEY =
+            ArtifactKey.of("config", "domain-config.json");
+
+    public JarAnalysisExecutor(JarParserService parserService,
+                               CallGraphService callGraphService,
+                               PersistenceService persistenceService,
+                               ProgressService progressService,
+                               ClaudeAnalysisService claudeAnalysisService,
+                               SourceEnrichmentService sourceEnrichmentService,
+                               MongoCatalogService mongoCatalogService,
+                               DomainConfigLoader domainConfigLoader,
+                               com.jaranalyzer.extapi.ExternalApiLinkService externalApiLinkService,
+                               RepositoryStereotypeResolver repositoryStereotypeResolver,
+                               com.analyzer.repo.EntityIngestTrigger entityIngest,
+                               @Qualifier("jarArtifactStore") ArtifactStore store) {
+        this.store = store;
+        this.parserService = parserService;
+        this.callGraphService = callGraphService;
+        this.persistenceService = persistenceService;
+        this.progressService = progressService;
+        this.claudeAnalysisService = claudeAnalysisService;
+        this.sourceEnrichmentService = sourceEnrichmentService;
+        this.mongoCatalogService = mongoCatalogService;
+        this.domainConfigLoader = domainConfigLoader;
+        this.externalApiLinkService = externalApiLinkService;
+        this.repositoryStereotypeResolver = repositoryStereotypeResolver;
+        this.entityIngest = entityIngest;
+    }
+
+    @SuppressWarnings("unchecked")
+    public void execute(QueueJob job, BiConsumer<QueueJob, String> broadcast) throws Exception {
+        String jarName = (String) job.metadata.get("jarName");
+        String tempFilePath = (String) job.metadata.get("tempFilePath");
+        String mode = (String) job.metadata.getOrDefault("mode", "static");
+        String projectPath = (String) job.metadata.get("projectPath");
+        String basePackage = (String) job.metadata.get("basePackage");
+        String perJarConfigPath = (String) job.metadata.get("perJarConfigPath");
+        long fileSize = ((Number) job.metadata.get("fileSize")).longValue();
+
+        // The uploaded per-JAR config is a LOCAL upload temp (written by the controller from the
+        // multipart part, deleted in the finally below), not a stored artifact — see the note on
+        // the finally block. Resolved once here so the path is not rebuilt from the String twice
+        // more further down.
+        Path uploadedConfig = perJarConfigPath == null ? null : Path.of(perJarConfigPath);
+        boolean hasUploadedConfig = uploadedConfig != null && Files.exists(uploadedConfig);
+        ArtifactKey storedConfigKey = persistenceService.getPaths().domainConfigKey(jarName);
+
+        // Apply per-JAR domain config override before analysis begins
+        if (uploadedConfig != null) {
+            if (hasUploadedConfig) {
+                try {
+                    Map<String, Object> perJarConfig = objectMapper.readValue(uploadedConfig.toFile(), Map.class);
+                    domainConfigLoader.applyPerJarOverride(perJarConfig);
+                    log.info("Applied per-JAR domain config override from {}", uploadedConfig.getFileName());
+                } catch (Exception e) {
+                    log.warn("Failed to load per-JAR domain config {}: {}", perJarConfigPath, e.getMessage());
+                }
+            }
+        } else if (store.exists(storedConfigKey)) {
+            // Re-analysis path: the stored config is an artifact, so it is read through the store.
+            try (InputStream in = store.read(storedConfigKey)) {
+                Map<String, Object> perJarConfig = objectMapper.readValue(in, Map.class);
+                domainConfigLoader.applyPerJarOverride(perJarConfig);
+                log.info("Applied stored per-JAR domain config for {}", jarName);
+            } catch (Exception e) {
+                log.warn("Failed to load stored per-JAR domain config for {}: {}", jarName, e.getMessage());
+            }
+        }
+
+        Path tempJar = Path.of(tempFilePath);
+        Path classesFile = null;
+        // Closed in the finally below: releases the temp copy when the store is remote,
+        // a no-op when the artifact was already a local file.
+        LocalHandle storedJarHandle = null;
+
+        // --- Top-level 3-phase timing (parse / discover / save) for this single JAR analysis.
+        // "parse"    = ASM bytecode extraction (parseJarToFile) + CFR decompilation
+        //              (enrichCallTreesWithSource).
+        // "discover" = call-graph index build + endpoint/cross-ref resolution + external-API
+        //              link resolution. Claude enrichment (the CLAUDE_ENRICH follow-up job) is a
+        //              separate, later, optional step and deliberately NOT included here.
+        // "save"     = writing analysis.json / per-endpoint outputs / the stored JAR copy to the
+        //              ArtifactStore.
+        // execute() runs to completion on a single worker thread per job, so plain accumulators
+        // (no atomics) are safe here.
+        long crawlStart = System.nanoTime();
+        long parseNanos = 0L, discoverNanos = 0L, saveNanos = 0L;
+
+        try {
+            progress(job, broadcast, "[1/5] Parsing JAR bytecode...");
+            long t0 = System.nanoTime();
+            JarParserService.ParseResult parseResult = parserService.parseJarToFile(tempJar.toFile(), basePackage, jarName);
+            classesFile = parseResult.classesFile();
+            classesFile = repositoryStereotypeResolver.resolveTransitiveRepositoryStereotypes(classesFile);
+            parseNanos += System.nanoTime() - t0;
+            checkCancelled(job);
+
+            progress(job, broadcast, "[2/5] Extracting config files...");
+            Map<String, String> configFiles = parserService.extractConfigFiles(tempJar.toFile());
+            java.util.Set<String> mongoCatalog = null;
+            if (!configFiles.isEmpty()) {
+                mongoCatalog = mongoCatalogService.fetchAndStore(jarName, configFiles);
+                if (mongoCatalog != null) {
+                    progress(job, broadcast, "MongoDB catalog: " + mongoCatalog.size() + " collections/views");
+                }
+                Map<String, Object> connInfo = mongoCatalogService.extractAllConnectionInfo(configFiles);
+                if (!connInfo.isEmpty()) {
+                    persistenceService.storeConnections(jarName, connInfo);
+                }
+            }
+            checkCancelled(job);
+
+            long tDiscover0 = System.nanoTime();
+            progress(job, broadcast, "[3/5] Building call-graph index...");
+            callGraphService.buildIndex();
+            callGraphService.setJarArtifactMap(parseResult.jarArtifactMap());
+            if (mongoCatalog != null) callGraphService.setMongoCatalog(mongoCatalog);
+            if (!configFiles.isEmpty()) {
+                Map<String, String> props = MongoCatalogService.parseAllProperties(configFiles);
+                if (!props.isEmpty()) {
+                    callGraphService.setConfigProperties(props);
+                }
+            }
+            parserService.streamClasses(classesFile, cls -> callGraphService.addToIndex(cls));
+            progress(job, broadcast, "Index built from " + parseResult.totalClasses() + " classes");
+            checkCancelled(job);
+
+            progress(job, broadcast, "[4/5] Building enriched call trees...");
+            List<EndpointInfo> endpoints = callGraphService.buildEndpointsFromIndex();
+            discoverNanos += System.nanoTime() - tDiscover0;
+            System.gc();
+            checkCancelled(job);
+
+            progress(job, broadcast, "[5/5] Writing analysis to disk...");
+            String analyzedAt = LocalDateTime.now().toString();
+            String mainArtifactId = parseResult.jarArtifactMap().get(null);
+            String projectName = null;
+            if (mainArtifactId != null) {
+                projectName = java.util.Arrays.stream(mainArtifactId.split("-"))
+                        .map(w -> Character.toUpperCase(w.charAt(0)) + w.substring(1).toLowerCase())
+                        .collect(java.util.stream.Collectors.joining(" "));
+            }
+
+            int maxEp = claudeAnalysisService.getMaxEndpoints();
+            List<EndpointInfo> targetEndpoints;
+            if (maxEp >= 0 && maxEp < endpoints.size()) {
+                targetEndpoints = endpoints.subList(0, maxEp);
+            } else {
+                targetEndpoints = endpoints;
+            }
+
+            progress(job, broadcast, "[5.5] Storing JAR copy...");
+            long tSave0 = System.nanoTime();
+            persistenceService.storeJar(tempJar, jarName);
+            saveNanos += System.nanoTime() - tSave0;
+
+            // Persist the per-JAR domain config (from temp path in metadata, if present).
+            // If no per-JAR config was uploaded, snapshot the global config so the badge always shows.
+            if (hasUploadedConfig) {
+                try {
+                    persistenceService.storeDomainConfig(uploadedConfig, jarName);
+                } catch (Exception e) {
+                    log.warn("Failed to persist per-JAR domain config: {}", e.getMessage());
+                }
+            } else if (uploadedConfig == null && !store.exists(storedConfigKey)) {
+                // No per-JAR config stored yet — snapshot the global config for auditability.
+                // store.copy(), not read-then-write: the backend can do this server-side.
+                try {
+                    if (store.exists(GLOBAL_DOMAIN_CONFIG_KEY)) {
+                        store.copy(GLOBAL_DOMAIN_CONFIG_KEY, storedConfigKey);
+                        log.info("Snapshotted global domain-config.json into JAR data folder for {}", jarName);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to snapshot global domain config for {}: {}", jarName, e.getMessage());
+                }
+            }
+            checkCancelled(job);
+
+            progress(job, broadcast, "[5.6] Decompiling source code (" + targetEndpoints.size() + " endpoints)...");
+            // The decompiler and the JarFile readers further down need a REAL local file —
+            // they open a JarFile and seek — so this is ArtifactStore's documented escape
+            // hatch rather than a stream. Materialized ONCE and shared by all four
+            // consumers; a Path handed out by the persistence service would have been a
+            // raw data-tree path that only resolves while storage is local.
+            var storedJarKey = persistenceService.getPaths().storedJarKey(jarName);
+            if (store.exists(storedJarKey)) storedJarHandle = store.materialize(storedJarKey);
+            Path storedJar = storedJarHandle == null ? null : storedJarHandle.path();
+            if (storedJar != null) {
+                // CFR decompilation of source: this is "parse" work (turning bytecode back into
+                // readable source), not schema/cross-ref discovery.
+                long tDecompile0 = System.nanoTime();
+                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedJar);
+                parseNanos += System.nanoTime() - tDecompile0;
+            }
+            System.gc();
+            checkCancelled(job);
+
+            progress(job, broadcast, "[5.6.1] Writing analysis.json...");
+            // Write analysis.json ONCE — after decompilation so sourceCode is included
+            long tSaveAnalysis0 = System.nanoTime();
+            persistenceService.writeAnalysisStreaming(
+                    jarName, projectName, fileSize, analyzedAt,
+                    parseResult.totalClasses(), endpoints.size(),
+                    classesFile, endpoints, "STATIC", basePackage
+            );
+            saveNanos += System.nanoTime() - tSaveAnalysis0;
+
+            progress(job, broadcast, "[5.7] Writing per-endpoint output folders...");
+            long tSaveEndpoints0 = System.nanoTime();
+            claudeAnalysisService.writeEndpointOutputs(jarName, targetEndpoints);
+            saveNanos += System.nanoTime() - tSaveEndpoints0;
+
+            // Resolve Java-to-Java external API links now that this jar's endpoint index exists:
+            //  (1) this jar's own outbound HTTP/Feign calls against already-analyzed jars, and
+            //  (2) any OTHER jars' pending links that this newly-analyzed jar can now satisfy.
+            // This is cross-reference/discovery work, not saving.
+            long tDiscoverLinks0 = System.nanoTime();
+            try {
+                externalApiLinkService.resolve(jarName);
+                externalApiLinkService.reresolvePending(jarName);
+            } catch (Exception e) {
+                log.warn("External API link resolution failed for {} (non-fatal): {}", jarName, e.getMessage());
+            } finally {
+                discoverNanos += System.nanoTime() - tDiscoverLinks0;
+            }
+
+            try {
+                Path jarForResources = storedJar != null ? storedJar : tempJar;
+                Map<String, String> resourceFiles = parserService.extractResourceFiles(jarForResources.toFile());
+                persistenceService.storeResourceFiles(jarName, resourceFiles);
+            } catch (Exception e) {
+                log.warn("Resource file extraction failed (non-fatal): {}", e.getMessage());
+            }
+
+            try {
+                Path jarForBundled = storedJar != null ? storedJar : tempJar;
+                List<com.jaranalyzer.service.JarParserService.BundledJarInfo> bundledJars =
+                        parserService.extractBundledJarInfo(jarForBundled.toFile());
+                persistenceService.storeBundledJarInfo(jarName, bundledJars);
+            } catch (Exception e) {
+                log.warn("Bundled JAR info extraction failed (non-fatal): {}", e.getMessage());
+            }
+
+            try {
+                Path jarForDeps = storedJar != null ? storedJar : tempJar;
+                List<com.jaranalyzer.model.ClassInfo> appClasses = new ArrayList<>();
+                parserService.streamClasses(classesFile, cls -> {
+                    if (cls.getSourceJar() == null) appClasses.add(cls);
+                });
+                Map<String, java.util.Set<String>> depMap =
+                        parserService.buildJarDependencyMap(jarForDeps.toFile(), appClasses);
+                persistenceService.storeJarDepsMap(jarName, depMap);
+            } catch (Exception e) {
+                log.warn("JAR dependency map build failed (non-fatal): {}", e.getMessage());
+            }
+
+            job.resultName = jarName;
+
+            long totalMs = (System.nanoTime() - crawlStart) / 1_000_000;
+            long parseMsVal = parseNanos / 1_000_000;
+            long discoverMsVal = discoverNanos / 1_000_000;
+            long saveMsVal = saveNanos / 1_000_000;
+            log.info("[timing] {}: parse={}ms discover={}ms save={}ms total={}ms",
+                    jarName, parseMsVal, discoverMsVal, saveMsVal, totalMs);
+            job.setTiming(parseMsVal, discoverMsVal, saveMsVal, totalMs);
+
+            progress(job, broadcast, "Static analysis complete: " + parseResult.totalClasses()
+                    + " classes, " + endpoints.size() + " endpoints");
+
+            // Entity ingest (am_java_* / am_jar_* collections) — mirrors ParserAnalysisExecutor:
+            // runs after the analysis itself succeeded, best-effort, never fails the job. Inert
+            // unless app.storage.entity-ingest.enabled=true.
+            if (entityIngest.enabled()) {
+                entityIngest.afterJarAnalyze(jarName,
+                        String.join("/", persistenceService.getPaths().jarRootKey(jarName).segments()));
+            }
+
+            progressService.start(jarName);
+            progressService.complete("Static analysis complete: " + parseResult.totalClasses()
+                    + " classes, " + endpoints.size() + " endpoints");
+
+            boolean claudeMode = "claude".equalsIgnoreCase(mode);
+            if (claudeMode) {
+                Map<String, Object> followUp = new LinkedHashMap<>();
+                followUp.put("type", "CLAUDE_ENRICH");
+                followUp.put("displayName", "Claude enrich: " + jarName);
+                followUp.put("jarName", jarName);
+                followUp.put("projectPath", projectPath);
+                followUp.put("projectName", projectName);
+                followUp.put("fileSize", fileSize);
+                followUp.put("analyzedAt", analyzedAt);
+                followUp.put("totalClasses", parseResult.totalClasses());
+                if (classesFile != null) {
+                    followUp.put("classesFilePath", classesFile.toString());
+                    classesFile = null;
+                }
+                job.followUpJob = followUp;
+            }
+
+        } finally {
+            domainConfigLoader.clearPerJarOverride();
+            if (storedJarHandle != null) storedJarHandle.close();
+            // LOCAL scratch, deliberately not store keys: tempJar is the multipart upload temp,
+            // classesFile is the parser's intermediate JSONL, and uploadedConfig is the uploaded
+            // config temp. All three are created outside the data tree, consumed by APIs that take
+            // a java.io File/Path, and deleted here — they are never artifacts.
+            Files.deleteIfExists(tempJar);
+            if (classesFile != null) Files.deleteIfExists(classesFile);
+            if (uploadedConfig != null) Files.deleteIfExists(uploadedConfig);
+        }
+    }
+
+    private void progress(QueueJob job, BiConsumer<QueueJob, String> broadcast, String message) {
+        job.updateProgress(message);
+        broadcast.accept(job, "job-progress");
+    }
+
+    private void checkCancelled(QueueJob job) {
+        if (job.status == QueueJob.Status.CANCELLED) {
+            throw new RuntimeException("Job cancelled");
+        }
+    }
+}

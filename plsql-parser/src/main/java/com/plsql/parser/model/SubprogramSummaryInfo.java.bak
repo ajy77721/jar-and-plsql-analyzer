@@ -1,0 +1,37 @@
+package com.plsql.parser.model;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+
+/**
+ * Lightweight summary of one subprogram inside a package that was crawled as a single,
+ * aggregated {@link FlowNode} (a bare package name given as the entry point — see
+ * {@code DependencyCrawler}'s package-as-entry-point aggregation branch). One instance per
+ * member, listed on {@link FlowNode#getMembers()} so the UI can still drill into individual
+ * procedures/functions of the package without a separate per-procedure crawl/output folder.
+ */
+@JsonInclude(JsonInclude.Include.NON_EMPTY)
+public class SubprogramSummaryInfo {
+    private String name;
+    private String type;
+    private int lineStart;
+    private int lineEnd;
+
+    public SubprogramSummaryInfo() {
+    }
+
+    public SubprogramSummaryInfo(String name, String type, int lineStart, int lineEnd) {
+        this.name = name;
+        this.type = type;
+        this.lineStart = lineStart;
+        this.lineEnd = lineEnd;
+    }
+
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+    public int getLineStart() { return lineStart; }
+    public void setLineStart(int lineStart) { this.lineStart = lineStart; }
+    public int getLineEnd() { return lineEnd; }
+    public void setLineEnd(int lineEnd) { this.lineEnd = lineEnd; }
+}

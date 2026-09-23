@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/shared/mongodb-theme.css?v=1789287064">
+    <!-- Page envelope shim: normalises paged and legacy (bare array) API responses.
+         Must load before any script that reads a list endpoint. -->
+    <!-- Must load before the inline scripts further down: they read PollConfig for their
+         intervals, and this was previously loaded ~350 lines AFTER the first use, so
+         PollConfig was simply undefined there and every call site fell back to a literal. -->
+    <script src="shared/escape.js?v=1788675772"></script>
+    <script src="shared/poll-config.js?v=1788676228"></script>
+    <script src="shared/page-envelope.js?v=1788752637"></script>
+    <script src="shared/ui-busy.js?v=1788555867"></script>
+    <script src="/shared/theme-toggle.js?v=1789138484"></script>
+    <script src="/shared/theme-colors.js?v=1788261891"></script>
+    <title>Code Analyzer</title>
+    <style>
+        /* Page-local aliases only. Every colour comes from
+           /shared/mongodb-theme.css — do not redeclare theme tokens here,
+           or this block shadows them and breaks the light/dark switch. */
+        :root {
+            --card-bg: var(--bg-card);
+            --text-light: var(--text-muted);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--sidebar-bg);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--sidebar-text);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+        .header h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 8px;
+        }
+        .header h1 span { color: var(--accent); }
+        .header p {
+            font-size: 1.05rem;
+            color: var(--sidebar-muted);
+            max-width: 500px;
+        }
+        .cards {
+            display: flex;
+            gap: 28px;
+            flex-wrap: wrap;
+            justify-content: center;
+            max-width: 1000px;
+        }
+        .card {
+            background: var(--sidebar-hover);
+            border: 1px solid var(--sidebar-border);
+            border-radius: 16px;
+            padding: 36px 32px;
+            width: 290px;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        .card:hover {
+            border-color: var(--accent);
+            transform: translateY(-4px);
+            box-shadow: 0 12px 40px var(--focus-ring);
+        }
+        .card-icon {
+            width: 52px;
+            height: 52px;
+            border-radius: var(--radius-xl);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        .card-icon.jar { background: var(--accent-subtle); color: var(--accent); }
+        .card-icon.war { background: var(--badge-blue-bg); color: var(--blue); }
+        .card-icon.plsql { background: var(--badge-orange-bg); color: var(--orange); }
+        .card-icon.home { background: var(--badge-green-bg); color: var(--green); }
+        .card h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .card p {
+            font-size: 0.875rem;
+            color: var(--sidebar-muted);
+            line-height: 1.5;
+        }
+        .card .arrow {
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 18px;
+            color: var(--sidebar-muted);
+            transition: color 0.2s;
+        }
+        .card:hover .arrow { color: var(--accent); }
+        .badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: var(--radius);
+            margin-top: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .badge.java { background: var(--accent-subtle); color: var(--accent); }
+        .badge.oracle { background: var(--badge-orange-bg); color: var(--badge-orange); }
+        .card-stats {
+            font-size: 0.75rem;
+            color: var(--sidebar-muted);
+            margin-top: 8px;
+            line-height: 1.6;
+        }
+        .card-stats .stat-label { color: var(--sidebar-muted); }
+        .card-stats .stat-val { color: var(--sidebar-text); font-weight: 600; }
+        .card-stats .stat-active { color: var(--green); }
+        .pg-row { display: flex; justify-content: space-between; align-items: center; }
+        .pg-label { color: var(--sidebar-muted); }
+        .pg-val { font-weight: 600; color: var(--sidebar-text); }
+        .pg-val.done { color: var(--green); }
+        .pg-val.pending { color: var(--orange); }
+        .pg-val.running { color: var(--blue); }
+        .pg-val.error { color: var(--red); }
+        .pg-bar { height: 6px; background: var(--sidebar-hover); border-radius: var(--radius-sm); margin-top: 8px; overflow: hidden; }
+        .pg-bar-fill { height: 100%; border-radius: var(--radius-sm); transition: width 0.3s; }
+        .qs-tab {
+            background: var(--sidebar-hover); border: none; color: var(--sidebar-muted);
+            padding: 5px 14px; border-radius: var(--radius); font-size: 11px;
+            cursor: pointer; font-weight: 600; transition: all 0.15s;
+        }
+        .qs-tab:hover { color: var(--sidebar-text); }
+        .qs-tab-active { background: var(--blue); color: var(--text-inverse); }
+        .qs-tab-active[data-tab="plsql"] { background: var(--green); }
+        .qs-tab-active[data-tab="jar"] { background: var(--accent); }
+        .footer {
+            margin-top: 60px;
+            font-size: 0.8rem;
+            color: var(--sidebar-muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span>&lt;/&gt;</span> AMP Code Analyzer</h1>
+        <p>Static analysis, call graph visualization, and AI-powered verification for Java and Oracle PL/SQL codebases</p>
+        <a href="#" onclick="UserManual.open(); return false;" style="display:inline-flex;align-items:center;gap:6px;margin-top:14px;color:var(--purple);font-size:0.9rem;text-decoration:none;opacity:0.85;transition:opacity 0.2s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.85'">&#128214; User Manual &amp; Documentation</a>
+    </div>
+
+    <div class="cards">
+        <a class="card" href="/jar/">
+            <div class="card-icon jar">&#9881;</div>
+            <h2>JAR / Java Analyzer {BETA}</h2>
+            <p>Upload Spring Boot JARs to analyze REST endpoints, call graphs, MongoDB collections, JPA/Hibernate entities, Oracle JDBC operations</p>
+            <div id="jarStats" class="card-stats">Loading...</div>
+            <span class="badge java">Java &middot; Spring Boot &middot; MongoDB &middot; Oracle &middot; JPA &middot; JDBC</span>
+            <span class="arrow">&#8594;</span>
+        </a>
+
+        <a class="card" href="/war/">
+            <div class="card-icon war">&#128230;</div>
+            <h2>WAR / Java Analyzer {BETA}</h2>
+            <p>Upload WAR files to analyze REST endpoints, call graphs, MongoDB collections, JPA/Hibernate entities — supports Spring MVC and Jakarta EE deployments</p>
+            <div id="warStats" class="card-stats">Loading...</div>
+            <span class="badge java">Java &middot; Spring MVC &middot; Jakarta EE &middot; MongoDB &middot; Oracle</span>
+            <span class="arrow">&#8594;</span>
+        </a>
+
+        <a class="card" href="/parser/">
+            <div class="card-icon home">&#9874;</div>
+            <h2>PL/SQL Parse Analyzer {BETA}</h2>
+            <p>Advanced PL/SQL flow analysis with full grammar, complexity scoring, dependency crawling, call trees, cursor/join/sequence tracking</p>
+            <div id="parserStats" class="card-stats">Loading...</div>
+            <span class="badge oracle">Oracle &middot; Flow Analysis &middot; 482 Grammar Tests</span>
+            <span class="arrow">&#8594;</span>
+        </a>
+
+        <!-- PL/SQL -> Java Conversion hidden (WIP).
+        <a class="card" href="/conversion/">
+            <div class="card-icon" style="background:var(--badge-purple-bg);color:var(--accent)">&#8644;</div>
+            <h2>PL/SQL → Java Conversion {WIP}</h2>
+            <p>Convert Oracle procedures to Java + Spring Boot + MongoDB. Validate, auto-fix, and generate Markdown reports via Claude AI.</p>
+            <span class="badge" style="background:var(--badge-purple-bg);color:var(--accent)">Oracle &middot; Java &middot; Claude AI &middot; Auto-Fix</span>
+            <span class="arrow">&#8594;</span>
+        </a>
+        -->
+
+    </div>
+
+    <!-- Quick Submit Panel -->
+    <div style="display:none;margin-top:24px;width:100%;max-width:1000px;padding:0 16px">
+        <div style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-xl);overflow:hidden">
+            <div style="padding:14px 20px;border-bottom:1px solid var(--sidebar-border);display:flex;align-items:center;gap:12px">
+                <span style="font-size:18px">&#9889;</span>
+                <span style="color:var(--blue);font-weight:700;font-size:14px">Quick Submit</span>
+                <div style="display:flex;gap:4px;margin-left:auto" id="qsTabBar">
+                    <button class="qs-tab qs-tab-active" data-tab="plsql" onclick="switchQsTab('plsql')">PL/SQL Parser</button>
+                    <button class="qs-tab" data-tab="jar" onclick="switchQsTab('jar')">JAR Analyzer</button>
+                </div>
+            </div>
+            <!-- PL/SQL Tab -->
+            <div id="qsPlsql" style="padding:16px 20px">
+                <div style="display:flex;gap:12px;align-items:flex-start">
+                    <textarea id="parserInput" rows="4" placeholder="Enter procedure names, one per line&#10;e.g. PG_RFUR_MGMNT.fn_generate_policy_endorsement&#10;     PG_AC_EINVOICE.PC_IRBM_SUBMISSION&#10;     SCHEMA.PKG.PROC"
+                        style="flex:1;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;resize:vertical;outline:none;line-height:1.6"
+                        onfocus="this.style.borderColor='var(--green)'" onblur="this.style.borderColor='var(--sidebar-border)'"></textarea>
+                    <div style="display:flex;flex-direction:column;gap:8px;min-width:150px">
+                        <button onclick="submitParserJobs()" style="background:var(--green);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                            Submit to Queue
+                        </button>
+                        <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.4">
+                            Each line = 1 queue job<br>
+                            Supports: PKG.PROC<br>
+                            or SCHEMA.PKG.PROC<br>
+                            Duplicates auto-archived
+                        </div>
+                    </div>
+                </div>
+                <div id="parserSubmitResult" style="display:none;margin-top:10px;font-size:12px;padding:8px 12px;border-radius:var(--radius)"></div>
+            </div>
+            <!-- JAR Tab -->
+            <div id="qsJar" style="padding:16px 20px;display:none">
+                <div style="display:flex;gap:12px;align-items:flex-start">
+                    <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+                        <input id="jarPathInput" type="text" placeholder="Local JAR path, e.g. C:\path\to\project\target\app-0.0.1-SNAPSHOT.jar"
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
+                            onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <label style="font-size:11px;color:var(--sidebar-muted);display:flex;align-items:center;gap:4px">
+                                <input type="radio" name="jarMode" value="static" checked> Static
+                            </label>
+                            <label style="font-size:11px;color:var(--sidebar-muted);display:flex;align-items:center;gap:4px">
+                                <input type="radio" name="jarMode" value="claude"> Claude
+                            </label>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:8px;min-width:150px">
+                        <button onclick="submitJarLocal()" style="background:var(--accent);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                            Submit to Queue
+                        </button>
+                        <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.4">
+                            Server reads local file<br>
+                            Duplicates auto-timestamped
+                        </div>
+                    </div>
+                </div>
+                <div id="jarSubmitResult" style="display:none;margin-top:10px;font-size:12px;padding:8px 12px;border-radius:var(--radius)"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Claude API Statistics Bar -->
+    <div id="claudeStatsBar" style="margin-top:16px;width:100%;max-width:1000px;padding:0 16px">
+        <div style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-xl);overflow:hidden">
+            <div onclick="toggleClaudeStats()" style="padding:12px 20px;display:flex;align-items:center;gap:12px;cursor:pointer;user-select:none;transition:background 0.15s" onmouseover="this.style.background='var(--sidebar-hover)'" onmouseout="this.style.background=''">
+                <span style="font-size:16px">&#129302;</span>
+                <span style="color:var(--purple);font-weight:700;font-size:13px">Claude API Statistics</span>
+                <span id="claudeStatsChips" style="font-size:12px;color:var(--sidebar-muted)">Loading...</span>
+                <span id="claudeStatsToggleIcon" style="margin-left:auto;color:var(--sidebar-muted);font-size:12px">&#9660;</span>
+            </div>
+            <div id="claudeStatsDetail" style="display:none;padding:0 20px 16px;border-top:1px solid var(--sidebar-border)">
+                <div id="claudeStatsDetailContent" style="padding-top:12px;font-size:12px;color:var(--sidebar-muted)">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Queue Summary Bar + Open button -->
+    <div id="queueBar" style="margin-top:16px;width:100%;max-width:1000px;padding:0 16px">
+        <div onclick="openQueueModal()" style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-xl);padding:14px 20px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--blue)'" onmouseout="this.style.borderColor='var(--sidebar-border)'">
+            <div style="display:flex;align-items:center;gap:12px">
+                <span style="font-size:18px">&#9776;</span>
+                <span style="color:var(--blue);font-weight:700;font-size:14px">Analysis Queue</span>
+                <span id="queueSummary" style="font-size:12px;color:var(--sidebar-muted)"></span>
+            </div>
+            <div id="queueBarRunning" style="font-size:12px;color:var(--sidebar-muted)"></div>
+        </div>
+    </div>
+
+    <!-- Queue Modal Overlay -->
+    <div id="queueModal" style="display:none;position:fixed;inset:0;z-index:9999;background:var(--bg-overlay);backdrop-filter:blur(4px);align-items:center;justify-content:center">
+        <div style="background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:16px;width:90%;max-width:800px;max-height:85vh;display:flex;flex-direction:column;box-shadow: var(--shadow-lg)">
+            <div style="padding:20px 24px;border-bottom:1px solid var(--sidebar-border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <span style="font-size:20px">&#9776;</span>
+                    <h2 style="font-size:1.1rem;font-weight:700;color:var(--sidebar-text)">Analysis Queue</h2>
+                    <span id="queueModalSummary" style="font-size:12px;color:var(--sidebar-muted)"></span>
+                </div>
+                <button onclick="closeQueueModal()" style="background:none;border:none;color:var(--sidebar-muted);font-size:22px;cursor:pointer;padding:4px 8px" title="Close">&times;</button>
+            </div>
+            <div id="queueError" style="display:none;padding:10px 24px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-bottom:1px solid var(--sidebar-border)"></div>
+            <div id="queueContent" style="overflow-y:auto;flex:1;padding:0">
+                <div style="padding:30px;text-align:center;color:var(--sidebar-muted);font-size:13px">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Progress Dashboard — same card style as queue bar -->
+    <div style="margin-top:16px;width:100%;max-width:1000px;padding:0 16px">
+        <div style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-xl);overflow:hidden">
+            <div style="padding:14px 20px;border-bottom:1px solid var(--sidebar-border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <span style="font-size:18px">&#128202;</span>
+                    <span style="color:var(--green);font-weight:700;font-size:14px">Progress Report</span>
+                </div>
+                <button onclick="invalidateCache();loadStats();loadProgress();loadClaudeStats()" style="background:var(--sidebar-hover);border:none;color:var(--sidebar-text);padding:4px 12px;border-radius:var(--radius);font-size:11px;cursor:pointer;font-weight:600">Refresh</button>
+            </div>
+            <div style="display:flex;gap:0;flex-wrap:wrap">
+                <div id="jarProgress" style="flex:1;min-width:280px;padding:16px 20px;border-right:1px solid var(--sidebar-border);font-size:13px;line-height:1.8">Loading...</div>
+                <div id="parserProgress" style="flex:1;min-width:280px;padding:16px 20px;font-size:13px;line-height:1.8">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Global Claude Sessions — same card style -->
+    <div style="margin-top:16px;width:100%;max-width:1000px;padding:0 16px">
+        <div style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-xl);overflow:hidden">
+            <div style="padding:14px 20px;border-bottom:1px solid var(--sidebar-border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <span style="font-size:18px">&#129302;</span>
+                    <span style="color:var(--purple);font-weight:700;font-size:14px">Claude Sessions</span>
+                    <span id="sessionSummary" style="font-size:12px;color:var(--sidebar-muted)"></span>
+                </div>
+                <button onclick="loadSessions()" style="background:var(--sidebar-hover);border:none;color:var(--sidebar-text);padding:4px 12px;border-radius:var(--radius);font-size:11px;cursor:pointer;font-weight:600">Refresh</button>
+            </div>
+            <div id="sessionsList" style="max-height:400px;overflow-y:auto">
+                <div style="padding:20px;text-align:center;color:var(--sidebar-muted);font-size:13px">Loading sessions...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">Unified Analyzer v1.0 &mdash; <span id="footerPort"></span></div>
+    <script>document.getElementById('footerPort').textContent = 'Port ' + location.port;</script>
+
+    <script>
+    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    function fmtBytes(n) {
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1048576).toFixed(1) + ' MB';
+    }
+
+    let _claudeStatsOpen = false;
+    function toggleClaudeStats() {
+        _claudeStatsOpen = !_claudeStatsOpen;
+        document.getElementById('claudeStatsDetail').style.display = _claudeStatsOpen ? '' : 'none';
+        document.getElementById('claudeStatsToggleIcon').innerHTML = _claudeStatsOpen ? '&#9650;' : '&#9660;';
+    }
+
+    async function loadClaudeStats() {
+        try {
+            const d = await fetch('/api/sessions/claude-stats').then(r => r.ok ? r.json() : null).catch(() => null);
+            if (!d) return;
+
+            const calls    = d.totalCalls    || 0;
+            const bytes    = d.totalPromptBytes || 0;
+            const sessions = d.totalSessions || 0;
+
+            const chips = document.getElementById('claudeStatsChips');
+            if (calls === 0 && sessions === 0) {
+                chips.textContent = 'No activity yet';
+            } else {
+                chips.innerHTML =
+                    '<span style="color:var(--sidebar-text);font-weight:600">' + calls + '</span> calls &nbsp;&middot;&nbsp;' +
+                    '<span style="color:var(--sidebar-text);font-weight:600">' + sessions + '</span> sessions &nbsp;&middot;&nbsp;' +
+                    '<span style="color:var(--sidebar-text);font-weight:600">' + fmtBytes(bytes) + '</span> prompt';
+            }
+
+            // Detail panel — three columns: JAR / Parser / PL/SQL
+            const detail = document.getElementById('claudeStatsDetailContent');
+            const jar    = d.jar    || {};
+            const parser = d.parser || {};
+            const plsql  = d.plsql  || {};
+
+            function col(title, color, rows) {
+                let h = '<div style="min-width:160px"><div style="color:' + color + ';font-size:11px;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em">' + title + '</div>';
+                for (const [label, val, valColor] of rows) {
+                    h += '<div style="display:flex;justify-content:space-between;gap:16px;font-size:11px;margin-bottom:3px">';
+                    h += '<span style="color:var(--sidebar-muted)">' + label + '</span>';
+                    h += '<span style="color:' + (valColor || 'var(--sidebar-text)') + ';font-weight:600">' + val + '</span></div>';
+                }
+                return h + '</div>';
+            }
+
+            let dhtml = '<div style="display:flex;gap:28px;flex-wrap:wrap;padding-top:4px">';
+            dhtml += col('JAR Analyzer', 'var(--accent)', [
+                ['API Calls',    jar.calls    || 0],
+                ['Prompt Sent',  fmtBytes((jar.promptKb || 0) * 1024)],
+                ['Sessions',     jar.sessions || 0],
+            ]);
+            dhtml += col('PL/SQL Parser', 'var(--green)', [
+                ['API Calls',   parser.calls   || 0],
+                ['Prompt Sent', fmtBytes(parser.promptBytes || 0)],
+                ['Sessions',    parser.sessions || 0],
+                ...(parser.sessionsRunning > 0 ? [['Running', parser.sessionsRunning, 'var(--blue)']] : []),
+            ]);
+            dhtml += col('PL/SQL Enrichment', 'var(--orange)', [
+                ['Sessions',    plsql.sessions || 0],
+                ...(plsql.sessionsRunning > 0 ? [['Running', plsql.sessionsRunning, 'var(--blue)']] : []),
+            ]);
+            dhtml += '<div style="min-width:160px;border-left:1px solid var(--sidebar-border);padding-left:20px">';
+            dhtml += '<div style="color:var(--sidebar-muted);font-size:11px;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em">Total</div>';
+            dhtml += '<div style="font-size:22px;font-weight:700;color:var(--sidebar-text);margin-bottom:2px">' + calls + ' <span style="font-size:12px;color:var(--sidebar-muted);font-weight:400">calls</span></div>';
+            dhtml += '<div style="font-size:13px;color:var(--sidebar-muted)">' + fmtBytes(bytes) + ' sent</div>';
+            dhtml += '<div style="font-size:12px;color:var(--sidebar-muted);margin-top:4px">' + sessions + ' sessions</div>';
+            dhtml += '</div>';
+            dhtml += '</div>';
+            detail.innerHTML = dhtml;
+        } catch (e) {
+            const chips = document.getElementById('claudeStatsChips');
+            if (chips) chips.textContent = '-';
+        }
+    }
+    loadClaudeStats();
+
+    let _cachedJars = null;
+    let _cachedWars = null;
+    let _cachedParserAnalyses = null;
+
+    /**
+     * The server serialises claudeStatus as an uppercase enum (IDLE / RUNNING / COMPLETE, see
+     * ClaudeEnrichmentTracker). This page had been comparing it against lowercase literals, so
+     * every match failed and the card, the "AI Enriched" row and the enrichment progress bar
+     * were pinned at 0 regardless of how many scans had finished — while jar/js/dashboard.js,
+     * which compares correctly, reported the real number for the same data.
+     * Compared case-insensitively so both the enum and any legacy lowercase value match.
+     */
+    function claudeStatusIs(jar, ...wanted) {
+        const s = String((jar && jar.claudeStatus) || '').toLowerCase();
+        return wanted.some(w => w.toLowerCase() === s);
+    }
+
+    async function fetchJars() {
+        if (!_cachedJars) {
+            const res = await fetch('/api/jar/jars');
+            _cachedJars = await res.json();
+        }
+        return _cachedJars;
+    }
+    async function fetchWars() {
+        if (!_cachedWars) {
+            const res = await fetch('/api/war/wars');
+            _cachedWars = await res.json();
+        }
+        return _cachedWars;
+    }
+    async function fetchParserAnalyses() {
+        if (!_cachedParserAnalyses) {
+            const res = await fetch('/api/parser/analyses');
+            _cachedParserAnalyses = await res.json();
+        }
+        return _cachedParserAnalyses;
+    }
+    function invalidateCache() {
+        _cachedJars = null;
+        _cachedWars = null;
+        _cachedParserAnalyses = null;
+    }
+
+    async function loadStats() {
+        // JAR stats
+        try {
+            const jars = await fetchJars();
+            const el = document.getElementById('jarStats');
+            if (jars && jars.length > 0) {
+                const total = jars.length;
+                const totalEndpoints = jars.reduce((s, j) => s + (j.totalEndpoints || 0), 0);
+                const totalClasses = jars.reduce((s, j) => s + (j.totalClasses || 0), 0);
+                const enriched = jars.filter(j => claudeStatusIs(j, 'complete', 'enriched')).length;
+                el.innerHTML = '<span class="stat-val">' + total + '</span> <span class="stat-label">JARs</span> · ' +
+                    '<span class="stat-val">' + totalEndpoints + '</span> <span class="stat-label">endpoints</span> · ' +
+                    '<span class="stat-val">' + totalClasses + '</span> <span class="stat-label">classes</span>' +
+                    (enriched > 0 ? ' · <span class="stat-active">' + enriched + ' AI enriched</span>' : '');
+            } else {
+                el.innerHTML = '<span class="stat-label">No JARs uploaded yet</span>';
+            }
+        } catch (e) {
+            document.getElementById('jarStats').innerHTML = '<span class="stat-label">-</span>';
+        }
+
+        // WAR stats
+        try {
+            const wars = await fetchWars();
+            const el = document.getElementById('warStats');
+            if (wars && wars.length > 0) {
+                const total = wars.length;
+                const totalEndpoints = wars.reduce((s, w) => s + (w.totalEndpoints || 0), 0);
+                const totalClasses = wars.reduce((s, w) => s + (w.totalClasses || 0), 0);
+                el.innerHTML = '<span class="stat-val">' + total + '</span> <span class="stat-label">WARs</span> · ' +
+                    '<span class="stat-val">' + totalEndpoints + '</span> <span class="stat-label">endpoints</span> · ' +
+                    '<span class="stat-val">' + totalClasses + '</span> <span class="stat-label">classes</span>';
+            } else {
+                el.innerHTML = '<span class="stat-label">No WARs uploaded yet</span>';
+            }
+        } catch (e) {
+            document.getElementById('warStats').innerHTML = '<span class="stat-label">-</span>';
+        }
+
+        // Parser stats
+        try {
+            const analyses = await fetchParserAnalyses();
+            const el = document.getElementById('parserStats');
+            if (analyses && analyses.length > 0) {
+                const total = analyses.length;
+                const totalNodes = analyses.reduce((s, a) => s + (a.totalNodes || 0), 0);
+                const totalTables = analyses.reduce((s, a) => s + (a.totalTables || 0), 0);
+                const totalLoc = analyses.reduce((s, a) => s + (a.totalLinesOfCode || 0), 0);
+                el.innerHTML = '<span class="stat-val">' + total + '</span> <span class="stat-label">analyses</span> · ' +
+                    '<span class="stat-val">' + totalNodes + '</span> <span class="stat-label">procs</span> · ' +
+                    '<span class="stat-val">' + totalTables + '</span> <span class="stat-label">tables</span> · ' +
+                    '<span class="stat-val">' + totalLoc.toLocaleString() + '</span> <span class="stat-label">LOC</span>';
+            } else {
+                el.innerHTML = '<span class="stat-label">No analyses yet</span>';
+            }
+        } catch (e) {
+            document.getElementById('parserStats').innerHTML = '<span class="stat-label">-</span>';
+        }
+    }
+    // loadStats() called below together with loadProgress()
+
+    async function loadProgress() {
+        // JAR progress
+        try {
+            const jars = await fetchJars();
+            const el = document.getElementById('jarProgress');
+            if (!jars || jars.length === 0) {
+                el.innerHTML = '<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:6px">JAR Analyzer</div><div class="pg-row"><span class="pg-label">No JARs uploaded</span></div>';
+            } else {
+                const total = jars.length;
+                const enriched = jars.filter(j => claudeStatusIs(j, 'complete', 'enriched')).length;
+                const pending = jars.filter(j => claudeStatusIs(j, 'pending')).length;
+                const running = jars.filter(j => claudeStatusIs(j, 'running')).length;
+                const idle = total - enriched - pending - running;
+                const pct = total > 0 ? Math.round((enriched / total) * 100) : 0;
+                const totalEp = jars.reduce((s, j) => s + (j.totalEndpoints || 0), 0);
+                const totalCls = jars.reduce((s, j) => s + (j.totalClasses || 0), 0);
+
+                let html = '<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:6px">JAR Analyzer</div>';
+                html += '<div class="pg-row"><span class="pg-label">Total JARs</span><span class="pg-val">' + total + '</span></div>';
+                html += '<div class="pg-row"><span class="pg-label">Endpoints / Classes</span><span class="pg-val">' + totalEp + ' / ' + totalCls + '</span></div>';
+                html += '<div class="pg-row"><span class="pg-label">AI Enriched</span><span class="pg-val done">' + enriched + '</span></div>';
+                if (running > 0) html += '<div class="pg-row"><span class="pg-label">AI Running</span><span class="pg-val running">' + running + '</span></div>';
+                if (pending > 0) html += '<div class="pg-row"><span class="pg-label">AI Pending</span><span class="pg-val pending">' + pending + '</span></div>';
+                html += '<div class="pg-row"><span class="pg-label">Not Enriched</span><span class="pg-val">' + idle + '</span></div>';
+                html += '<div class="pg-bar"><div class="pg-bar-fill" style="width:' + pct + '%;background:var(--green)"></div></div>';
+                html += '<div style="font-size:11px;color:var(--sidebar-muted);margin-top:4px;text-align:right">' + pct + '% AI enriched</div>';
+                el.innerHTML = html;
+            }
+        } catch (e) {
+            document.getElementById('jarProgress').innerHTML = '<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:6px">JAR Analyzer</div><div class="pg-row"><span class="pg-label pg-val error">Error loading</span></div>';
+        }
+
+        // Parser progress
+        try {
+            const [analyses, sessionsRaw] = await Promise.all([
+                fetchParserAnalyses(),
+                fetch('/api/parser/claude/sessions').then(r => r.ok ? r.json() : []).catch(() => [])
+            ]);
+            const sessions = Array.isArray(sessionsRaw) ? sessionsRaw : (sessionsRaw.sessions || []);
+            const el = document.getElementById('parserProgress');
+
+            const totalAnalyses = (analyses || []).length;
+            const runningSessions = (sessions || []).filter(s => (s.status||'').toUpperCase() === 'RUNNING').length;
+            const failedSessions = (sessions || []).filter(s => (s.status||'').toUpperCase() === 'FAILED').length;
+
+            const claudeDoneSet = new Set();
+            for (const s of (sessions || [])) {
+                if ((s.status||'').toUpperCase() === 'COMPLETED' || (s.status||'').toUpperCase() === 'COMPLETE') {
+                    claudeDoneSet.add(s.analysisName || '');
+                }
+            }
+            const aiVerified = claudeDoneSet.size;
+            const aiPct = totalAnalyses > 0 ? Math.round((aiVerified / totalAnalyses) * 100) : 0;
+
+            const totalNodes = (analyses || []).reduce((s, a) => s + (a.totalNodes || 0), 0);
+            const totalTables = (analyses || []).reduce((s, a) => s + (a.totalTables || 0), 0);
+            const totalLoc = (analyses || []).reduce((s, a) => s + (a.totalLinesOfCode || 0), 0);
+
+            if (totalAnalyses === 0) {
+                el.innerHTML = '<div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:6px">PL/SQL Parse Analyzer</div><div class="pg-row"><span class="pg-label">No analyses yet</span></div>';
+            } else {
+                let html = '<div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:6px">PL/SQL Parse Analyzer</div>';
+                html += '<div class="pg-row"><span class="pg-label">Analyses</span><span class="pg-val">' + totalAnalyses + '</span></div>';
+                html += '<div class="pg-row"><span class="pg-label">Total Procs / Tables</span><span class="pg-val">' + totalNodes + ' / ' + totalTables + '</span></div>';
+                html += '<div class="pg-row"><span class="pg-label">Lines of Code</span><span class="pg-val">' + totalLoc.toLocaleString() + '</span></div>';
+                html += '<div class="pg-row"><span class="pg-label">AI Verified</span><span class="pg-val done">' + aiVerified + ' / ' + totalAnalyses + '</span></div>';
+                if (runningSessions > 0) html += '<div class="pg-row"><span class="pg-label">AI Sessions Running</span><span class="pg-val running">' + runningSessions + '</span></div>';
+                if (failedSessions > 0) html += '<div class="pg-row"><span class="pg-label">AI Sessions Failed</span><span class="pg-val error">' + failedSessions + '</span></div>';
+                html += '<div class="pg-bar"><div class="pg-bar-fill" style="width:' + aiPct + '%;background:var(--green)"></div></div>';
+                html += '<div style="font-size:11px;color:var(--sidebar-muted);margin-top:4px;text-align:right">' + aiPct + '% AI verified</div>';
+                el.innerHTML = html;
+            }
+        } catch (e) {
+            document.getElementById('parserProgress').innerHTML = '<div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:6px">PL/SQL Parse Analyzer</div><div class="pg-row"><span class="pg-label pg-val error">Error loading</span></div>';
+        }
+    }
+    // Run all initial loads in parallel
+    invalidateCache();
+    Promise.all([loadStats(), loadProgress(), loadSessions()]).catch(() => {});
+
+    async function loadSessions() {
+        try {
+            const res = await fetch('/api/sessions');
+            const sessions = await res.json();
+            const el = document.getElementById('sessionsList');
+            const sum = document.getElementById('sessionSummary');
+
+            if (!sessions || sessions.length === 0) {
+                el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--sidebar-muted);font-size:13px">No Claude sessions yet</div>';
+                sum.textContent = '';
+                return;
+            }
+
+            const running = sessions.filter(s => s.status === 'RUNNING').length;
+            const complete = sessions.filter(s => s.status === 'COMPLETE').length;
+            const failed = sessions.filter(s => s.status === 'FAILED').length;
+            const killed = sessions.filter(s => s.status === 'KILLED').length;
+            sum.textContent = sessions.length + ' total' +
+                (running ? ', ' + running + ' running' : '') +
+                (complete ? ', ' + complete + ' complete' : '') +
+                (failed ? ', ' + failed + ' failed' : '') +
+                (killed ? ', ' + killed + ' killed' : '');
+
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+            html += '<thead><tr style="background:var(--sidebar-bg);color:var(--sidebar-muted);font-size:11px;text-transform:uppercase">';
+            html += '<th style="padding:8px 12px;text-align:left">Analyzer</th>';
+            html += '<th style="padding:8px 12px;text-align:left">ID</th>';
+            html += '<th style="padding:8px 12px;text-align:left">Status</th>';
+            html += '<th style="padding:8px 12px;text-align:left">Type</th>';
+            html += '<th style="padding:8px 12px;text-align:left">Detail</th>';
+            html += '<th style="padding:8px 12px;text-align:left">Duration</th>';
+            html += '</tr></thead><tbody>';
+
+            for (const s of sessions) {
+                const colors = { RUNNING: 'var(--blue)', COMPLETE: 'var(--green)', FAILED: 'var(--red)', KILLED: 'var(--orange)' };
+                const anColor = s.analyzer === 'JAR' ? 'var(--accent)' : s.analyzer === 'Parser' ? 'var(--green)' : 'var(--orange)';
+                const startTime = (s.startedAt || '').replace('T', ' ').substring(0, 19);
+                html += '<tr style="border-top:1px solid var(--sidebar-border)">';
+                html += '<td style="padding:6px 12px;color:' + anColor + ';font-weight:600">' + esc(s.analyzer || '') + '</td>';
+                html += '<td style="padding:6px 12px;font-family:monospace;font-size:10px">' + esc(s.id || '') + '</td>';
+                html += '<td style="padding:6px 12px;color:' + (colors[s.status] || 'var(--sidebar-muted)') + ';font-weight:700">' + esc(s.status || '') + '</td>';
+                html += '<td style="padding:6px 12px">' + esc(s.type || '') + '</td>';
+                html += '<td style="padding:6px 12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(s.detail || '') + '">' + esc(s.detail || '') + '</td>';
+                html += '<td style="padding:6px 12px">' + esc(s.durationFormatted || '-') + '</td>';
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        } catch (e) {
+            document.getElementById('sessionsList').innerHTML =
+                '<div style="padding:20px;text-align:center;color:var(--red);font-size:13px">Error loading sessions: ' + e.message + '</div>';
+        }
+    }
+    // loadSessions() called above in Promise.all
+    // Auto-refresh sessions every 30s to show live Claude activity
+    // From PollConfig rather than a literal. The number happened to equal the configured value,
+    // so the bypass was silent — changing the config would not have changed this call site.
+    setInterval(loadSessions, (window.PollConfig && PollConfig.sessionPollMs) || 30000);
+
+    // ── Analysis Queue (SSE live) ──
+    let queueState = { current: null, queued: [], history: [] };
+
+    function typeColor(type) {
+        if (!type) return 'var(--sidebar-muted)';
+        if (type === 'JAR_UPLOAD') return 'var(--accent)';
+        if (type === 'PLSQL_ANALYSIS' || type === 'PLSQL_FAST_ANALYSIS') return 'var(--orange)';
+        if (type === 'PARSER_ANALYSIS') return 'var(--green)';
+        if (type.startsWith('CLAUDE_') || type.startsWith('PLSQL_CLAUDE')) return 'var(--purple)';
+        return 'var(--sidebar-text)';
+    }
+    function typeLabel(type) {
+        if (!type) return '';
+        const map = { JAR_UPLOAD:'JAR', PLSQL_ANALYSIS:'PL/SQL', PLSQL_FAST_ANALYSIS:'PL/SQL Fast',
+            PARSER_ANALYSIS:'Parser', CLAUDE_ENRICH:'Claude Enrich',
+            CLAUDE_ENRICH_SINGLE:'Claude Enrich (1)', CLAUDE_RESCAN:'Claude Rescan',
+            CLAUDE_FULL_SCAN:'Claude Full Scan', CLAUDE_CORRECT:'Claude Correct',
+            CLAUDE_CORRECT_SINGLE:'Claude Correct (1)', PLSQL_CLAUDE_VERIFY:'PL/SQL Verify' };
+        return map[type] || type;
+    }
+
+    // Quick Submit tab switching
+    function switchQsTab(tab) {
+        document.getElementById('qsPlsql').style.display = tab === 'plsql' ? '' : 'none';
+        document.getElementById('qsJar').style.display = tab === 'jar' ? '' : 'none';
+        document.querySelectorAll('.qs-tab').forEach(b => {
+            b.classList.toggle('qs-tab-active', b.dataset.tab === tab);
+        });
+    }
+
+    async function submitJarLocal() {
+        const input = document.getElementById('jarPathInput');
+        const resultEl = document.getElementById('jarSubmitResult');
+        const path = input.value.trim();
+        if (!path) {
+            showResult(resultEl, 'error', 'Enter a JAR file path');
+            return;
+        }
+        const mode = document.querySelector('input[name="jarMode"]:checked').value;
+        try {
+            const res = await fetch('/api/jar/jars/analyze-local', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path, mode })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                showResult(resultEl, 'success', 'Queued: ' + (data.jarName || path) + ' (job ' + data.jobId + ')');
+                input.value = '';
+            } else {
+                showResult(resultEl, 'error', data.message || data.error || 'Failed');
+            }
+        } catch (e) {
+            showResult(resultEl, 'error', e.message);
+        }
+        invalidateCache();
+        loadStats();
+        loadProgress();
+    }
+
+    function showResult(el, type, msg) {
+        el.style.display = 'block';
+        if (type === 'success') {
+            el.style.background = 'var(--badge-green-bg)';
+            el.style.color = 'var(--badge-green)';
+        } else {
+            el.style.background = 'var(--badge-red-bg)';
+            el.style.color = 'var(--badge-red)';
+        }
+        el.textContent = msg;
+        setTimeout(() => { el.style.display = 'none'; }, 6000);
+    }
+
+    async function submitParserJobs() {
+        const input = document.getElementById('parserInput');
+        const resultEl = document.getElementById('parserSubmitResult');
+        const lines = input.value.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        if (lines.length === 0) {
+            showResult(resultEl, 'error', 'Enter at least one procedure name');
+            return;
+        }
+        let queued = 0, errors = [];
+        for (const line of lines) {
+            try {
+                const res = await fetch('/api/parser/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ entryPoint: line })
+                });
+                if (res.ok) {
+                    queued++;
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    errors.push(line + ': ' + (err.error || res.statusText));
+                }
+            } catch (e) {
+                errors.push(line + ': ' + e.message);
+            }
+        }
+        if (errors.length === 0) {
+            showResult(resultEl, 'success', queued + ' job(s) queued successfully');
+            input.value = '';
+        } else {
+            showResult(resultEl, 'error', queued + ' queued, ' + errors.length + ' failed: ' + errors[0]);
+        }
+        invalidateCache();
+        loadStats();
+        loadProgress();
+    }
+
+    function openQueueModal() {
+        const m = document.getElementById('queueModal');
+        m.style.display = 'flex';
+        renderQueue();
+    }
+    function closeQueueModal() {
+        document.getElementById('queueModal').style.display = 'none';
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeQueueModal(); });
+
+    function renderQueue() {
+        const el = document.getElementById('queueContent');
+        const c = queueState.current;
+        const q = queueState.queued;
+        const h = queueState.history;
+
+        const running = c ? 1 : 0;
+        const pending = q.length;
+        const done = h.filter(j => j.status === 'COMPLETE').length;
+        const failed = h.filter(j => j.status === 'FAILED').length;
+
+        const sumText = (running ? '1 running' : 'idle') +
+            (pending ? ', ' + pending + ' queued' : '') +
+            (done ? ', ' + done + ' done' : '') +
+            (failed ? ', ' + failed + ' failed' : '');
+        document.getElementById('queueSummary').textContent = sumText;
+        const ms = document.getElementById('queueModalSummary');
+        if (ms) ms.textContent = sumText;
+
+        // Update bar running info
+        const barRun = document.getElementById('queueBarRunning');
+        if (barRun) {
+            if (c) {
+                const pct = c.progressPercent || 0;
+                barRun.innerHTML = '<span style="color:' + typeColor(c.type) + '">' + esc(c.displayName || '').substring(0,40) + '</span> <span style="color:var(--blue)">' + pct + '%</span>';
+            } else {
+                barRun.innerHTML = '';
+            }
+        }
+
+        if (!c && q.length === 0 && h.length === 0) {
+            el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--sidebar-muted);font-size:13px">Queue is empty — upload a JAR or trigger a PL/SQL analysis to get started</div>';
+            return;
+        }
+
+        let html = '';
+
+        // Running job
+        if (c) {
+            const pct = c.progressPercent || 0;
+            const tc = typeColor(c.type);
+            const elapsed = c.elapsedMs ? formatMs(c.elapsedMs) : '';
+            html += '<div style="padding:20px 24px;border-bottom:1px solid var(--sidebar-border);background:var(--badge-blue-bg)">';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
+            html += '<div style="display:flex;align-items:center;gap:8px">';
+            html += '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--blue);animation:pulse 1.5s infinite"></span>';
+            html += '<span style="color:var(--blue);font-weight:700;font-size:13px">RUNNING</span>';
+            html += '<span style="background:' + tc + '22;color:' + tc + ';font-size:10px;padding:1px 6px;border-radius:var(--radius-sm);font-weight:600">' + typeLabel(c.type) + '</span>';
+            html += '</div>';
+            html += '<div style="display:flex;gap:8px;align-items:center">';
+            html += '<span style="font-size:11px;color:var(--sidebar-muted)">' + elapsed + '</span>';
+            html += '<button onclick="cancelJob(\'' + c.id + '\')" style="background:var(--red);border:none;color: var(--text-inverse);padding:4px 12px;border-radius:var(--radius);font-size:11px;cursor:pointer;font-weight:600">Cancel</button>';
+            html += '</div></div>';
+            html += '<div style="font-size:13px;color:var(--sidebar-text);font-weight:600;margin-bottom:4px">' + esc(c.displayName || '') + '</div>';
+            html += '<div style="font-size:12px;color:var(--sidebar-muted);margin-bottom:8px">' + esc(c.currentStep || '') + '</div>';
+            html += '<div style="height:8px;background:var(--sidebar-hover);border-radius:var(--radius-sm);overflow:hidden">';
+            html += '<div style="height:100%;width:' + pct + '%;background:var(--blue);border-radius:var(--radius-sm);transition:width 0.3s"></div></div>';
+            html += '<div style="font-size:10px;color:var(--sidebar-muted);margin-top:4px;text-align:right">' + pct + '%</div>';
+            html += '</div>';
+        }
+
+        // Queued jobs — use pendingOrder to show reordered preview
+        if (q.length > 0) {
+            const displayIds = pendingOrder || q.map(j => j.id);
+            const jobMap = {};
+            q.forEach(j => { jobMap[j.id] = j; });
+            const displayJobs = displayIds.map(id => jobMap[id]).filter(Boolean);
+            const hasChanges = !!pendingOrder;
+
+            html += '<div style="padding:12px 24px;border-bottom:1px solid var(--sidebar-border)">';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+            html += '<div style="font-size:11px;color:var(--orange);font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Queued (' + q.length + ')' + (hasChanges ? ' <span style="color:var(--blue);font-style:italic;text-transform:none;letter-spacing:0"> — order changed</span>' : '') + '</div>';
+            if (hasChanges) {
+                html += '<div style="display:flex;gap:6px">';
+                html += '<button onclick="discardOrder()" style="background:var(--bg-inset);border:none;color:var(--text-secondary);padding:4px 12px;border-radius:var(--radius);font-size:11px;cursor:pointer;font-weight:600">Discard</button>';
+                html += '<button id="applyOrderBtn" onclick="applyOrder()" style="background:var(--blue);border:none;color: var(--text-inverse);padding:4px 14px;border-radius:var(--radius);font-size:11px;cursor:pointer;font-weight:600">Apply Order</button>';
+                html += '</div>';
+            }
+            html += '</div>';
+            displayJobs.forEach((j, i) => {
+                const tc = typeColor(j.type);
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;font-size:12px;border-bottom:1px solid var(--sidebar-border)' + (hasChanges ? ';background:var(--badge-blue-bg)' : '') + '">';
+                html += '<div style="display:flex;align-items:center;gap:8px">';
+                html += '<span style="color:var(--sidebar-muted);font-weight:600;min-width:20px">#' + (i + 1) + '</span>';
+                html += '<span style="background:' + tc + '22;color:' + tc + ';font-size:10px;padding:1px 6px;border-radius:var(--radius-sm);font-weight:600">' + typeLabel(j.type) + '</span>';
+                html += '<span style="color:var(--sidebar-text)">' + esc(j.displayName || '') + '</span>';
+                html += '</div>';
+                html += '<div style="display:flex;gap:4px">';
+                if (i > 0) html += '<button onclick="moveJob(\'' + j.id + '\',-1)" title="Move up" style="background:var(--sidebar-hover);border:none;color:var(--sidebar-text);padding:3px 8px;border-radius:var(--radius-sm);font-size:11px;cursor:pointer">&#9650;</button>';
+                if (i < displayJobs.length - 1) html += '<button onclick="moveJob(\'' + j.id + '\',1)" title="Move down" style="background:var(--sidebar-hover);border:none;color:var(--sidebar-text);padding:3px 8px;border-radius:var(--radius-sm);font-size:11px;cursor:pointer">&#9660;</button>';
+                html += '<button onclick="cancelJob(\'' + j.id + '\')" title="Cancel" style="background:var(--bg-inset);border:none;color:var(--badge-red);padding:3px 8px;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;font-weight:600">&#10005;</button>';
+                html += '</div></div>';
+            });
+            html += '</div>';
+        } else {
+            if (pendingOrder) pendingOrder = null;
+        }
+
+        // History
+        const recent = h.slice(0, 20);
+        if (recent.length > 0) {
+            html += '<div style="padding:12px 24px">';
+            html += '<div style="font-size:11px;color:var(--sidebar-muted);font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em">History</div>';
+            recent.forEach(j => {
+                const isOk = j.status === 'COMPLETE';
+                const isFail = j.status === 'FAILED';
+                const isCancelled = j.status === 'CANCELLED';
+                const icon = isOk ? '<span style="color:var(--green)">&#10003;</span>' : isFail ? '<span style="color:var(--red)">&#10007;</span>' : isCancelled ? '<span style="color:var(--orange)">&#8856;</span>' : '<span style="color:var(--sidebar-muted)">&#8212;</span>';
+                const tc = typeColor(j.type);
+                const elapsed = j.elapsedMs ? formatMs(j.elapsedMs) : '';
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px">';
+                html += '<div style="display:flex;align-items:center;gap:6px;overflow:hidden">';
+                html += icon;
+                html += '<span style="background:' + tc + '22;color:' + tc + ';font-size:9px;padding:1px 5px;border-radius:var(--radius-sm);font-weight:600;white-space:nowrap">' + typeLabel(j.type) + '</span>';
+                html += '<span style="color:var(--sidebar-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.displayName || '') + '</span>';
+                if (j.resultName) html += '<span style="color:var(--sidebar-muted);font-size:10px">&#8594; ' + esc(j.resultName).substring(0,30) + '</span>';
+                if (j.error) html += '<span style="color:var(--red);font-size:10px">' + esc(j.error.substring(0, 50)) + '</span>';
+                html += '</div>';
+                html += '<span style="font-size:10px;color:var(--sidebar-muted);white-space:nowrap;margin-left:8px">' + elapsed + '</span>';
+                html += '</div>';
+            });
+            html += '</div>';
+        }
+
+        // Pulse animation
+        if (!document.getElementById('queuePulseStyle')) {
+            const style = document.createElement('style');
+            style.id = 'queuePulseStyle';
+            style.textContent = '@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}';
+            document.head.appendChild(style);
+        }
+
+        el.innerHTML = html;
+    }
+
+    function formatMs(ms) {
+        if (ms < 1000) return ms + 'ms';
+        const s = Math.floor(ms / 1000);
+        if (s < 60) return s + 's';
+        const m = Math.floor(s / 60);
+        const rs = s % 60;
+        return m + 'm ' + rs + 's';
+    }
+
+    let pendingOrder = null; // null = no unsaved changes, array = reordered IDs
+
+    async function cancelJob(id) {
+        try {
+            const res = await fetch('/api/queue/' + id + '/cancel', { method: 'POST' });
+            if (!res.ok) {
+                const err = await res.text();
+                showQueueError('Cancel failed: ' + (err || res.statusText));
+            }
+        } catch (e) {
+            showQueueError('Cancel failed: ' + e.message);
+        }
+    }
+
+    function moveJob(id, dir) {
+        const ids = (pendingOrder || queueState.queued.map(j => j.id)).slice();
+        const idx = ids.indexOf(id);
+        if (idx < 0) return;
+        const newIdx = idx + dir;
+        if (newIdx < 0 || newIdx >= ids.length) return;
+        [ids[idx], ids[newIdx]] = [ids[newIdx], ids[idx]];
+        pendingOrder = ids;
+        renderQueue();
+    }
+
+    async function applyOrder() {
+        if (!pendingOrder) return;
+        const btn = document.getElementById('applyOrderBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
+        try {
+            const res = await fetch('/api/queue/reorder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ order: pendingOrder })
+            });
+            if (!res.ok) {
+                const err = await res.text();
+                showQueueError('Reorder failed: ' + (err || res.statusText));
+            } else {
+                pendingOrder = null;
+            }
+        } catch (e) {
+            showQueueError('Reorder failed: ' + e.message);
+        }
+        renderQueue();
+    }
+
+    function discardOrder() {
+        pendingOrder = null;
+        renderQueue();
+    }
+
+    function showQueueError(msg) {
+        const el = document.getElementById('queueError');
+        if (el) {
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => { el.style.display = 'none'; }, 5000);
+        }
+    }
+
+    // Poll queue state instead of SSE — avoids holding a persistent connection
+    // that blocks browser connection slots when navigating to sub-pages
+    let _queuePollId = null;
+    async function pollQueue() {
+        try {
+            const d = await fetch('/api/queue').then(r => r.json());
+            const prev = queueState;
+            queueState = d;
+            renderQueue();
+            // Detect completed jobs and refresh stats
+            if (prev.current && !d.current) {
+                invalidateCache();
+                loadStats();
+                loadProgress();
+            }
+        } catch (e) { /* silent */ }
+    }
+    // Polling the queue.
+    //
+    // Was `setInterval(pollQueue, 3000)`, never cleared: measured at 21 requests in 70 seconds on
+    // an idle home page with an EMPTY queue. Three problems, all fixed here.
+    //
+    //  - 3000 ms was hardcoded and 3.3x faster than the configured jobStatusMs of 10000. It could
+    //    not have read PollConfig anyway — poll-config.js used to load after this script.
+    //  - Nothing stopped it: no completion guard and no clearInterval anywhere in this file.
+    //  - It kept polling in a hidden background tab.
+    //
+    // An idle queue is now polled slowly and a busy one at the configured rate, so the
+    // responsiveness that motivated 3 s is kept exactly where it matters.
+    const _QUEUE_BUSY_MS = (window.PollConfig && PollConfig.jobStatusMs) || 10000;
+    const _QUEUE_IDLE_MS = _QUEUE_BUSY_MS * 3;
+
+    function _queueIsBusy() {
+        return !!(queueState && (queueState.current
+                  || (queueState.queued && queueState.queued.length > 0)));
+    }
+
+    function _scheduleQueuePoll() {
+        if (_queuePollId) { clearTimeout(_queuePollId); _queuePollId = null; }
+        if (document.hidden) return;                    // resumed by visibilitychange below
+        _queuePollId = setTimeout(function tick() {
+            pollQueue().then(_scheduleQueuePoll);
+        }, _queueIsBusy() ? _QUEUE_BUSY_MS : _QUEUE_IDLE_MS);
+    }
+
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            if (_queuePollId) { clearTimeout(_queuePollId); _queuePollId = null; }
+        } else {
+            pollQueue().then(_scheduleQueuePoll);       // catch up once, then resume
+        }
+    });
+
+    pollQueue().then(_scheduleQueuePoll);
+    </script>
+
+
+    <!-- Log FAB (bottom-left, always visible) -->
+    <link rel="stylesheet" href="shared/log-fab.css?v=1789225475">
+    <script src="shared/log-fab.js?v=1789329600"></script>
+
+    <link rel="stylesheet" href="shared/api-activity-panel.css?v=1789310000">
+    <script src="shared/api-activity-panel.js?v=1789310000"></script>
+    <script>LogFab.init();</script>
+
+    <!-- Classic Chat -->
+    <link rel="stylesheet" href="shared/chat.css?v=1789232664">
+    <script src="shared/chat-api.js?v=1789240569"></script>
+    <script src="shared/chat.js?v=1788355691"></script>
+    <div id="chatRoot"></div>
+    <script>ChatPanel.init('#chatRoot', 'GLOBAL', () => ({}));</script>
+
+    <!-- New Chatbox + Toggle -->
+    <link rel="stylesheet" href="shared/chatbox.css?v=1789240603">
+    <script src="shared/chatbox.js?v=1789240599"></script>
+    <script src="shared/chat-toggle.js?v=1788261877"></script>
+    <script>SharedChatToggle.init('GLOBAL', () => ({}));</script>
+
+    <!-- Help System -->
+    <link rel="stylesheet" href="shared/help.css?v=1789139145">
+    <script src="shared/help.js?v=1788261878"></script>
+    <script>HelpSystem.init('home');</script>
+
+    <!-- User Manual -->
+    <link rel="stylesheet" href="shared/user-manual.css?v=1789305812">
+    <script src="shared/user-manual.js?v=1789306220"></script>
+    <script>UserManual.init();</script>
+</body>
+</html>

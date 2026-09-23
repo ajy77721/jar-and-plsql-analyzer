@@ -1,0 +1,169 @@
+package com.plsqlanalyzer.web.parser.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import com.analyzer.storage.ArtifactEntry;
+import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+/**
+ * Core file reads: merged call graph, source lookup, node-file collection.
+ *
+ * <p>All access goes through {@link ArtifactStore}. Locations are built with
+ * {@link AnalysisPaths#dirKey}/{@link AnalysisPaths#resolveKey}, which translate the {@code '~'}
+ * identity name into its nested {@code <DBTYPE>/<PROJECT>/<ENV>/<OBJECT>} key. The tilde name is
+ * never used as a literal segment — doing that once made every source view 404.
+ */
+class CoreFileReader {
+
+    /** Extensions tried when the requested source file name has no exact match. */
+    private static final String[] SOURCE_EXTS = {".sql", ".prc", ".fnc", ".pkb", ".pks", ".trg"};
+
+    private final StaticAnalysisReader r;
+
+    CoreFileReader(StaticAnalysisReader r) {
+        this.r = r;
+    }
+
+    /**
+     * A file inside a per-procedure subfolder of a package analysis:
+     * {@code plsql-parse/<nested name>/<subFolder>/<relative>}.
+     *
+     * <p>Package-visible because the facet readers need the same translation. They used to build
+     * it as {@code resolvePath(name + "/" + subFolder, ...)}; a key cannot carry an embedded
+     * separator, so the subfolder is resolved as its own segment here.
+     */
+    static ArtifactKey subKey(String name, String subFolder, String relative) {
+        ArtifactKey k = AnalysisPaths.dirKey(name).resolve(subFolder);
+        for (String seg : relative.split("/")) {
+            if (!seg.isEmpty()) k = k.resolve(seg);
+        }
+        return k;
+    }
+
+    /** Immediate child folders of an analysis directory — the per-procedure subfolders. */
+    static List<ArtifactKey> subFolders(ArtifactStore store, ArtifactKey parent) {
+        try (var s = store.list(parent, false)) {
+            return s.filter(ArtifactEntry::directory)
+                    .map(ArtifactEntry::key)
+                    .sorted(Comparator.comparing(ArtifactKey::leaf))
+                    .toList();
+        } catch (IOException e) {
+            return List.of();
+        }
+    }
+
+    JsonNode getCallGraph(String name) throws IOException {
+        ObjectMapper mapper = r.mapper;
+        ArtifactKey file = r.resolveKey(name, "api/call_graph.json");
+        ArtifactStore store = r.store();
+        if (store.exists(file)) {
+            try (InputStream in = r.openRead(file)) {
+                return mapper.readTree(in);
+            }
+        }
+
+        // Package analysis: merge call_graphs from all proc subfolders
+        JsonNode index;
+        try { index = r.getIndex(name); } catch (IOException e) { index = mapper.createObjectNode(); }
+        if (!index.has("_packageAnalysis") || !index.get("_packageAnalysis").asBoolean())
+            throw new IOException("call_graph.json not found: " + file);
+
+        ObjectNode merged = mapper.createObjectNode();
+        ArrayNode allNodes = mapper.createArrayNode();
+        ArrayNode allEdges = mapper.createArrayNode();
+        for (ArtifactKey sub : subFolders(store, AnalysisPaths.dirKey(name))) {
+            ArtifactKey cg = sub.resolve("api").resolve("call_graph.json");
+            if (!store.exists(cg)) continue;
+            try (InputStream in = r.openRead(cg)) {
+                JsonNode g = mapper.readTree(in);
+                JsonNode n = g.get("nodes"); if (n != null && n.isArray()) n.forEach(allNodes::add);
+                JsonNode e = g.get("edges"); if (e != null && e.isArray()) e.forEach(allEdges::add);
+            } catch (IOException ignored) {}
+        }
+        merged.set("nodes", allNodes);
+        merged.set("edges", allEdges);
+        return merged;
+    }
+
+    String getSource(String name, String fileName) throws IOException {
+        // fileName arrives from a REST path variable and is used as a single key segment. The old
+        // Path.resolve() form would have followed a "../.." out of the analysis folder, so the
+        // guard is explicit here rather than implied by a startsWith(base) check.
+        if (fileName == null || fileName.isBlank() || fileName.contains("..")
+                || fileName.contains("/") || fileName.contains("\\")) {
+            throw new IOException("Invalid source file name: " + fileName);
+        }
+        ArtifactStore store = r.store();
+        ArtifactKey analysisDir = AnalysisPaths.dirKey(name);
+        ArtifactKey sourcesDir = analysisDir.resolve("sources");
+
+        String base = fileName.contains(".") ? fileName.substring(0, fileName.lastIndexOf('.')) : fileName;
+
+        ArtifactKey found = firstExisting(store, sourcesDir, fileName, base);
+        if (found == null) {
+            // Package analysis: source files live in proc subfolders
+            for (ArtifactKey sub : subFolders(store, analysisDir)) {
+                found = firstExisting(store, sub.resolve("sources"), fileName, base);
+                if (found != null) break;
+            }
+        }
+        if (found == null) {
+            throw new IOException("Source file not found: " + sourcesDir.resolve(fileName));
+        }
+        try (InputStream in = r.openRead(found)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /** The exact name if present, else the first extension variant that is. */
+    private static ArtifactKey firstExisting(ArtifactStore store, ArtifactKey dir,
+                                             String fileName, String base) {
+        ArtifactKey exact = dir.resolve(fileName);
+        if (store.exists(exact)) return exact;
+        for (String ext : SOURCE_EXTS) {
+            ArtifactKey alt = dir.resolve(base + ext);
+            if (store.exists(alt)) return alt;
+        }
+        return null;
+    }
+
+    List<ArtifactKey> collectNodeFiles(String name) throws IOException {
+        ObjectMapper mapper = r.mapper;
+        ArtifactStore store = r.store();
+        ArtifactKey analysisDir = AnalysisPaths.dirKey(name);
+
+        List<ArtifactKey> result = new ArrayList<>(nodeJsonKeys(store, analysisDir));
+        if (!result.isEmpty()) return result;
+
+        // Package analysis: collect from subfolders
+        JsonNode index;
+        try { index = r.getIndex(name); } catch (IOException e) { index = mapper.createObjectNode(); }
+        if (index.has("_packageAnalysis") && index.get("_packageAnalysis").asBoolean()) {
+            for (ArtifactKey sub : subFolders(store, analysisDir)) {
+                result.addAll(nodeJsonKeys(store, sub));
+            }
+        }
+        return result;
+    }
+
+    /** {@code <dir>/api/nodes/*.json}. */
+    private static List<ArtifactKey> nodeJsonKeys(ArtifactStore store, ArtifactKey dir) {
+        try (var s = store.list(dir.resolve("api").resolve("nodes"), false)) {
+            return s.filter(java.util.function.Predicate.not(ArtifactEntry::directory))
+                    .filter(e -> e.key().leaf().endsWith(".json"))
+                    .map(ArtifactEntry::key)
+                    .toList();
+        } catch (IOException e) {
+            return List.of();
+        }
+    }
+}

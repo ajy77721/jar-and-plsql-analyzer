@@ -1,0 +1,95 @@
+/* Table detail modal sits above source/code modals (z-index 1000).
+   Trigger detail overlay (.tds-overlay) is z-index 1070 so it renders on top of this modal. */
+#tableDetailModal { z-index: 1060; }
+
+.td-tabs { display: flex; gap: 4px; margin-right: 8px; }
+.td-tab.active { background: var(--accent); color: var(--text-inverse); }
+.td-group { margin-bottom: 12px; }
+.td-group-title { padding: 6px 0; font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.td-access-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+    font-size: 12px; border-bottom: 1px solid var(--border);
+}
+.td-access-row:hover { background: var(--bg-hover); }
+.td-line {
+    font-size: 10px; color: var(--orange); cursor: pointer; font-family: var(--font-mono);
+    flex-shrink: 0;
+}
+.td-line:hover { text-decoration: underline; }
+.td-join-type {
+    font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: var(--radius-sm);
+    background: var(--badge-blue-bg); color: var(--badge-blue);
+}
+/* Trigger detail styles */
+.td-trigger-timing {
+    font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: var(--radius-sm);
+    background: var(--badge-orange-bg); color: var(--orange);
+}
+.td-trigger-event {
+    font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: var(--radius-sm);
+    background: var(--badge-green-bg); color: var(--green);
+}
+.td-source-badge {
+    font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: var(--radius-sm);
+    background: var(--badge-blue-bg); color: var(--badge-blue);
+}
+.td-source-db { background: var(--badge-blue-bg); color: var(--badge-teal); }
+.td-source-parsed { background: var(--badge-purple-bg); color: var(--badge-purple, var(--accent)); }
+.td-action-btn { font-size: 10px; margin-right: 4px; }
+
+/* Claude verification badges */
+.cv-badge { display: inline-block; padding: 1px 6px; border-radius: var(--radius-md); font-size: 9px; font-weight: 700; margin-left: 4px; }
+.cv-badge.confirmed { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-badge.removed { background: var(--badge-red-bg); color: var(--badge-red); text-decoration: line-through; }
+.cv-badge.new { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.cv-summary-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--bg-secondary); border-radius: var(--radius); margin-bottom: 10px; font-size: 11px; }
+.cv-overall { margin-left: auto; font-weight: 600; font-size: 10px; }
+.td-access-row.cv-removed { opacity: 0.65; text-decoration: line-through; }
+.td-access-row.cv-new { border-left: 3px solid var(--blue); padding-left: 8px; }
+
+/* Claude review buttons */
+.cv-review-btns { display: inline-flex; gap: 2px; margin-left: 4px; }
+.cv-review-bulk { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.cv-btn { padding: 2px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 10px; font-weight: 600; cursor: pointer; background: var(--bg-primary); transition: all 0.15s; }
+.cv-btn:hover { transform: scale(1.05); }
+.cv-btn-yes { color: var(--badge-green); border-color: var(--badge-green-bg); }
+.cv-btn-yes:hover { background: var(--badge-green-bg); }
+.cv-btn-no { color: var(--badge-red); border-color: var(--badge-red-bg); }
+.cv-btn-no:hover { background: var(--badge-red-bg); }
+.cv-decision { display: inline-block; padding: 1px 6px; border-radius: var(--radius-sm); font-size: 9px; font-weight: 700; margin-left: 4px; }
+.cv-decision.accepted { background: var(--badge-green-bg); color: var(--badge-green); }
+.cv-decision.rejected { background: var(--badge-red-bg); color: var(--badge-red); }
+
+/* Claude comparison tab styles */
+.cv-compare-summary {
+    display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    background: var(--bg-secondary); border-radius: var(--radius-md); margin-bottom: 12px;
+    font-size: 12px; border: 1px solid var(--border);
+}
+.cv-compare-stat { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; }
+.cv-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.cv-dot-confirmed { background: var(--green); }
+.cv-dot-removed { background: var(--red); }
+.cv-dot-new { background: var(--blue); }
+.cv-dot-unverified { background: var(--bg-inset); }
+.cv-compare-overall { margin-left: auto; font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: var(--radius-sm); background: var(--accent-subtle); color: var(--accent); }
+
+.cv-compare-table { font-size: 12px; }
+.cv-compare-table th { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); white-space: nowrap; }
+.cv-compare-table td { vertical-align: middle; }
+.cv-reason-cell { font-size: 11px; color: var(--text-muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.cv-row-confirmed { background: var(--badge-green-bg); }
+.cv-row-confirmed:hover { background: var(--badge-green-bg); }
+.cv-row-removed { background: var(--badge-red-bg); }
+.cv-row-removed:hover { background: var(--badge-red-bg); }
+.cv-row-removed td { opacity: 0.65; text-decoration: line-through; }
+.cv-row-removed td:last-child { text-decoration: none; opacity: 1; }
+.cv-row-unverified { background: var(--badge-gray-bg); }
+.cv-row-unverified:hover { background: var(--badge-gray-bg); }
+.cv-row-new { background: var(--badge-blue-bg); border-left: 3px solid var(--blue); }
+.cv-row-new:hover { background: var(--badge-blue-bg); }
+
+.cv-source-badge { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: var(--radius-sm); }
+.cv-source-static { background: var(--badge-gray-bg); color: var(--badge-gray); }
+.cv-badge-unverified { background: var(--badge-gray-bg); color: var(--badge-gray); }

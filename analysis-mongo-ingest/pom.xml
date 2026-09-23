@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.codeanalyzer</groupId>
+        <artifactId>plsql-jar-analyzer</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>analysis-mongo-ingest</artifactId>
+    <name>Analysis MongoDB Ingest</name>
+    <description>
+        Persists analysis artifacts into MongoDB with explicit, first-hand relationships.
+
+        Deliberately declares NO mongodb-driver version: it inherits it transitively from
+        analyzer-storage, whose version comes from mongodb.version in the parent pom. That
+        pom records why a second driver version on one classpath is a RUNTIME failure rather than
+        a build failure. See docs/MONGO-MODULE-PLAN.md §1.1.
+    </description>
+
+    <dependencies>
+        <!-- Brings the Mongo driver (version from the parent property) and ArtifactStore. All artifact
+             reads go through ArtifactStore so this module adds no DirectFileIoGateTest entries. -->
+        <dependency>
+            <groupId>com.codeanalyzer</groupId>
+            <artifactId>analyzer-storage</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

@@ -1,0 +1,45 @@
+You are verifying the results of a MySQL SQL static code analysis tool.
+The tool analyzed MySQL SQL stored procedures/functions and extracted table operations (SELECT, INSERT, UPDATE, DELETE, MERGE, TRUNCATE).
+Your task is to verify whether these table operations are correct by examining the actual MySQL SQL source code.
+
+For each table operation found by static analysis, determine:
+- CONFIRMED: The operation is present in the code and correctly identified
+- REMOVED: The operation is NOT actually in the code (false positive)
+- NEW: You found table operations that the static analysis MISSED
+
+ALSO verify the CALL relationships (which procedures/functions each unit calls). Using the CALL CHAIN section and the source, classify each call edge as CONFIRMED (the call really exists), REMOVED (false-positive edge not in the code), or NEW (a call the static analysis MISSED, e.g. inside dynamic SQL / EXEC).
+
+ALSO verify, using the same CONFIRMED/REMOVED/NEW classification, any JOINS, SEQUENCES, DYNAMIC SQL, and PREDICATES (WHERE-clause filters) listed below: confirm each is really present in the source, flag any that are false positives (REMOVED), and report any the static analysis missed (NEW).
+
+=== STATIC ANALYSIS FINDINGS ===
+
+{{FINDINGS}}
+{{CALL_CHAIN}}{{SOURCE_WINDOW_NOTE}}=== MySQL SQL SOURCE CODE ===
+
+{{SOURCE_CODE}}
+=== RESPONSE FORMAT ===
+
+Respond ONLY with a JSON object in this exact format (no markdown, no explanation outside JSON):
+```json
+{
+  "tables": [
+    { "tableName": "TABLE_NAME", "operations": [ { "operation": "SELECT|INSERT|UPDATE|DELETE|MERGE|TRUNCATE", "status": "CONFIRMED|REMOVED|NEW", "procedureName": "procedure that performs this", "lineNumber": 123, "reason": "brief explanation" } ] }
+  ],
+  "calls": [
+    { "fromProcedure": "caller name", "toProcedure": "callee name", "status": "CONFIRMED|REMOVED|NEW", "lineNumber": 123, "reason": "brief explanation" }
+  ],
+  "joins": [
+    { "leftTable": "LEFT_TABLE", "rightTable": "RIGHT_TABLE", "joinType": "INNER|LEFT|RIGHT|CROSS|FULL", "status": "CONFIRMED|REMOVED|NEW", "lineNumber": 123, "reason": "brief explanation" }
+  ],
+  "sequences": [
+    { "sequenceName": "SEQUENCE_NAME", "operation": "NEXTVAL|CURRVAL", "status": "CONFIRMED|REMOVED|NEW", "lineNumber": 123, "reason": "brief explanation" }
+  ],
+  "dynamicSql": [
+    { "type": "EXECUTE_IMMEDIATE|EXEC|SET_SQL|...", "sqlExpression": "the dynamic SQL text", "status": "CONFIRMED|REMOVED|NEW", "lineNumber": 123, "reason": "brief explanation" }
+  ],
+  "predicates": [
+    { "tableName": "TABLE_NAME", "columnName": "COLUMN_NAME", "operator": "=|>|<|LIKE|IN|...", "value": "literal or bind value", "status": "CONFIRMED|REMOVED|NEW", "lineNumber": 123, "reason": "brief explanation" }
+  ],
+  "summary": "brief overall summary"
+}
+```

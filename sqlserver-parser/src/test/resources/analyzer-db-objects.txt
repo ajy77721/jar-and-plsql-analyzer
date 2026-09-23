@@ -1,0 +1,436 @@
+===OBJECT:fn_CalcBonus===
+-- Scalar: bonus calc
+CREATE FUNCTION dbo.fn_CalcBonus(@salary DECIMAL(18,2), @rating INT)
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    RETURN @salary * (CASE WHEN @rating >= 5 THEN 0.20
+                           WHEN @rating >= 3 THEN 0.10
+                           ELSE 0.02 END);
+END;
+GO
+===OBJECT:fn_CalcOrderTotal===
+-- Scalar function calling a table read: order total
+CREATE FUNCTION dbo.fn_CalcOrderTotal(@orderId INT)
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    DECLARE @t DECIMAL(18,2);
+    SELECT @t = SUM(oi.Qty * p.UnitPrice)
+    FROM dbo.OrderItems oi
+    INNER JOIN dbo.Products p ON p.ProductId = oi.ProductId
+    WHERE oi.OrderId = @orderId;
+    RETURN ISNULL(@t, 0);
+END;
+GO
+===OBJECT:fn_GetCustomerTier===
+-- Scalar function: customer tier from spend
+CREATE FUNCTION dbo.fn_GetCustomerTier(@spent DECIMAL(18,2))
+RETURNS NVARCHAR(20)
+AS
+BEGIN
+    RETURN CASE
+        WHEN @spent >= 10000 THEN N'PLATINUM'
+        WHEN @spent >= 5000  THEN N'GOLD'
+        WHEN @spent >= 1000  THEN N'SILVER'
+        ELSE N'BRONZE'
+    END;
+END;
+GO
+===OBJECT:fn_GetEmployeeFullName===
+-- Scalar: full name
+CREATE FUNCTION dbo.fn_GetEmployeeFullName(@id INT)
+RETURNS NVARCHAR(101)
+AS
+BEGIN
+    DECLARE @n NVARCHAR(101);
+    SELECT @n = FirstName + N' ' + LastName FROM dbo.Employees WHERE EmployeeId = @id;
+    RETURN @n;
+END;
+GO
+===OBJECT:fn_GetManagerChain===
+-- Multi-statement TVF: manager chain via RECURSIVE CTE (self-join)
+CREATE FUNCTION dbo.fn_GetManagerChain(@empId INT)
+RETURNS @chain TABLE(Level INT, EmployeeId INT, FullName NVARCHAR(101))
+AS
+BEGIN
+    WITH mgr AS (
+        SELECT 0 AS Lvl, e.EmployeeId, e.ManagerId
+        FROM dbo.Employees e WHERE e.EmployeeId = @empId
+        UNION ALL
+        SELECT m.Lvl + 1, e.EmployeeId, e.ManagerId
+        FROM dbo.Employees e
+        INNER JOIN mgr m ON e.EmployeeId = m.ManagerId
+    )
+    INSERT INTO @chain(Level, EmployeeId, FullName)
+    SELECT m.Lvl, m.EmployeeId, e.FirstName + N' ' + e.LastName
+    FROM mgr m INNER JOIN dbo.Employees e ON e.EmployeeId = m.EmployeeId;
+    RETURN;
+END;
+GO
+===OBJECT:fn_GetOrderItems===
+-- Inline TVF: items of an order (with INNER JOIN)
+CREATE FUNCTION dbo.fn_GetOrderItems(@orderId INT)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT oi.OrderItemId, p.Name AS ProductName, oi.Qty, p.UnitPrice,
+           oi.Qty * p.UnitPrice AS LineTotal
+    FROM dbo.OrderItems oi
+    INNER JOIN dbo.Products p ON p.ProductId = oi.ProductId
+    WHERE oi.OrderId = @orderId
+);
+GO
+===OBJECT:fn_GetQuarter===
+-- Scalar: quarter label
+CREATE FUNCTION dbo.fn_GetQuarter(@d DATE)
+RETURNS NVARCHAR(6)
+AS
+BEGIN
+    RETURN CONCAT(N'Q', DATEPART(QUARTER, @d), N'-', DATEPART(YEAR, @d));
+END;
+GO
+===OBJECT:fn_GetStockLevel===
+-- Scalar: current level
+CREATE FUNCTION dbo.fn_GetStockLevel(@wh INT, @prod INT)
+RETURNS INT
+AS
+BEGIN
+    DECLARE @q INT;
+    SELECT @q = Qty FROM dbo.Stock WHERE WarehouseId = @wh AND ProductId = @prod;
+    RETURN ISNULL(@q, 0);
+END;
+GO
+===OBJECT:fn_IsLowStock===
+-- Scalar: low-stock flag (calls fn_GetStockLevel)
+CREATE FUNCTION dbo.fn_IsLowStock(@wh INT, @prod INT)
+RETURNS BIT
+AS
+BEGIN
+    DECLARE @lvl INT, @reorder INT;
+    SET @lvl = dbo.fn_GetStockLevel(@wh, @prod);
+    SELECT @reorder = ReorderLvl FROM dbo.Stock WHERE WarehouseId = @wh AND ProductId = @prod;
+    RETURN CASE WHEN @lvl <= ISNULL(@reorder, 0) THEN 1 ELSE 0 END;
+END;
+GO
+===OBJECT:fn_ProductTotals===
+-- Inline TVF: product totals in a date range
+CREATE FUNCTION dbo.fn_ProductTotals(@from DATE, @to DATE)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT ProductId, SUM(Amount) AS TotalAmount, COUNT(*) AS SaleCount
+    FROM dbo.SalesFact
+    WHERE SaleDate BETWEEN @from AND @to
+    GROUP BY ProductId
+);
+GO
+===OBJECT:trg_Employees_SalaryAudit===
+-- AFTER trigger: salary change audit
+CREATE TRIGGER dbo.trg_Employees_SalaryAudit
+ON dbo.Employees
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF UPDATE(BaseSalary)
+        INSERT INTO dbo.SalaryHistory(EmployeeId, OldSalary, NewSalary)
+        SELECT i.EmployeeId, d.BaseSalary, i.BaseSalary
+        FROM inserted i INNER JOIN deleted d ON d.EmployeeId = i.EmployeeId
+        WHERE i.BaseSalary <> d.BaseSalary;
+END;
+GO
+===OBJECT:trg_Orders_AfterInsert===
+-- AFTER trigger: audit + recompute total via function
+CREATE TRIGGER dbo.trg_Orders_AfterInsert
+ON dbo.Orders
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.OrderAudit(OrderId, Action)
+    SELECT i.OrderId, 'INSERT' FROM inserted i;
+END;
+GO
+===OBJECT:trg_SalesStaging_Validate===
+-- INSTEAD OF trigger on staging -> validate then push to fact
+CREATE TRIGGER dbo.trg_SalesStaging_Validate
+ON dbo.SalesStaging
+INSTEAD OF INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.SalesFact(ProductId, SaleDate, Amount)
+    SELECT ProductId, SaleDate, Amount
+    FROM inserted
+    WHERE Amount > 0 AND ProductId IS NOT NULL;
+END;
+GO
+===OBJECT:trg_StockMovements_Apply===
+-- AFTER trigger: movement keeps Stock in sync (MERGE upsert)
+CREATE TRIGGER dbo.trg_StockMovements_Apply
+ON dbo.StockMovements
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    MERGE dbo.Stock AS tgt
+    USING (SELECT WarehouseId, ProductId, SUM(Delta) AS D
+           FROM inserted GROUP BY WarehouseId, ProductId) AS src
+        ON tgt.WarehouseId = src.WarehouseId AND tgt.ProductId = src.ProductId
+    WHEN MATCHED THEN UPDATE SET tgt.Qty = tgt.Qty + src.D
+    WHEN NOT MATCHED THEN INSERT(WarehouseId, ProductId, Qty) VALUES(src.WarehouseId, src.ProductId, src.D);
+END;
+GO
+===OBJECT:usp_AddOrderItem===
+-- LEAF proc: add a line item, uses function for line total
+CREATE PROCEDURE dbo.usp_AddOrderItem
+    @OrderId INT, @ProductId INT, @Qty INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @price DECIMAL(18,2);
+    SELECT @price = UnitPrice FROM dbo.Products WHERE ProductId = @ProductId;
+    INSERT INTO dbo.OrderItems(OrderId, ProductId, Qty, LineTotal)
+    VALUES(@OrderId, @ProductId, @Qty, @Qty * @price);
+END;
+GO
+===OBJECT:usp_AdjustStock===
+-- LEAF proc: record a movement (fires trigger)
+CREATE PROCEDURE dbo.usp_AdjustStock
+    @WarehouseId INT, @ProductId INT, @Delta INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.StockMovements(WarehouseId, ProductId, Delta)
+    VALUES(@WarehouseId, @ProductId, @Delta);
+END;
+GO
+===OBJECT:usp_CreateOrder===
+-- MID proc: create order header (calls trigger implicitly), returns id
+CREATE PROCEDURE dbo.usp_CreateOrder
+    @CustomerId INT, @NewOrderId INT OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.Orders(CustomerId) VALUES(@CustomerId);
+    SET @NewOrderId = SCOPE_IDENTITY();
+END;
+GO
+===OBJECT:usp_DeptPayrollReport===
+-- TOP proc: department payroll report — CURSOR + joins + calls fn_GetEmployeeFullName + fn_GetManagerChain
+CREATE PROCEDURE dbo.usp_DeptPayrollReport
+    @DeptId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @eid INT, @name NVARCHAR(101), @sal DECIMAL(18,2);
+    CREATE TABLE #payroll(EmployeeId INT, FullName NVARCHAR(101), Salary DECIMAL(18,2), MgrLevels INT);
+
+    DECLARE emp_cur CURSOR LOCAL FOR
+        SELECT e.EmployeeId, e.BaseSalary
+        FROM dbo.Employees e
+        LEFT JOIN dbo.Departments d ON d.DeptId = e.DeptId
+        WHERE e.DeptId = @DeptId;
+    OPEN emp_cur;
+    FETCH NEXT FROM emp_cur INTO @eid, @sal;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @name = dbo.fn_GetEmployeeFullName(@eid);
+        INSERT INTO #payroll(EmployeeId, FullName, Salary, MgrLevels)
+        SELECT @eid, @name, @sal, (SELECT COUNT(*) FROM dbo.fn_GetManagerChain(@eid));
+        FETCH NEXT FROM emp_cur INTO @eid, @sal;
+    END
+    CLOSE emp_cur;
+    DEALLOCATE emp_cur;
+
+    SELECT * FROM #payroll ORDER BY Salary DESC;
+END;
+GO
+===OBJECT:usp_ExecDynamicReport===
+-- TOP proc: fully DYNAMIC pivot report — builds column list at runtime, sp_executesql,
+-- calls usp_TopProducts + logs via ReportLog
+CREATE PROCEDURE dbo.usp_ExecDynamicReport
+    @From DATE, @To DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @cols NVARCHAR(MAX), @sql NVARCHAR(MAX);
+
+    -- build dynamic column list of quarters present
+    SELECT @cols = STRING_AGG(QUOTENAME(q), ',')
+    FROM (SELECT DISTINCT dbo.fn_GetQuarter(SaleDate) AS q
+          FROM dbo.SalesFact WHERE SaleDate BETWEEN @From AND @To) x;
+
+    IF @cols IS NULL SET @cols = N'[none]';
+
+    SET @sql = N'
+        SELECT ProductId, ' + @cols + N'
+        FROM (
+            SELECT ProductId, dbo.fn_GetQuarter(SaleDate) AS Qtr, Amount
+            FROM dbo.SalesFact
+            WHERE SaleDate BETWEEN @f AND @t
+        ) src
+        PIVOT (SUM(Amount) FOR Qtr IN (' + @cols + N')) pvt;';
+
+    EXEC sp_executesql @sql, N'@f DATE, @t DATE', @f = @From, @t = @To;
+
+    -- also call the mid-level proc
+    EXEC dbo.usp_TopProducts @From, @To, 3;
+
+    INSERT INTO dbo.ReportLog(Report, RowsOut) VALUES('DynamicPivot', @@ROWCOUNT);
+END;
+GO
+===OBJECT:usp_HireEmployee===
+-- LEAF proc: hire
+CREATE PROCEDURE dbo.usp_HireEmployee
+    @First NVARCHAR(50), @Last NVARCHAR(50), @DeptId INT, @MgrId INT, @Salary DECIMAL(18,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.Employees(FirstName, LastName, DeptId, ManagerId, BaseSalary)
+    VALUES(@First, @Last, @DeptId, @MgrId, @Salary);
+END;
+GO
+===OBJECT:usp_LoadSales===
+-- LEAF proc: load staging (fires INSTEAD OF trigger)
+CREATE PROCEDURE dbo.usp_LoadSales
+    @ProductId INT, @SaleDate DATE, @Amount DECIMAL(18,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.SalesStaging(ProductId, SaleDate, Amount)
+    VALUES(@ProductId, @SaleDate, @Amount);
+END;
+GO
+===OBJECT:usp_ProcessOrder===
+-- TOP proc: full order processing — calls usp_CreateOrder + usp_AddOrderItem (cursor)
+-- + fn_CalcOrderTotal + fn_GetCustomerTier, with TRY/CATCH + transaction
+CREATE PROCEDURE dbo.usp_ProcessOrder
+    @CustomerId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @orderId INT, @pid INT, @qty INT, @total DECIMAL(18,2);
+    BEGIN TRY
+        BEGIN TRAN;
+        EXEC dbo.usp_CreateOrder @CustomerId, @orderId OUTPUT;
+
+        -- cursor over a table variable of desired items
+        DECLARE @wanted TABLE(ProductId INT, Qty INT);
+        INSERT INTO @wanted VALUES (1,2),(2,1),(3,5);
+
+        DECLARE item_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT ProductId, Qty FROM @wanted;
+        OPEN item_cur;
+        FETCH NEXT FROM item_cur INTO @pid, @qty;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            EXEC dbo.usp_AddOrderItem @orderId, @pid, @qty;
+            FETCH NEXT FROM item_cur INTO @pid, @qty;
+        END
+        CLOSE item_cur;
+        DEALLOCATE item_cur;
+
+        SET @total = dbo.fn_CalcOrderTotal(@orderId);
+        UPDATE dbo.Orders SET Total = @total, Status = 'CONFIRMED' WHERE OrderId = @orderId;
+
+        UPDATE dbo.Customers
+            SET TotalSpent = TotalSpent + @total,
+                OrderCount = OrderCount + 1,
+                Tier = dbo.fn_GetCustomerTier(TotalSpent + @total)
+        WHERE CustomerId = @CustomerId;
+
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        INSERT INTO dbo.OrderAudit(OrderId, Action) VALUES(NULL, 'ERROR: ' + ERROR_MESSAGE());
+    END CATCH
+END;
+GO
+===OBJECT:usp_PromoteEmployee===
+-- MID proc: promote — calls fn_CalcBonus, fires salary trigger
+CREATE PROCEDURE dbo.usp_PromoteEmployee
+    @EmployeeId INT, @Rating INT, @RaisePct DECIMAL(5,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @cur DECIMAL(18,2), @bonus DECIMAL(18,2);
+    SELECT @cur = BaseSalary FROM dbo.Employees WHERE EmployeeId = @EmployeeId;
+    SET @bonus = dbo.fn_CalcBonus(@cur, @Rating);
+    UPDATE dbo.Employees
+        SET BaseSalary = @cur * (1 + @RaisePct/100.0) + @bonus
+    WHERE EmployeeId = @EmployeeId;
+END;
+GO
+===OBJECT:usp_ReorderReport===
+-- Reporting proc: DYNAMIC SQL reorder report with RIGHT JOIN + CROSS JOIN
+CREATE PROCEDURE dbo.usp_ReorderReport
+    @OrderByCol SYSNAME = 'Qty'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX);
+    SET @sql = N'
+        SELECT w.Code, s.ProductId, s.Qty, s.ReorderLvl,
+               dbo.fn_IsLowStock(s.WarehouseId, s.ProductId) AS IsLow
+        FROM dbo.Stock s
+        RIGHT JOIN dbo.Warehouses w ON w.WarehouseId = s.WarehouseId
+        ORDER BY s.' + QUOTENAME(@OrderByCol) + N' DESC';
+    EXEC (@sql);   -- classic EXEC() dynamic SQL
+END;
+GO
+===OBJECT:usp_SearchOrders===
+-- Reporting proc: DYNAMIC SQL search with LEFT JOIN + APPLY (inline TVF)
+CREATE PROCEDURE dbo.usp_SearchOrders
+    @CustomerName NVARCHAR(100) = NULL, @Status NVARCHAR(20) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @sql NVARCHAR(MAX), @params NVARCHAR(MAX);
+    SET @sql = N'
+        SELECT o.OrderId, c.Name, o.Total, o.Status
+        FROM dbo.Orders o
+        LEFT JOIN dbo.Customers c ON c.CustomerId = o.CustomerId
+        WHERE 1 = 1';
+    IF @CustomerName IS NOT NULL SET @sql += N' AND c.Name LIKE ''%'' + @cn + ''%''';
+    IF @Status IS NOT NULL       SET @sql += N' AND o.Status = @st';
+    SET @params = N'@cn NVARCHAR(100), @st NVARCHAR(20)';
+    EXEC sp_executesql @sql, @params, @cn = @CustomerName, @st = @Status;
+END;
+GO
+===OBJECT:usp_TopProducts===
+-- MID proc: top products — calls fn_ProductTotals + fn_GetQuarter via CROSS APPLY
+CREATE PROCEDURE dbo.usp_TopProducts
+    @From DATE, @To DATE, @TopN INT = 5
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT TOP (@TopN)
+           pt.ProductId, pt.TotalAmount, pt.SaleCount, q.Label
+    FROM dbo.fn_ProductTotals(@From, @To) pt
+    CROSS APPLY (SELECT dbo.fn_GetQuarter(@From) AS Label) q
+    ORDER BY pt.TotalAmount DESC;
+END;
+GO
+===OBJECT:usp_TransferStock===CREATE   PROCEDURE dbo.usp_TransferStock
+    @FromWh INT, @ToWh INT, @ProductId INT, @Qty INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @neg INT = -@Qty;
+    BEGIN TRY
+        BEGIN TRAN;
+        IF dbo.fn_GetStockLevel(@FromWh, @ProductId) < @Qty
+            THROW 50001, 'Insufficient stock at source warehouse', 1;
+        EXEC dbo.usp_AdjustStock @FromWh, @ProductId, @neg;
+        EXEC dbo.usp_AdjustStock @ToWh,   @ProductId, @Qty;
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        THROW;
+    END CATCH
+END;
+GO

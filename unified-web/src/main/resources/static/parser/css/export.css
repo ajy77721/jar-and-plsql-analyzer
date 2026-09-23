@@ -1,0 +1,173 @@
+/* ── Export Modal ─────────────────────────────────────────────────────────── */
+/* TASK-REGISTRY §278 — was a big saturated `var(--blue)` gradient fill covering the entire modal
+ * body, plus (below) an unscoped `.src-modal-header` override that forced a solid `--accent-hover`
+ * bar onto EVERY modal sharing that class — including the real Source View modal, which otherwise
+ * correctly uses a calm `var(--bg)` header (source-view.css) — so this file was silently painting
+ * that one loud too, not just its own. Confirmed live in both cases before fixing. Flattened to
+ * the same 3-surface / 1-border / sparse-accent system already used everywhere else in this app
+ * (`shared/mongodb-theme.css`'s own design rule) — a plain card, not a colored wash. */
+.export-modal {
+    width: 500px;
+    background: var(--bg-card);
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    box-shadow: var(--shadow-lg);
+    max-height: 92vh; overflow-y: auto;
+}
+
+/* ── Header bar — scoped to THIS modal only; the real Source View modal keeps its own calm
+   header (source-view.css's `.src-modal-header`), untouched by this rule now. ────────────────── */
+.export-modal .src-modal-header {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    border-radius: 13px 13px 0 0;
+    padding: 12px 18px;
+}
+.export-modal .src-modal-title {
+    color: var(--text);
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: .02em;
+}
+.export-modal .src-modal-close {
+    color: var(--text-muted);
+}
+.export-modal .src-modal-close:hover { color: var(--text); }
+
+/* ── Body ────────────────────────────────────────────────────────────────────── */
+.export-body { padding: 16px 20px 20px; }
+
+/* ── Info strip ─────────────────────────────────────────────────────────────── */
+.export-info {
+    background: var(--accent-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 10px 14px;
+    margin-bottom: 14px;
+}
+
+/* ── Section labels ──────────────────────────────────────────────────────────── */
+.exp-section-label {
+    font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--text-muted); margin-bottom: 8px; padding-left: 2px;
+    display: flex; align-items: center; gap: 6px;
+}
+.exp-section-label::before {
+    content: ''; display: inline-block;
+    width: 3px; height: 12px; border-radius: var(--radius-sm);
+    background: var(--accent);
+}
+
+/* ── Sheet checkboxes ────────────────────────────────────────────────────────── */
+.export-sections {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 5px; margin-bottom: 12px;
+}
+.export-check {
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+    color: var(--text-secondary); cursor: pointer; padding: 6px 10px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md); transition: background .15s, border-color .15s;
+    user-select: none;
+}
+.export-check:hover {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    color: var(--text-secondary);
+}
+.export-check input[type="checkbox"] { accent-color: var(--accent); }
+
+.exp-sheet-dot {
+    display: inline-block; width: 9px; height: 9px;
+    border-radius: 50%; flex-shrink: 0;
+    box-shadow: 0 0 5px currentColor;
+}
+
+/* ── Divider ─────────────────────────────────────────────────────────────────── */
+.exp-divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent-subtle), transparent);
+    margin: 12px 0;
+}
+
+/* ── Detail level radios ─────────────────────────────────────────────────────── */
+.exp-detail-row {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 5px; margin-bottom: 12px;
+}
+.exp-radio {
+    display: flex; align-items: flex-start; gap: 8px; font-size: 12px;
+    color: var(--text-secondary); cursor: pointer; line-height: 1.45;
+    padding: 8px 10px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md); transition: background .15s, border-color .15s;
+    user-select: none;
+}
+.exp-radio:hover {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+}
+.exp-radio input[type="radio"] { accent-color: var(--accent); margin-top: 2px; }
+.exp-radio b { color: var(--text-secondary); }
+
+/* ── Format buttons ──────────────────────────────────────────────────────────── */
+.export-format {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+.export-format .btn {
+    font-size: 11px;
+    background: var(--badge-gray-bg);
+    border: 1px solid var(--border);
+    color: var(--badge-gray);
+    border-radius: var(--radius); padding: 5px 12px;
+    transition: all .15s;
+}
+.export-format .btn:hover {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.export-format .btn.active {
+    /* §278 — flattened to match `.btn-primary`'s own flat `var(--accent)` fill (checked:
+       plsql/css/style.css:1371 uses no gradient either) instead of this file's own one-off. */
+    background: var(--accent-hover);
+    border-color: transparent;
+    color: var(--text-inverse);
+    font-weight: 700;
+}
+
+/* ── Download button ─────────────────────────────────────────────────────────── */
+.exp-download-btn {
+    /* §278 — flattened; same rationale as `.export-format .btn.active` above. */
+    width: 100%;
+    margin-top: 4px;
+    font-weight: 800;
+    font-size: 13px;
+    background: var(--accent);
+    color: var(--text-inverse);
+    padding: 11px;
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    letter-spacing: .02em;
+    transition: background .15s, opacity .15s, transform .1s;
+}
+.exp-download-btn:hover:not(:disabled) {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+}
+.exp-download-btn:active:not(:disabled) { transform: translateY(0); }
+.exp-download-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+
+/* ── Status feedback ─────────────────────────────────────────────────────────── */
+.exp-status {
+    margin-top: 8px; font-size: 11px; color: var(--text-muted);
+    min-height: 16px; text-align: center;
+    transition: color .2s;
+}
+.exp-status.err { color: var(--red); font-weight: 600; }
+.exp-status.ok  { color: var(--green); font-weight: 600; }

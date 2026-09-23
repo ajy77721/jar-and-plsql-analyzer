@@ -1,0 +1,14 @@
+# Build outputs
+**/target/
+
+# Runtime data — never commit; config/ and data/ are created at runtime
+data/
+config/
+*.hprof
+
+# IDE / OS
+.idea/
+.DS_Store
+
+# Archives
+*.zip

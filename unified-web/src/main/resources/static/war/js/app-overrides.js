@@ -1,0 +1,22 @@
+/**
+ * WAR-specific overrides applied before jar/js/app.js loads.
+ * Redirects the hardcoded /api/jar/progress SSE URL to /api/war/progress, and renames the
+ * artifact in shared JAR-module copy so the WAR page stops telling the user to upload a JAR.
+ */
+window.JA = window.JA || {};
+JA._artifactLabel = 'WAR';
+// Shared jar/js modules that fetch by hand read JA.apiBase() at call time — see jar/js/utils.js.
+JA._apiBase = '/api/war/wars';
+
+(function () {
+    const _NativeES = window.EventSource;
+    function PatchedEventSource(url, opts) {
+        if (url === '/api/jar/progress') url = '/api/war/progress';
+        return new _NativeES(url, opts);
+    }
+    PatchedEventSource.prototype = _NativeES.prototype;
+    PatchedEventSource.CONNECTING = _NativeES.CONNECTING;
+    PatchedEventSource.OPEN       = _NativeES.OPEN;
+    PatchedEventSource.CLOSED     = _NativeES.CLOSED;
+    window.EventSource = PatchedEventSource;
+})();
