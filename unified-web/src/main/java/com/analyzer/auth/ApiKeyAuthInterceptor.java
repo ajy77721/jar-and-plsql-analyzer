@@ -82,7 +82,12 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
                 // page would redirect to /login and its login call would 401 before the admin
                 // gate ever ran.
                 || path.startsWith("/admin-portal")
-                || path.startsWith("/api/admin/");
+                || path.startsWith("/api/admin/")
+                // Docs/manual content is jar-packaged help material served to the browsing UI —
+                // not user data. It ships inside the jar and must be readable before sign-in,
+                // like every other static asset. ("/api/docs" is the list endpoint — no slash.)
+                || path.equals("/api/docs")
+                || path.startsWith("/api/docs/");
     }
 
     @Override

@@ -1168,7 +1168,10 @@
             if (session && session.connected) {
                 // Per-user identity: prefer the authenticated person, fall back to the account.
                 // Never render token material — only name/email/account/role/bucket.
-                const who = session.name || session.email || session.accountName || '?';
+                // Identity Center id_tokens often carry no email/name claims — then the SSO role
+                // is the most human-meaningful identifier available.
+                const who = session.name || session.email || session.accountName
+                    || (session.role ? session.role + ' (' + (session.account || 'SSO') + ')' : '?');
                 el.textContent = 'AWS: ' + who;
                 el.style.background = 'var(--badge-green-bg)';
                 el.style.color = 'var(--green)';
@@ -1272,7 +1275,10 @@
         if (!session || !session.connected) { el.style.display = 'none'; return; }
         const name = session.name || session.email || session.accountName;
         const role = session.role;
-        el.textContent = 'Signed in as ' + (name || 'unknown') + ' · ' + (role || 'unknown');
+        // When no personal claims exist, lead with the role — never a bare "unknown".
+        el.textContent = name
+            ? 'Signed in as ' + name + ' · ' + (role || 'unknown')
+            : 'Signed in via AWS SSO as ' + (role || 'unknown') + ' · account ' + (session.account || '?');
         el.style.color = (name || role) ? 'var(--sidebar-text)' : 'var(--sidebar-muted)';
         el.style.display = 'block';
     }
