@@ -159,19 +159,19 @@ A published image is available on GitHub Container Registry and is updated autom
 # Latest master build
 docker run -d -p 8083:8083 \
   -v analyzer-data:/data \
-  ghcr.io/ajy77721/jar-and-plsql-analyzer:latest
+  ghcr.io/modernization-factory/amp-analyzer:latest
 
 # A released version
 docker run -d -p 8083:8083 \
   -v analyzer-data:/data \
-  ghcr.io/ajy77721/jar-and-plsql-analyzer:v1.2.3
+  ghcr.io/modernization-factory/amp-analyzer:v1.2.3
 ```
 
 All analysis state (config, logs, results, caches) persists in the `analyzer-data` volume at `/data`. Override the port or JVM options with `PORT` / `JAVA_OPTS`:
 
 ```bash
 docker run -d -p 9090:9090 -e PORT=9090 -e JAVA_OPTS="-Xmx8g -XX:+UseG1GC" \
-  -v analyzer-data:/data ghcr.io/ajy77721/jar-and-plsql-analyzer:latest
+  -v analyzer-data:/data ghcr.io/modernization-factory/amp-analyzer:latest
 ```
 
 To build the image locally instead:
