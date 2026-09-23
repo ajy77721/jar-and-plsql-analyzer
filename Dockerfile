@@ -13,6 +13,7 @@ WORKDIR /build
 COPY pom.xml .
 COPY plsql-config/pom.xml      plsql-config/
 COPY plsql-parser/pom.xml      plsql-parser/
+COPY flow-poc/pom.xml          flow-poc/
 COPY mysql-parser/pom.xml      mysql-parser/
 COPY sqlserver-parser/pom.xml  sqlserver-parser/
 COPY db2-parser/pom.xml        db2-parser/
