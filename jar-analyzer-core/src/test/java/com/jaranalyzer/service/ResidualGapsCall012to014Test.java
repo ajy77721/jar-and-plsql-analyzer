@@ -44,14 +44,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ResidualGapsCall012to014Test {
 
-    private static final String SCRATCH =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad";
+    // Fixtures are COMMITTED sources (src/test/resources/scratch/call012/<app>/*.java) compiled
+        // at test time by ScratchCompiler — the original per-session /tmp scratchpad died with
+        // the workspace move (44 NoSuchFileErrors). Same apps, same -g compile, reproducible anywhere.
 
     @Test
     @DisplayName("CALL-012 — JDBC param+param SQL concat-fold resolves both operands via ancestor-chain walking")
     void call012_jdbcParamParamConcatFold() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call012/out/paramparam"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call012", "paramparam"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -68,7 +68,7 @@ class ResidualGapsCall012to014Test {
     @Test
     @DisplayName("CALL-013 — HTTP param+param URL concat-fold resolves both operands via ancestor-chain walking")
     void call013_httpParamParamConcatFold() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call013/out/paramparam"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call013", "paramparam"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -83,7 +83,7 @@ class ResidualGapsCall012to014Test {
     @Test
     @DisplayName("CALL-014 — JDBC Class<?>-across-hops resolves via the CONFIRMED @Entity tier, not the heuristic")
     void call014_classAcrossHopsConfirmedTier() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call014/out/confirmed"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call014", "confirmed"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);

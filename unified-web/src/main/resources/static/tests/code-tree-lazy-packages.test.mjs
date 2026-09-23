@@ -62,6 +62,14 @@ async function loadTree({ summary, fetchClassTreeCalls, classTreePagesImpl } = {
     codeTreeViews: undefined,
     codeTreePanel: undefined,
   };
+  // codeTree._fetchPackageClasses gates its lazy-paging path on `window.PA && PA.pageSource` —
+  // the jar page defines both via shared/page-envelope.js at runtime (index.html loads it before
+  // js/api.js). The harness never loaded it, so canPage was false here and every expansion fell
+  // into the whole-tree fallback this file's lazy path exists to avoid. Provide the minimal
+  // contract the product sees: PA.pageSource exists; the pager itself is the test's own
+  // classTreePagesImpl stub.
+  globalThis.PA = globalThis.PA || {};
+  globalThis.PA.pageSource = globalThis.PA.pageSource || function () { return {}; };
   new Function(await readFile(path.join(STATIC, 'jar/js/codeTree.js'), 'utf8'))();
   new Function(await readFile(path.join(STATIC, 'jar/js/codeTreeViews.js'), 'utf8'))();
   dom.add('class-tree');

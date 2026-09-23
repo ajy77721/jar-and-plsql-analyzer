@@ -159,7 +159,7 @@
     // App scripts sometimes finish attaching apiTracker after this file runs; a couple of cheap
     // retries covers that without a persistent timer.
     var hookTries = 0;
-    var hookRetry = setInterval(function () {
+    var hookRetry = setInterval(function () {   // poll-exempt: self-clearing bootstrap retry (max 10), no network request
         hookLabelSource(window.JA);
         hookLabelSource(window.PA);
         if (++hookTries >= 10) clearInterval(hookRetry);
@@ -296,7 +296,7 @@
 
         // Only polls while the panel is actually open — no background timer otherwise.
         stopRefresh();
-        refreshTimer = setInterval(refreshPanel, 500);
+        refreshTimer = setInterval(refreshPanel /* poll-exempt: re-renders in-memory tracker state only, no network request */, 500);
     }
 
     if (document.readyState === 'loading') {

@@ -42,10 +42,13 @@ export async function test_callGraphViz_showNodeDetail_is_the_click_path_not_the
   // The hover path (_onMouseMove) must never touch PA.nodeIndex — only the geometric _findNodeAt.
   const hoverBody = bodyOf(src, '_onMouseMove: function', '_onMouseUp:');
   excludes(hoverBody, 'PA.nodeIndex', 'the hover path must stay purely geometric, no index lookup');
-  // The click path (_onMouseUp -> _showNodeDetail) is where the lookup actually happens, and it's
-  // async now.
+  // UPDATED for UI-039 (§245): the click path defers _showNodeDetail into the single-click
+  // debounce timer (the old synchronous relayout moved the clicked node out from under a real
+  // double-click's second half), so _onMouseUp no longer `await`s the call in its own body —
+  // the call runs from the timer callback. What must still hold: the click path reaches
+  // _showNodeDetail at all, and the panel preloads before its own lookup.
   const clickBody = bodyOf(src, '_onMouseUp: async function', '_onWheel:');
-  includes(clickBody, 'await PA.callGraphViz._showNodeDetail', 'the click handler must await the now-async detail panel');
+  includes(clickBody, 'PA.callGraphViz._showNodeDetail(', 'the click path must open the detail panel (via the debounce timer since §245)');
   const detailBody = bodyOf(src, '_showNodeDetail: async function', '_closeNodeDetail:');
   includes(detailBody, 'await PA.nodeIndex.ensureLoaded()', '_showNodeDetail must preload before its own lookup');
 }

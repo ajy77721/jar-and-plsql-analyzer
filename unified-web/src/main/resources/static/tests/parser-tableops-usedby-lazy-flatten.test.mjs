@@ -72,6 +72,16 @@ async function loadTableOps() {
     render: (id, details) => `<div id="${id}-tbody" data-count="${details.length}"></div>`,
     mount: () => {}
   };
+  // tableOps calls PA.classifyTableKind (see its use in _renderRow), which lives in
+  // shared/tableFramework.js — the page loads that BEFORE js/tableOps.js (index.html lines 19/37);
+  // the harness never did, so _renderRow threw "PA.classifyTableKind is not a function" here.
+  // Load the real shared file, same order the page does.
+  new Function(await read('shared/tableFramework.js'))();
+  // _renderRow -> _renderUsageSummary reads PA.context.procId (tableFramework scope helpers);
+  // the page initializes PA.context in its own bootstrap, so the harness does the same, default
+  // scope 'full' exactly as an unscoped page load does.
+  globalThis.PA._scope = 'full';
+  globalThis.PA.context = { procId: null };
   new Function(await read('parser/js/tableOps.js'))();
   return globalThis.PA.tableOps;
 }

@@ -2,10 +2,15 @@
  * Hierarchy's collapsed ("Unique") rows — `parser/js/callGraph.js`.
  *
  * <p>Real data drives this: ERP_USP_RUN_CYCLE calls ERP_USP_WRITE_AUDIT_TRAIL from 31 distinct
- * lines, and the uncollapsed tree spent 31 sibling rows saying the same thing. Hierarchy answers
- * "what is the SHAPE of the call structure", so it collapses by default — one row per distinct
- * callee with a &times;N badge. Trace is deliberately the opposite (the complete, execution-order
- * record of every call site, Unique opt-in there) and is not touched by any of this.
+ * lines, and the uncollapsed tree spent 31 sibling rows saying the same thing.
+ *
+ * <p>UPDATED to the current product spec (the original test predates it): the call trace now
+ * defaults to FLAT — "by default every individual call occurrence gets its own top-level row
+ * with its own line number; that is what users actually want to see first; grouping is there
+ * for whoever explicitly asks" (callGraph.js's own doc on `_unique: false`, matching
+ * `PA.trace._unique` in app.js). So the default is asserted flat, and the collapse MECHANICS —
+ * the part that would silently rot — are tested with Unique explicitly enabled, exactly as the
+ * UI's Tree/Flat toggle does it.
  *
  * <p>What is asserted is the part that would silently rot: that collapsing keeps every call-site
  * line number reachable rather than dropping it, that the toggle restores the full per-call-site
@@ -61,7 +66,10 @@ function render(trace, data) {
 
 export async function test_hierarchy_collapses_repeated_callees_by_default() {
   const trace = await loadTrace();
-  equal(trace._unique, true, 'Hierarchy collapses by default — that is the whole point of the view');
+  // Current spec: the trace defaults FLAT (every call site its own row) — Unique is opt-in via
+  // the Tree/Flat toggle. See the file doc for when this changed and why.
+  equal(trace._unique, false, 'Hierarchy defaults to the flat per-call-site view (deliberate product decision)');
+  trace._unique = true; trace._resetGrouping(trace._root = tree());
   const html = render(trace, tree());
   equal(rowCount(html), 3, 'root + one row per distinct callee, not one row per call site');
   ok(html.includes('&times;3'), 'the collapsed row must say how many call sites it stands for');
@@ -69,6 +77,7 @@ export async function test_hierarchy_collapses_repeated_callees_by_default() {
 
 export async function test_collapsing_keeps_every_call_site_line_number() {
   const trace = await loadTrace();
+  trace._unique = true; trace._resetGrouping(trace._root = tree());
   const html = render(trace, tree());
   const chips = html.match(/<div class="ct-callsites"[\s\S]*?<\/div>/)[0];
   const lines = [...chips.matchAll(/@(\d+)/g)].map((m) => Number(m[1]));
@@ -81,6 +90,7 @@ export async function test_collapsing_keeps_every_call_site_line_number() {
 export async function test_collapsing_never_hides_a_subtree_that_exists() {
   const trace = await loadTrace();
   const data = tree();
+  trace._unique = true; trace._resetGrouping(data);
   const html = render(trace, data);
   // Only ONE of the three occurrences carries a child; the representative must be that one, or
   // collapsing would amount to deleting a branch of the call graph.
@@ -94,7 +104,8 @@ export async function test_collapsing_never_hides_a_subtree_that_exists() {
 export async function test_toggling_back_restores_every_individual_call_site() {
   const trace = await loadTrace();
   const data = tree();
-  equal(rowCount(render(trace, data)), 3, 'collapsed to start with');
+  trace._unique = true; trace._resetGrouping(data);
+  equal(rowCount(render(trace, data)), 3, 'collapsed to start with (after enabling Unique)');
 
   trace._unique = false; trace._resetGrouping(data);
   const all = render(trace, data);
@@ -112,6 +123,7 @@ export async function test_toggling_back_restores_every_individual_call_site() {
 export async function test_search_walks_the_children_the_renderer_draws() {
   const trace = await loadTrace();
   const data = tree();
+  trace._unique = true; trace._resetGrouping(data);
   render(trace, data);
   const found = trace._findMatches('audit', 200);
   equal(found.paths.length, 1, 'one collapsed row means one match, not one match per call site');

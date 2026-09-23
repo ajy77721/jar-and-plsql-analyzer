@@ -34,14 +34,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class JdbcTableResolutionCall009Test {
 
-    private static final String ROOT =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/call009/out";
+    // Fixtures are COMMITTED sources (src/test/resources/scratch/call009/<app>/*.java) compiled at
+    // test time by ScratchCompiler — the original per-session /tmp scratchpad died with the
+    // workspace move (44 NoSuchFileErrors). Same apps, same -g compile, reproducible anywhere.
 
     @Test
     @DisplayName("CALL-009 control case — direct literal SQL at the call site resolves (baseline)")
     void controlCase_directLiteralSql() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "control"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call009", "control"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0);
@@ -54,7 +54,7 @@ class JdbcTableResolutionCall009Test {
     @Test
     @DisplayName("CALL-009 single-hop — literal SQL passed as a caller argument now resolves")
     void singleHopCase_paramPropagation() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "singlehop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call009", "singlehop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0);
@@ -70,7 +70,7 @@ class JdbcTableResolutionCall009Test {
     @Test
     @DisplayName("CALL-009 bounded multi-hop — SQL threaded unchanged through 2 wrapper methods now resolves")
     void multiHopCase_boundedPropagation() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "multihop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call009", "multihop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0).getChildren().get(0);
@@ -84,7 +84,7 @@ class JdbcTableResolutionCall009Test {
     @Test
     @DisplayName("CALL-009 concat-fold — literal-prefix + resolvable-param SQL concatenation now resolves")
     void concatCase_literalParamFold() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "concat"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call009", "concat"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -99,7 +99,7 @@ class JdbcTableResolutionCall009Test {
     @Test
     @DisplayName("CALL-009 Class<?> naming-heuristic derivation across a hop (no @Table/@Entity ground truth)")
     void classDerivationCase_namingHeuristicAcrossHop() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "classderiv"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call009", "classderiv"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);

@@ -41,12 +41,18 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class FieldStoredMethodReferenceGapTest {
 
-    private static final Path CLASSES_DIR = Path.of(
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/fieldgap/classes");
+    // Fixtures are COMMITTED sources compiled at test time by ScratchCompiler (see call011).
+    private static final Path CLASSES_DIR = Path.of("scratch-fixtures", "fieldgap", "classes");
+
+    private Path classesDir;
+
+    private Path classesDir() throws Exception {
+        if (classesDir == null) classesDir = ScratchCompiler.compile("fieldgap", "classes");
+        return classesDir;
+    }
 
     private ClassInfo parse(BytecodeClassParser parser, String simpleName) throws Exception {
-        byte[] bytes = Files.readAllBytes(CLASSES_DIR.resolve("com/demo/" + simpleName + ".class"));
+        byte[] bytes = Files.readAllBytes(classesDir().resolve("com/demo/" + simpleName + ".class"));
         ClassInfo ci = parser.parseClass(bytes);
         // Leave sourceJar null: CallTreeBuilder.indexClass treats a null sourceJar as "main jar"
         // (isMainJar = cls.getSourceJar() == null), which is required for REST_CONTROLLER/

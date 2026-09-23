@@ -34,14 +34,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ElasticsearchIndexResolutionCall011Test {
 
-    private static final String ROOT =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/call011/out";
+    // Fixtures are COMMITTED sources (src/test/resources/scratch/call011/<app>/*.java) compiled at
+    // test time by ScratchCompiler — the original per-session /tmp scratchpad died with the
+    // workspace move (44 NoSuchFileErrors). Same apps, same -g compile, reproducible anywhere.
 
     @Test
     @DisplayName("CALL-011 control case — direct literal index name at the call site resolves (baseline)")
     void controlCase_directLiteralIndex() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "control"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call011", "control"));
         printTree(root, 0);
         assertNotNull(root);
         assertTrue(root.isHasDbInteraction());
@@ -53,7 +53,7 @@ class ElasticsearchIndexResolutionCall011Test {
     @Test
     @DisplayName("CALL-011 single-hop — literal index passed as a caller argument now resolves")
     void singleHopCase_paramPropagation() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "singlehop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call011", "singlehop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0);
@@ -69,7 +69,7 @@ class ElasticsearchIndexResolutionCall011Test {
     @Test
     @DisplayName("CALL-011 bounded multi-hop — index name threaded unchanged through 2 wrapper methods now resolves")
     void multiHopCase_boundedPropagation() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "multihop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call011", "multihop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0).getChildren().get(0);
@@ -83,7 +83,7 @@ class ElasticsearchIndexResolutionCall011Test {
     @Test
     @DisplayName("CALL-011 concat-fold — literal-prefix + resolvable-param index concatenation now resolves")
     void concatCase_literalParamFold() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "concat"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call011", "concat"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -98,7 +98,7 @@ class ElasticsearchIndexResolutionCall011Test {
     @Test
     @DisplayName("CALL-016 — param+param index-name concatenation (neither operand a same-method literal) now resolves")
     void paramParamConcatCase_bothOperandsResolvedFromCaller() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "paramparam"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call011", "paramparam"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);

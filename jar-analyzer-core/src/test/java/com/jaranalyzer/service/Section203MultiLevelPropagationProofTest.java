@@ -39,17 +39,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class Section203MultiLevelPropagationProofTest {
 
-    private static final Path CLASSES_A = Path.of(
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/section203/outA2");
-    private static final Path CLASSES_B = Path.of(
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/section203/outB2");
+    // Fixtures are COMMITTED sources compiled at test time by ScratchCompiler (see call011).
+    private Path classesA, classesB;
+
+    private Path classesA() throws IOException {
+        if (classesA == null) classesA = ScratchCompiler.compile("section203", "outA2");
+        return classesA;
+    }
+
+    private Path classesB() throws IOException {
+        if (classesB == null) classesB = ScratchCompiler.compile("section203", "outB2");
+        return classesB;
+    }
 
     @Test
     @DisplayName("§204 Pattern A, FIXED (§213/CALL-008) — multi-level string-concatenation propagation to a Mongo collection name")
     void patternA_stringPropagation() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(CLASSES_A);
+        CallNode root = buildTreeForFirstEndpoint(classesA());
         System.out.println("=== §203 PATTERN A PROOF OUTPUT START ===");
         printTree(root, 0);
         System.out.println("=== §203 PATTERN A PROOF OUTPUT END ===");
@@ -70,7 +76,7 @@ class Section203MultiLevelPropagationProofTest {
     @Test
     @DisplayName("§204 Pattern B, FIXED (§213/CALL-008) — Class<?> propagation down the call chain to derive a collection name")
     void patternB_classPropagation() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(CLASSES_B);
+        CallNode root = buildTreeForFirstEndpoint(classesB());
         System.out.println("=== §203 PATTERN B PROOF OUTPUT START ===");
         printTree(root, 0);
         System.out.println("=== §203 PATTERN B PROOF OUTPUT END ===");

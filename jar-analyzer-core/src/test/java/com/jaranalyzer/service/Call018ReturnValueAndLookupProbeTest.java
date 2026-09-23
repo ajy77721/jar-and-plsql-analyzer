@@ -42,14 +42,12 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class Call018ReturnValueAndLookupProbeTest {
 
-    private static final String SCRATCH =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad";
+    // Fixtures are COMMITTED sources compiled at test time by ScratchCompiler (see call011).
 
     @Test
     @DisplayName("Q1/CALL-019 — collection name reaching the DB call via a 2-hop RETURN VALUE chain (C returns -> B returns -> D uses) NOW resolves (bounded multi-hop return-value chaining)")
     void q1_returnValuePropagationNotTraced() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q1"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q1"));
         printTree(root, 0);
         assertNotNull(root, "endpoint must be indexed");
         // A(handle) -> D(run)
@@ -81,7 +79,7 @@ class Call018ReturnValueAndLookupProbeTest {
         // q1_returnValuePropagationNotTraced above, and call019_threeHopReturnValueChainResolves/
         // call019_chainLongerThanBoundStaysUnresolved below) closed it with a bounded multi-hop walk.
         // See docs/TASK-REGISTRY.md CALL-018 row: single ARETURN, single literal, ONE hop.
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q1single"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q1single"));
         printTree(root, 0);
         assertNotNull(root, "endpoint must be indexed");
         CallNode dNode = root.getChildren().get(0);
@@ -105,7 +103,7 @@ class Call018ReturnValueAndLookupProbeTest {
     @DisplayName("CALL-019 — a 3-hop pass-through return-value chain (D -> B -> C -> E, E has the " +
             "single literal) resolves, proving the bounded walk goes deeper than 2 hops")
     void call019_threeHopReturnValueChainResolves() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q1chain3"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q1chain3"));
         printTree(root, 0);
         assertNotNull(root, "endpoint must be indexed");
         CallNode dNode = root.getChildren().get(0);
@@ -127,7 +125,7 @@ class Call018ReturnValueAndLookupProbeTest {
     @DisplayName("CALL-019 — a 5-hop pass-through return-value chain, ONE hop longer than " +
             "MAX_HOP_DEPTH (4) can walk, correctly stays UNRESOLVED (the bound is real, not just theoretical)")
     void call019_chainLongerThanBoundStaysUnresolved() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q1chain5"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q1chain5"));
         printTree(root, 0);
         assertNotNull(root, "endpoint must be indexed");
         CallNode dNode = root.getChildren().get(0);
@@ -153,7 +151,7 @@ class Call018ReturnValueAndLookupProbeTest {
         // via the diag_* tests below with a $lookup-free control case) — a fixture-naming issue,
         // not a $lookup-specific finding. Using the project's own established naming convention
         // (matching MongoTaggingTest's own documented "orders"/"ORDER_COL" choices) avoids that.
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q2f"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q2f"));
         printTree(root, 0);
         assertNotNull(root, "endpoint must be indexed");
         CallNode leaf = root; // handle() itself performs the aggregate() call directly
@@ -178,7 +176,7 @@ class Call018ReturnValueAndLookupProbeTest {
     @Test
     @DisplayName("Q2b — same $lookup + base-collection shape built with raw org.bson.Document/List<Document> (native-driver style) instead of Aggregation object")
     void q2b_rawDocumentPipelineShape() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q2b_docf"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q2b_docf"));
         printTree(root, 0);
         assertNotNull(root, "endpoint must be indexed");
         CallNode leaf = root;
@@ -193,7 +191,7 @@ class Call018ReturnValueAndLookupProbeTest {
     @Test
     @DisplayName("DIAGNOSTIC — isolate whether Q2's non-capture is caused by $lookup or by the static-field mongoTemplate receiver (instance-field variant, $lookup present, fixed naming)")
     void diag_instanceFieldReceiverWithLookupFixedNaming() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q2_instancef"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q2_instancef"));
         printTree(root, 0);
         System.out.println("DIAG instance+lookup(fixed naming) RESULT: collectionsAccessed=" + root.getCollectionsAccessed());
         assertTrue(root.getCollectionsAccessed().contains("base_collection"));
@@ -202,7 +200,7 @@ class Call018ReturnValueAndLookupProbeTest {
     @Test
     @DisplayName("DIAGNOSTIC — static-field mongoTemplate receiver, NO $lookup, plain empty aggregation + literal base collection (fixed naming)")
     void diag_staticFieldReceiverNoLookupFixedNaming() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(SCRATCH, "call018/out/q2_nolkup_staticf"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call018", "q2_nolkup_staticf"));
         printTree(root, 0);
         System.out.println("DIAG static+noLookup(fixed naming) RESULT: collectionsAccessed=" + root.getCollectionsAccessed());
         assertTrue(root.getCollectionsAccessed().contains("base_collection"));

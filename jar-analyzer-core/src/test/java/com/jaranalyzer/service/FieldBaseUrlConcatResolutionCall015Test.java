@@ -34,14 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  */
 class FieldBaseUrlConcatResolutionCall015Test {
 
-    private static final String ROOT =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/call015/out";
+    // Fixtures are COMMITTED sources compiled at test time by ScratchCompiler (see call011).
 
     @Test
     @DisplayName("CALL-015 — this.baseUrl + path resolves when baseUrl is a single-literal-assigned instance field")
     void fieldConcatCase_resolvesToLiteralPlusParam() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "fieldconcat"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call015", "fieldconcat"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -54,7 +52,7 @@ class FieldBaseUrlConcatResolutionCall015Test {
     @Test
     @DisplayName("CALL-015 negative — this.baseUrl + path stays unresolved when baseUrl comes from a constructor parameter (external-config shape)")
     void fieldConcatCase_unresolvedWhenFieldIsConstructorInjected() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "fieldconcatunresolved"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call015", "fieldconcatunresolved"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);

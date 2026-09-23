@@ -262,7 +262,25 @@ class CollectionResolver {
             return tagSqlClassCallSite(original, call, ancestorCallChain, classRef, ctx);
         }
 
-        JpaMethodDetector.CallSiteSql css = resolveSqlAcrossHops(call, ancestorCallChain);
+        // CALL-009 concat shapes (same defect the ES path had, fixed there first): the CHILD's own
+        // SQL_ ref is where a `literal + param` SQL concatenation is recorded (the callee's body
+        // built the SQL from its parameter — ownerClass repurposed to carry the literal SQL text).
+        // resolveSqlAcrossHops consults only the CALL SITE's own args and walks ANCESTORS for
+        // pass-throughs — it never sees the concat operands, so a caller-supplied table name can
+        // never be folded into it and the ref stayed unresolved forever. When the child's ref is a
+        // CONCAT_* kind, reconstruct the concat-shaped CallSiteSql from the ref and let
+        // foldSqlConcatIfPossible walk the ancestors for the operand value. The eager resolution
+        // path stays correct for the plain SQL_PARAM pass-through shape.
+        String sqlRefKind = String.valueOf(sqlRef.get("varKind"));
+        JpaMethodDetector.CallSiteSql css;
+        if (sqlRefKind.startsWith("SQL_CONCAT")) {
+            css = new JpaMethodDetector.CallSiteSql(null,
+                    new MethodCallInfo.DynamicArgSource(sqlRefKind.substring(4),
+                            String.valueOf(sqlRef.get("variableName")),
+                            String.valueOf(sqlRef.get("ownerClass"))));
+        } else {
+            css = resolveSqlAcrossHops(call, ancestorCallChain);
+        }
         boolean wasConcat = isSqlConcatShape(css);
         css = foldSqlConcatIfPossible(css, ancestorCallChain);
         if (css == null || css.literalSql() == null) return null; // still unresolved — nothing gained
@@ -555,7 +573,27 @@ class CollectionResolver {
         }
 
         Map<String, String> entityMap = (ctx != null && ctx.entityCollectionMap != null) ? ctx.entityCollectionMap : Map.of();
-        ElasticsearchMethodDetector.CallSiteIndex csi = resolveEsAcrossHops(call, ancestorCallChain, entityMap);
+
+        // CALL-011/016 concat shapes: the CHILD's own ES_ ref is where a `literal + param` /
+        // `param + param` index concatenation is recorded (the callee's body built the index name
+        // from its parameter). In that case the caller's literal — which resolveEsAcrossHops would
+        // eagerly walk up and return as the WHOLE index name — is only one OPERAND of the child's
+        // concatenation: feeding it to the eager path reported the bare operand ("east") as the
+        // resolved index instead of the folded value ("orders_east"). So when the child's ref is a
+        // CONCAT_* kind, reconstruct the concat-shaped CallSiteIndex from the ref (both operands
+        // ride on it: variableName = the param, ownerClass = the repurposed literal part) and let
+        // foldEsConcatIfPossible walk the ancestors for the operand value itself. The eager
+        // literal path stays correct for the plain ES_PARAM pass-through shape.
+        String esRefKind = String.valueOf(esRef.get("varKind"));
+        ElasticsearchMethodDetector.CallSiteIndex csi;
+        if (esRefKind.startsWith("ES_CONCAT")) {
+            csi = new ElasticsearchMethodDetector.CallSiteIndex(null,
+                    new MethodCallInfo.DynamicArgSource(esRefKind.substring(3),
+                            String.valueOf(esRef.get("variableName")),
+                            String.valueOf(esRef.get("ownerClass"))));
+        } else {
+            csi = resolveEsAcrossHops(call, ancestorCallChain, entityMap);
+        }
         boolean wasConcat = isEsConcatShape(csi);
         csi = foldEsConcatIfPossible(csi, ancestorCallChain);
         if (csi == null || csi.indexName() == null) return null; // still unresolved — nothing gained
@@ -2021,6 +2059,10 @@ class CollectionResolver {
         m.put("pattern", ddc.pattern());
         m.put("source", ddc.source());
         m.put("operationType", ddc.operationType());
+        // CONCAT_* kinds repurpose ownerClass to carry the concat's literal operand (see
+        // DynamicArgSource's javadoc) — the operand tagGeneralEsCallSite's fold needs. Null for
+        // every other kind, so existing ref shapes are byte-identical.
+        if (ddc.ownerClass() != null) m.put("ownerClass", ddc.ownerClass());
         return m;
     }
 

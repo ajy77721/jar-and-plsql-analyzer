@@ -36,14 +36,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ElasticsearchClassAcrossHopsCall017Test {
 
-    private static final String ROOT =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/call017/out";
+    // Fixtures are COMMITTED sources compiled at test time by ScratchCompiler (see call011).
 
     @Test
     @DisplayName("CALL-017 direct — Class<?> literal at the call site for an @Document(indexName=...) entity resolves")
     void directClassLiteralWithDocumentIndexNameAnnotationResolves() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "direct"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call017", "direct"));
         printTree(root, 0);
         assertNotNull(root);
         assertTrue(root.isHasDbInteraction());
@@ -58,7 +56,7 @@ class ElasticsearchClassAcrossHopsCall017Test {
     @Test
     @DisplayName("CALL-017 confirmed, multi-hop — Class<?> propagated through 2 hops for an @Document(indexName=...) entity resolves via the CONFIRMED tier")
     void classPropagatedThroughTwoHopsWithDocumentIndexNameAnnotationResolvesConfirmed() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "multihop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call017", "multihop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -77,7 +75,7 @@ class ElasticsearchClassAcrossHopsCall017Test {
     @Test
     @DisplayName("CALL-017 heuristic, multi-hop — un-annotated Class<?> propagated through 2 hops resolves via the naming-convention HEURISTIC tier, tagged distinctly")
     void classPropagatedThroughTwoHopsWithoutAnnotationResolvesViaNamingHeuristic() throws IOException {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "heuristic"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call017", "heuristic"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);

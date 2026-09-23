@@ -35,14 +35,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class HttpCallResolutionCall010Test {
 
-    private static final String ROOT =
-        "/private/tmp/claude-502/-Users-ajaysingh-thakur-Desktop-bkup-25-jun-2026-new-proj-jar-beta-jar-plsql-analyzer" +
-        "/461f7dbb-0af7-4cb4-9fba-050c5fdcca63/scratchpad/call010/out";
+    // Fixtures are COMMITTED sources (src/test/resources/scratch/call010/<app>/*.java) compiled
+        // at test time by ScratchCompiler — the original per-session /tmp scratchpad died with
+        // the workspace move (44 NoSuchFileErrors). Same apps, same -g compile, reproducible anywhere.
 
     @Test
     @DisplayName("CALL-010 control case — direct literal URL at the call site resolves (baseline)")
     void controlCase_directLiteralUrl() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "control"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call010", "control"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0);
@@ -54,7 +54,7 @@ class HttpCallResolutionCall010Test {
     @Test
     @DisplayName("CALL-010 single-hop — literal URL passed as a caller argument now resolves")
     void singleHopCase_paramPropagation() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "singlehop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call010", "singlehop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0);
@@ -66,7 +66,7 @@ class HttpCallResolutionCall010Test {
     @Test
     @DisplayName("CALL-010 bounded multi-hop — URL threaded unchanged through 2 wrapper methods now resolves")
     void multiHopCase_boundedPropagation() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "multihop"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call010", "multihop"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0).getChildren().get(0).getChildren().get(0);
@@ -78,7 +78,7 @@ class HttpCallResolutionCall010Test {
     @Test
     @DisplayName("CALL-010 concat-fold — literal-prefix + resolvable-param URL concatenation now resolves")
     void concatCase_literalParamFold() throws Exception {
-        CallNode root = buildTreeForFirstEndpoint(Path.of(ROOT, "concat"));
+        CallNode root = buildTreeForFirstEndpoint(ScratchCompiler.compile("call010", "concat"));
         printTree(root, 0);
         assertNotNull(root);
         CallNode leaf = root.getChildren().get(0).getChildren().get(0).getChildren().get(0);
