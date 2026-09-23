@@ -29,6 +29,7 @@
         <module>plsql-analyzer-core</module>
         <module>jar-analyzer-core</module>
         <module>analysis-mongo-ingest</module>
+        <module>flow-poc</module>
         <module>unified-web</module>
     </modules>
 
