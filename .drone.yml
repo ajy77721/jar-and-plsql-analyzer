@@ -73,25 +73,25 @@ steps:
     event:
     - tag
 
+# Deploy steps use raw kubectl+helm (the amp-platform pattern) instead of the legacy
+# drone-helm:v2 plugin — that plugin is Helm2/Tiller-era and its container fails to start
+# on the current Drone k8s runners ("container failed to start in timely manner").
+# TLS: the cluster serves an Amazon Root CA 1 / Starfield-signed certificate — public CAs
+# present in the image's default trust store, so no CA flag and no insecure mode needed.
 - name: deploy-staging
   pull: if-not-exists
-  image: quay.io/mongodb/drone-helm:v2
-  settings:
-    chart: mongodb/web-app
-    chart_version: 4.35.0   # matches the amp-platform chart pin
-    client_only: true
-    helm_repos: mongodb=https://10gen.github.io/helm-charts
-    namespace: amp-delivery
-    prefix: staging
-    release: amp-analyzer
-    tiller_ns: amp-delivery
-    values: image.tag=git-${DRONE_COMMIT_SHA:0:7},image.repository=ghcr.io/modernization-factory/amp-analyzer
-    values_files:
-    - ./environments/staging.yml
+  image: alpine/k8s:1.30.4
   environment:
-    API_SERVER: https://api.staging.corp.mongodb.com
-    STAGING_KUBERNETES_TOKEN:
+    KUBE_TOKEN:
       from_secret: staging_kubernetes_token
+  commands:
+    - kubectl config set-cluster staging --server=https://api.staging.corp.mongodb.com
+    - kubectl config set-credentials deployer --token="$${KUBE_TOKEN}"
+    - kubectl config set-context staging --cluster=staging --user=deployer --namespace=amp-delivery
+    - kubectl config use-context staging
+    - kubectl auth can-i list pods -n amp-delivery
+    - timeout 120 helm repo add mongodb https://10gen.github.io/helm-charts || true
+    - helm upgrade --install amp-analyzer mongodb/web-app --namespace amp-delivery --version 4.35.0 -f ./environments/staging.yml --set image.repository=ghcr.io/modernization-factory/amp-analyzer --set image.tag=git-${DRONE_COMMIT_SHA:0:7} --wait --timeout 10m0s
   when:
     branch:
     - main
@@ -100,23 +100,18 @@ steps:
 
 - name: deploy-prod
   pull: if-not-exists
-  image: quay.io/mongodb/drone-helm:v2
-  settings:
-    chart: mongodb/web-app
-    chart_version: 4.35.0   # matches the amp-platform chart pin
-    client_only: true
-    helm_repos: mongodb=https://10gen.github.io/helm-charts
-    namespace: amp-delivery
-    prefix: prod
-    release: amp-analyzer
-    tiller_ns: amp-delivery
-    values: image.tag=${DRONE_TAG},image.repository=ghcr.io/modernization-factory/amp-analyzer
-    values_files:
-    - ./environments/prod.yml
+  image: alpine/k8s:1.30.4
   environment:
-    API_SERVER: https://api.prod.corp.mongodb.com
-    PROD_KUBERNETES_TOKEN:
+    KUBE_TOKEN:
       from_secret: prod_kubernetes_token
+  commands:
+    - kubectl config set-cluster prod --server=https://api.prod.corp.mongodb.com
+    - kubectl config set-credentials deployer --token="$${KUBE_TOKEN}"
+    - kubectl config set-context prod --cluster=prod --user=deployer --namespace=amp-delivery
+    - kubectl config use-context prod
+    - kubectl auth can-i list pods -n amp-delivery
+    - timeout 120 helm repo add mongodb https://10gen.github.io/helm-charts || true
+    - helm upgrade --install amp-analyzer mongodb/web-app --namespace amp-delivery --version 4.35.0 -f ./environments/prod.yml --set image.repository=ghcr.io/modernization-factory/amp-analyzer --set image.tag=${DRONE_TAG} --wait --timeout 10m0s
   when:
     event:
     - tag
