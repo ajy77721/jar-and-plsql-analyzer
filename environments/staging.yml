@@ -1,41 +1,66 @@
-# Kanopy values for amp-analyzer — staging environment.
-# Consumed by the mongodb/web-app Helm chart via .drone.yml (deploy-staging step).
+# =============================================================================
+# amp-analyzer — Kanopy Helm values (staging)
+# Chart: mongodb/web-app (4.35.0)
+# Namespace: amp-delivery
+# Ingress host: amp-analyzer.amp-delivery.staging.corp.mongodb.com
+#
+# Single-container app, no sidecars: the Spring Boot unified-web jar serves the
+# UI/API itself and writes every artifact to S3 (app.storage.mode=s3 is the
+# default), so the pod is stateless and needs no bundled datastore.
+# image.tag (git-<sha>) and image.repository are set by .drone.yml deploy-staging.
+# =============================================================================
 
 replicaCount: 1
 
-service:
-  targetPort: 8083
+# -- Image -------------------------------------------------------------------
+image:
+  repository: ghcr.io/modernization-factory/amp-analyzer
+  pullPolicy: IfNotPresent
 
+# -- Services ----------------------------------------------------------------
+# One service carries both ingress and probes; one containerPort per entry.
+services:
+  - name: http
+    ingress: true
+    probes: true
+    port: 80
+    targetPort: 8083
+    protocol: TCP
+    type: ClusterIP
+
+# -- Ingress -----------------------------------------------------------------
 ingress:
   enabled: true
   hosts:
     - amp-analyzer.amp-delivery.staging.corp.mongodb.com
 
+# -- Container environment ---------------------------------------------------
 env:
   PORT: "8083"
-  # Container JVM sizing: 75% of the pod memory limit (see JAVA_OPTS below)
+  # Container JVM sizing: 75% of the pod memory limit (see resources below)
   JAVA_OPTS: "-XX:MaxRAMPercentage=75 -XX:+UseG1GC"
-  # All artifacts live in S3 (default in application.properties) — the pod is stateless.
-  # AWS credentials must reach the app via the default provider chain:
-  # either a pod IAM role (preferred) or envSecrets with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
-  # AWS_REGION is required for the S3 storage backend:
+  # AWS_REGION is required for the S3 storage backend (all artifacts live in S3):
   #   AWS_REGION: ap-south-1
 
 envSecrets:
-  # e.g. AWS credentials for the S3 storage backend, created via the Kanopy secrets flow:
+  # AWS credentials reach the app via the SDK default provider chain. Prefer a
+  # pod IAM role (no entry needed here); otherwise create an S3-scoped secret
+  # store entry and reference it, e.g.:
   # aws-creds: <name-of-secret-store-entry>
 
-resources:
-  limits:
-    cpu: "2"
-    memory: 10Gi
-  requests:
-    cpu: "1"
-    memory: 6Gi
-
-# Liveness/readiness on the home dashboard
+# -- Health probes -----------------------------------------------------------
 probes:
+  enabled: true
   liveness:
     path: /
   readiness:
     path: /
+
+# -- Resources ---------------------------------------------------------------
+resources:
+  requests:
+    cpu: "1"
+    memory: 6Gi
+  limits:
+    cpu: "2"
+    memory: 10Gi

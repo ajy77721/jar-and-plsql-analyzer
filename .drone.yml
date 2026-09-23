@@ -6,8 +6,8 @@ name: default
 platform:
   os: linux
 
-# Modeled on the hello-flask template's .drone.yml:
-#   build -> publish image to ECR -> Helm deploy to Kanopy (staging on push, prod on tag)
+# Modeled on the amp-platform deploy pattern:
+#   build -> publish image to GHCR -> Helm deploy to Kanopy (staging on push, prod on tag)
 
 steps:
 # Testcases disabled for now — this step only verifies the code compiles.
@@ -39,19 +39,17 @@ steps:
 
 - name: build+publish-main-branch
   pull: if-not-exists
-  image: plugins/ecr
+  image: plugins/docker
   settings:
-    create_repository: true
-    registry: 331472312345.dkr.ecr.us-east-1.amazonaws.com
-    repo: 331472312345.dkr.ecr.us-east-1.amazonaws.com/modernization-factory/amp-analyzer
+    registry: ghcr.io
+    repo: ghcr.io/modernization-factory/amp-analyzer
     tags:
     - git-${DRONE_COMMIT_SHA:0:7}
     - latest
-  environment:
-    ECR_ACCESS_KEY:
-      from_secret: ecr_access_key
-    ECR_SECRET_KEY:
-      from_secret: ecr_secret_key
+    username:
+      from_secret: ghcr_user
+    password:
+      from_secret: ghcr_token
   when:
     branch:
     - main
@@ -60,19 +58,17 @@ steps:
 
 - name: build+publish-tag
   pull: if-not-exists
-  image: plugins/ecr
+  image: plugins/docker
   settings:
-    create_repository: true
-    registry: 331472312345.dkr.ecr.us-east-1.amazonaws.com
-    repo: 331472312345.dkr.ecr.us-east-1.amazonaws.com/modernization-factory/amp-analyzer
+    registry: ghcr.io
+    repo: ghcr.io/modernization-factory/amp-analyzer
     tags:
     - ${DRONE_TAG}
     - git-${DRONE_COMMIT_SHA:0:7}
-  environment:
-    ECR_ACCESS_KEY:
-      from_secret: ecr_access_key
-    ECR_SECRET_KEY:
-      from_secret: ecr_secret_key
+    username:
+      from_secret: ghcr_user
+    password:
+      from_secret: ghcr_token
   when:
     event:
     - tag
@@ -82,14 +78,14 @@ steps:
   image: quay.io/mongodb/drone-helm:v2
   settings:
     chart: mongodb/web-app
-    chart_version: 4.7.3   # check the latest at 10gen/helm-charts before first deploy
+    chart_version: 4.35.0   # matches the amp-platform chart pin
     client_only: true
     helm_repos: mongodb=https://10gen.github.io/helm-charts
     namespace: amp-delivery
     prefix: staging
     release: amp-analyzer
     tiller_ns: amp-delivery
-    values: image.tag=git-${DRONE_COMMIT_SHA:0:7},image.repository=331472312345.dkr.ecr.us-east-1.amazonaws.com/modernization-factory/amp-analyzer
+    values: image.tag=git-${DRONE_COMMIT_SHA:0:7},image.repository=ghcr.io/modernization-factory/amp-analyzer
     values_files:
     - ./environments/staging.yml
   environment:
@@ -107,14 +103,14 @@ steps:
   image: quay.io/mongodb/drone-helm:v2
   settings:
     chart: mongodb/web-app
-    chart_version: 4.7.3
+    chart_version: 4.35.0   # matches the amp-platform chart pin
     client_only: true
     helm_repos: mongodb=https://10gen.github.io/helm-charts
     namespace: amp-delivery
     prefix: prod
     release: amp-analyzer
     tiller_ns: amp-delivery
-    values: image.tag=${DRONE_TAG},image.repository=331472312345.dkr.ecr.us-east-1.amazonaws.com/modernization-factory/amp-analyzer
+    values: image.tag=${DRONE_TAG},image.repository=ghcr.io/modernization-factory/amp-analyzer
     values_files:
     - ./environments/prod.yml
   environment:
