@@ -2,8 +2,9 @@
 **/target/
 
 # Runtime data — never commit; config/ and data/ are created at runtime
-data/
-config/
+# (anchored to repo root so source dirs like .../web/config/ are not matched)
+/data/
+/config/
 *.hprof
 
 # IDE / OS

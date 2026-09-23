@@ -1,0 +1,162 @@
+package com.plsqlanalyzer.web.config;
+
+import com.analyzer.storage.AnalysisRepository;
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.CredentialGuardStore;
+import com.analyzer.storage.mongo.MongoAnalysisRepository;
+import com.analyzer.storage.mongo.MongoArtifactStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+/**
+ * Runs the MongoDB backend's three garbage collectors on a schedule.
+ *
+ * <p>All three existed as public methods before this class did, and <b>nothing called any of
+ * them</b> — so in {@code mongodb} mode every abandoned upload, every superseded run and every
+ * diverted oversized payload accumulated for the life of the deployment. The methods were written
+ * with the threshold as a parameter precisely so the decision about what age is safe would belong
+ * to whoever scheduled them; this is that decision, made once and configurable.
+ *
+ * <h2>The three collectors, and why they are three</h2>
+ *
+ * <ol>
+ *   <li>{@link MongoArtifactStore#collectOrphanedGridFsFiles(long)} — GridFS payloads no manifest
+ *       references. Covers two classes: a complete {@code .files} document nothing points at, and
+ *       — the one a sweeper written against {@code GridFSBucket.find()} alone cannot see —
+ *       <em>chunks with no {@code .files} document at all</em>, which is what an abandoned large
+ *       upload leaves behind. For a 912 MB {@code analysis.json} that second class is almost the
+ *       whole write.</li>
+ *   <li>{@link MongoAnalysisRepository#sweepIncompleteRuns(long)} — runs left {@code IN_PROGRESS}
+ *       by a failed or abandoned ingest, plus rows and facets whose marker is gone.</li>
+ *   <li>{@link MongoAnalysisRepository#sweepUnreferencedOverflowBlobs(long)} — artifacts under
+ *       {@code repo-overflow/} that the 12 MB guard diverted and whose referring document has since
+ *       been deleted.</li>
+ * </ol>
+ *
+ * <p>They are separate passes because they fail independently and one failing must not stop the
+ * others: an unreachable GridFS bucket should not also mean incomplete runs pile up.
+ *
+ * <h2>Age, not liveness — why deleting nothing beats deleting too much</h2>
+ *
+ * <p>None of the three can distinguish "abandoned" from "still being written", and there is no
+ * bookkeeping collection to ask. So every one of them takes a minimum age and this service supplies
+ * a single conservative default of <b>one hour</b>, which is far longer than any observed ingest and
+ * far shorter than the interval over which leakage matters. The asymmetry is the whole design: a
+ * sweep that never runs costs disk, a sweep that deletes a live upload costs an analysis. If the
+ * threshold is ever tuned, it must stay comfortably above the longest single write the deployment
+ * performs.
+ *
+ * <p>The first pass is delayed by a full interval so a sweep never competes with startup.
+ *
+ * <h2>Never let housekeeping break the application</h2>
+ *
+ * <p>Same rule as {@link LogArchiveService}: every pass is wrapped, every failure is a WARN, and
+ * nothing propagates. A scheduled method that throws is logged by Spring and silently stops being
+ * useful; worse, an exception here would be an exception in a thread that has nothing to do with
+ * any request, for space that is not urgent.
+ *
+ * <h2>Off outside mongodb mode, by inspection rather than by property</h2>
+ *
+ * <p>There is nothing to collect when the store is local or S3 and the repository is the scanning
+ * one, so the service resolves what it can sweep once, at construction, and does nothing if that is
+ * nothing. The {@link ArtifactStore} bean is always the {@link CredentialGuardStore} wrapper (C4,
+ * applied in {@code StorageFactory.create} for every mode), so the backend is reached through
+ * {@link CredentialGuardStore#delegate()} — the wrapper stays in place for every actual read and
+ * write, including the overflow sweep's, which goes through the guarded store.
+ */
+@Component
+@ConditionalOnProperty(name = "app.storage.mongodb.sweep.enabled",
+                       havingValue = "true", matchIfMissing = true)
+public class MongoHousekeepingService {
+
+    private static final Logger log = LoggerFactory.getLogger(MongoHousekeepingService.class);
+
+    /** Only sweep things this old. One hour, far longer than any observed single write. */
+    public static final long DEFAULT_MIN_AGE_MS = 60 * 60 * 1000L;
+
+    /** The GridFS store, or null when the artifact backend is not MongoDB. */
+    private final MongoArtifactStore mongoStore;
+    /** The Mongo repository, or null when queries are answered by scanning. */
+    private final MongoAnalysisRepository mongoRepo;
+    private final long minAgeMs;
+
+    public MongoHousekeepingService(
+            ArtifactStore store,
+            AnalysisRepository repository,
+            @Value("${app.storage.mongodb.sweep.min-age-ms:" + DEFAULT_MIN_AGE_MS + "}") long minAgeMs) {
+        this.mongoStore = unwrapMongoStore(store);
+        this.mongoRepo = repository instanceof MongoAnalysisRepository m ? m : null;
+        // A zero or negative threshold would sweep writes that are in flight right now. Refuse it
+        // rather than honour it: this is the one setting where a typo destroys data, and the
+        // failure would look like a random ingest error hours later.
+        if (minAgeMs <= 0) {
+            throw new IllegalArgumentException(
+                    "app.storage.mongodb.sweep.min-age-ms must be > 0 (it is what stops the sweeper "
+                    + "deleting a write that is still in progress); was " + minAgeMs
+                    + ". To turn sweeping off set app.storage.mongodb.sweep.enabled=false.");
+        }
+        this.minAgeMs = minAgeMs;
+        if (active()) {
+            log.info("[mongo] housekeeping enabled: gridfs-orphans={} incomplete-runs={} "
+                     + "overflow-blobs={} min-age={} ms",
+                    mongoStore != null, mongoRepo != null, mongoRepo != null, minAgeMs);
+        }
+    }
+
+    /** Reaches the backend through the credential guard, which stays wrapped around it. */
+    private static MongoArtifactStore unwrapMongoStore(ArtifactStore store) {
+        ArtifactStore s = store instanceof CredentialGuardStore g ? g.delegate() : store;
+        return s instanceof MongoArtifactStore m ? m : null;
+    }
+
+    /** True when there is anything at all for this service to collect. */
+    public boolean active() {
+        return mongoStore != null || mongoRepo != null;
+    }
+
+    @Scheduled(fixedDelayString = "${app.storage.mongodb.sweep.interval-ms:900000}",
+               initialDelayString = "${app.storage.mongodb.sweep.interval-ms:900000}")
+    public void sweep() {
+        run();
+    }
+
+    /**
+     * Runs one pass of all three collectors. Returns the total number of things reclaimed.
+     *
+     * <p>Public and returning a count so a test can drive a pass directly instead of waiting for
+     * the scheduler — the same shape {@link LogArchiveService#run()} has.
+     */
+    public int run() {
+        if (!active()) return 0;
+        int reclaimed = 0;
+        reclaimed += pass("GridFS orphan sweep",
+                () -> mongoStore == null ? 0 : mongoStore.collectOrphanedGridFsFiles(minAgeMs));
+        reclaimed += pass("incomplete run sweep",
+                () -> mongoRepo == null ? 0 : mongoRepo.sweepIncompleteRuns(minAgeMs));
+        reclaimed += pass("overflow blob sweep",
+                () -> mongoRepo == null ? 0 : mongoRepo.sweepUnreferencedOverflowBlobs(minAgeMs));
+        return reclaimed;
+    }
+
+    /** One collector, isolated: it cannot fail the pass and it cannot fail the application. */
+    private int pass(String what, Pass body) {
+        try {
+            return body.run();
+        } catch (RuntimeException e) {
+            // Never let housekeeping break the application. Nothing here is required for
+            // correctness — every orphan is already unreachable through every read path — so the
+            // next pass simply retries.
+            log.warn("[mongo] {} failed: {}", what, e.toString());
+            return 0;
+        }
+    }
+
+    @FunctionalInterface
+    private interface Pass {
+        int run();
+    }
+}

@@ -161,6 +161,9 @@
         <h1><span>&lt;/&gt;</span> AMP Code Analyzer</h1>
         <p>Static analysis, call graph visualization, and AI-powered verification for Java and Oracle PL/SQL codebases</p>
         <a href="#" onclick="UserManual.open(); return false;" style="display:inline-flex;align-items:center;gap:6px;margin-top:14px;color:var(--purple);font-size:0.9rem;text-decoration:none;opacity:0.85;transition:opacity 0.2s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.85'">&#128214; User Manual &amp; Documentation</a>
+        <div style="margin-top:12px">
+            <span id="awsSsoStatus" class="badge" style="background:var(--sidebar-hover);color:var(--sidebar-muted)">AWS: not connected</span>
+        </div>
     </div>
 
     <div class="cards">
@@ -292,6 +295,18 @@
         </div>
     </div>
 
+    <!-- AWS S3 Access Bar + Connect with AWS SSO button -->
+    <div id="awsSsoBar" style="margin-top:16px;width:100%;max-width:1000px;padding:0 16px">
+        <div onclick="openAwsSsoModal()" style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-xl);padding:14px 20px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--orange)'" onmouseout="this.style.borderColor='var(--sidebar-border)'">
+            <div style="display:flex;align-items:center;gap:12px">
+                <span style="font-size:18px">&#9729;</span>
+                <span style="color:var(--orange);font-weight:700;font-size:14px">AWS S3 Access</span>
+                <span id="awsSsoBarSummary" style="font-size:12px;color:var(--sidebar-muted)">Connect with AWS SSO to read parse artifacts from S3</span>
+            </div>
+            <span id="awsSsoBarAction" style="font-size:12px;color:var(--orange);font-weight:600">Connect with AWS SSO &#8594;</span>
+        </div>
+    </div>
+
     <!-- Queue Modal Overlay -->
     <div id="queueModal" style="display:none;position:fixed;inset:0;z-index:9999;background:var(--bg-overlay);backdrop-filter:blur(4px);align-items:center;justify-content:center">
         <div style="background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:16px;width:90%;max-width:800px;max-height:85vh;display:flex;flex-direction:column;box-shadow: var(--shadow-lg)">
@@ -306,6 +321,78 @@
             <div id="queueError" style="display:none;padding:10px 24px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-bottom:1px solid var(--sidebar-border)"></div>
             <div id="queueContent" style="overflow-y:auto;flex:1;padding:0">
                 <div style="padding:30px;text-align:center;color:var(--sidebar-muted);font-size:13px">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AWS SSO Modal Overlay -->
+    <div id="awsSsoModal" style="display:none;position:fixed;inset:0;z-index:9999;background:var(--bg-overlay);backdrop-filter:blur(4px);align-items:center;justify-content:center">
+        <div style="background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:16px;width:90%;max-width:560px;max-height:85vh;display:flex;flex-direction:column;box-shadow: var(--shadow-lg)">
+            <div style="padding:20px 24px;border-bottom:1px solid var(--sidebar-border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <span style="font-size:20px">&#9729;</span>
+                    <h2 style="font-size:1.1rem;font-weight:700;color:var(--sidebar-text)">AWS SSO Login</h2>
+                    <span id="awsSsoStepLabel" style="font-size:12px;color:var(--sidebar-muted)">Step 1 of 3</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:12px">
+                    <span id="awsSsoDisconnectWrap" style="display:none">
+                        <a href="#" onclick="awsSsoDisconnect(); return false;" style="color:var(--red);font-size:12px;font-weight:600;text-decoration:none">Disconnect</a>
+                    </span>
+                    <button onclick="closeAwsSsoModal()" style="background:none;border:none;color:var(--sidebar-muted);font-size:22px;cursor:pointer;padding:4px 8px" title="Close">&times;</button>
+                </div>
+            </div>
+            <div style="overflow-y:auto;flex:1;padding:24px">
+
+                <!-- Step 1 — SSO start -->
+                <div id="awsSsoStep1">
+                    <div id="awsSsoError1" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Identity Center portal URL</label>
+                    <input id="awsSsoStartUrl" type="text" placeholder="https://d-xxxxxxxxxx.awsapps.com/start"
+                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
+                        onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                    <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.5;margin-top:6px">
+                        Your AWS access portal URL (IAM Identity Center &rarr; Settings).<br>
+                        Saved in this browser for next time.
+                    </div>
+                    <button id="awsSsoStartBtn" onclick="awsSsoContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                        Continue with AWS SSO
+                    </button>
+                </div>
+
+                <!-- Step 2 — device verification -->
+                <div id="awsSsoStep2" style="display:none">
+                    <div id="awsSsoError2" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+                    <div style="font-size:12px;color:var(--sidebar-muted);line-height:1.5;margin-bottom:10px">
+                        Open the AWS login page and enter this code to approve this device:
+                    </div>
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+                        <code id="awsSsoUserCode" style="flex:1;font-size:22px;font-weight:700;letter-spacing:0.18em;font-family:'Cascadia Code','Fira Code',monospace;color:var(--sidebar-text);background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);padding:12px 14px;text-align:center">-</code>
+                        <button onclick="awsSsoCopyCode()" style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);color:var(--sidebar-text);padding:10px 16px;border-radius:var(--radius-md);font-size:12px;cursor:pointer;font-weight:600;white-space:nowrap">Copy</button>
+                    </div>
+                    <a id="awsSsoVerifyLink" href="#" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;color:var(--orange);font-size:13px;font-weight:600;text-decoration:none">&#128279; Open AWS login page</a>
+                    <div id="awsSsoPollHint" style="font-size:11px;color:var(--sidebar-muted);margin-top:16px">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--orange);animation:pulse 1.5s infinite;margin-right:6px"></span>
+                        Waiting for approval&hellip;
+                    </div>
+                </div>
+
+                <!-- Step 3 — S3 target -->
+                <div id="awsSsoStep3" style="display:none">
+                    <div id="awsSsoError3" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+                    <div id="awsSsoConnectedMsg" style="display:none;padding:10px 14px;background:var(--badge-green-bg);color:var(--green);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">S3 bucket</label>
+                    <input id="awsSsoBucket" type="text" value="amp-analyzer-parse-jar"
+                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none;margin-bottom:14px"
+                        onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">AWS region</label>
+                    <input id="awsSsoRegion" type="text" value="ap-south-1"
+                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
+                        onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                    <button id="awsSsoConnectBtn" onclick="awsSsoConnect()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                        Use this bucket
+                    </button>
+                </div>
+
             </div>
         </div>
     </div>
@@ -1051,6 +1138,252 @@
     });
 
     pollQueue().then(_scheduleQueuePoll);
+
+    // ---------------------------------------------------------------------------
+    // AWS SSO login -> S3 access
+    // ---------------------------------------------------------------------------
+    const AWS_SSO_START_URL_KEY = 'awsSsoStartUrl';
+    const AWS_SSO_DEFAULT_BUCKET = 'amp-analyzer-parse-jar';
+    const AWS_SSO_DEFAULT_REGION = 'ap-south-1';
+    const AWS_SSO_POLL_FALLBACK_MS = 5000;
+
+    let _awsSsoPollId = null;    // setInterval handle for /api/auth/aws/poll
+    let _awsSsoSession = null;   // last known session from /api/auth/aws/session or /connect
+
+    function setAwsSsoPill(session) {
+        const el = document.getElementById('awsSsoStatus');
+        if (el) {
+            if (session && session.connected) {
+                el.textContent = 'AWS: connected · ' + (session.role || '?') + ' @ ' + (session.bucket || '?');
+                el.style.background = 'var(--badge-green-bg)';
+                el.style.color = 'var(--green)';
+            } else {
+                el.textContent = 'AWS: not connected';
+                el.style.background = 'var(--sidebar-hover)';
+                el.style.color = 'var(--sidebar-muted)';
+            }
+        }
+        const summary = document.getElementById('awsSsoBarSummary');
+        if (summary) {
+            summary.textContent = (session && session.connected)
+                ? (session.role || '?') + ' @ ' + (session.bucket || '?') + ' (' + (session.region || '?') + ')'
+                : 'Connect with AWS SSO to read parse artifacts from S3';
+        }
+        const action = document.getElementById('awsSsoBarAction');
+        if (action) {
+            action.textContent = (session && session.connected) ? 'Manage AWS S3 access →' : 'Connect with AWS SSO →';
+        }
+    }
+
+    // Same load-on-open shape as loadClaudeStats: fire on page load, stay silent on failure.
+    async function loadAwsSsoStatus() {
+        try {
+            const d = await fetch('/api/auth/aws/session').then(r => r.ok ? r.json() : null).catch(() => null);
+            if (!d) return;
+            _awsSsoSession = d.connected ? d : null;
+            setAwsSsoPill(d);
+            awsSsoFillTargets(_awsSsoSession);
+        } catch (e) { /* silent */ }
+    }
+    loadAwsSsoStatus();
+
+    function awsSsoFillTargets(session) {
+        const bucketEl = document.getElementById('awsSsoBucket');
+        const regionEl = document.getElementById('awsSsoRegion');
+        if (!bucketEl || !regionEl) return;
+        if (session && session.connected) {
+            if (session.bucket) bucketEl.value = session.bucket;
+            if (session.region) regionEl.value = session.region;
+        } else {
+            if (!bucketEl.value) bucketEl.value = AWS_SSO_DEFAULT_BUCKET;
+            if (!regionEl.value) regionEl.value = AWS_SSO_DEFAULT_REGION;
+        }
+        const msg = document.getElementById('awsSsoConnectedMsg');
+        const disc = document.getElementById('awsSsoDisconnectWrap');
+        if (session && session.connected) {
+            if (msg) { msg.textContent = 'Connected as ' + (session.role || '?'); msg.style.display = 'block'; }
+            if (disc) disc.style.display = '';
+        } else {
+            if (msg) msg.style.display = 'none';
+            if (disc) disc.style.display = 'none';
+        }
+    }
+
+    function awsSsoShowError(step, msg) {
+        for (const n of [1, 2, 3]) {
+            const el = document.getElementById('awsSsoError' + n);
+            if (el) el.style.display = 'none';
+        }
+        const el = document.getElementById('awsSsoError' + step);
+        if (el) { el.textContent = msg; el.style.display = 'block'; }
+    }
+    function awsSsoClearErrors() {
+        for (const n of [1, 2, 3]) {
+            const el = document.getElementById('awsSsoError' + n);
+            if (el) el.style.display = 'none';
+        }
+    }
+
+    function awsSsoShowStep(n) {
+        for (const s of [1, 2, 3]) {
+            const el = document.getElementById('awsSsoStep' + s);
+            if (el) el.style.display = (s === n) ? '' : 'none';
+        }
+        const label = document.getElementById('awsSsoStepLabel');
+        if (label) label.textContent = 'Step ' + n + ' of 3';
+        awsSsoClearErrors();
+    }
+
+    function openAwsSsoModal() {
+        const m = document.getElementById('awsSsoModal');
+        if (!m) return;
+        m.style.display = 'flex';
+        awsSsoClearErrors();
+        // Start URL is remembered per browser, like the other page-local prefs.
+        const input = document.getElementById('awsSsoStartUrl');
+        if (input) {
+            const saved = localStorage.getItem(AWS_SSO_START_URL_KEY);
+            if (saved) input.value = saved;
+        }
+        awsSsoFillTargets(_awsSsoSession);
+        // A live session means there is nothing to authorise — go straight to the S3 target.
+        awsSsoShowStep(_awsSsoSession ? 3 : 1);
+    }
+
+    function closeAwsSsoModal() {
+        const m = document.getElementById('awsSsoModal');
+        if (m) m.style.display = 'none';
+        awsSsoStopPoll();
+    }
+    document.addEventListener('keydown', e => {
+        if (e.key !== 'Escape') return;
+        const m = document.getElementById('awsSsoModal');
+        if (m && m.style.display === 'flex') closeAwsSsoModal();
+    });
+
+    // Step 1 -> 2: register the device authorisation request.
+    async function awsSsoContinue() {
+        const input = document.getElementById('awsSsoStartUrl');
+        const startUrl = ((input && input.value) || '').trim();
+        if (!startUrl) { awsSsoShowError(1, 'Enter your Identity Center portal URL'); return; }
+        const btn = document.getElementById('awsSsoStartBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+        awsSsoClearErrors();
+        try {
+            const res = await fetch('/api/auth/aws/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ startUrl: startUrl })
+            });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                awsSsoShowError(1, d.message || res.statusText || 'Failed to start AWS SSO');
+                return;
+            }
+            localStorage.setItem(AWS_SSO_START_URL_KEY, startUrl);
+            const code = document.getElementById('awsSsoUserCode');
+            if (code) code.textContent = d.userCode || '-';
+            const link = document.getElementById('awsSsoVerifyLink');
+            if (link) {
+                link.href = d.verificationUriComplete || '#';
+                link.style.display = d.verificationUriComplete ? '' : 'none';
+            }
+            awsSsoShowStep(2);
+            awsSsoStartPoll(d.intervalSeconds);
+        } catch (e) {
+            awsSsoShowError(1, 'Failed to start AWS SSO: ' + e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Continue with AWS SSO'; }
+        }
+    }
+
+    function awsSsoCopyCode() {
+        const el = document.getElementById('awsSsoUserCode');
+        const code = el ? el.textContent : '';
+        if (!code || code === '-') return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(code).catch(() => {});
+        }
+    }
+
+    // Step 2 polling. Backend supplies intervalSeconds; 5 s is the documented default.
+    function awsSsoStartPoll(intervalSeconds) {
+        awsSsoStopPoll();
+        const ms = (intervalSeconds && intervalSeconds > 0) ? intervalSeconds * 1000 : AWS_SSO_POLL_FALLBACK_MS;
+        _awsSsoPollId = setInterval(awsSsoPoll, ms);
+    }
+    function awsSsoStopPoll() {
+        if (_awsSsoPollId) { clearInterval(_awsSsoPollId); _awsSsoPollId = null; }
+    }
+    async function awsSsoPoll() {
+        if (!_awsSsoPollId) return;   // modal was closed while a request was in flight
+        try {
+            const res = await fetch('/api/auth/aws/poll', { method: 'POST' });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                awsSsoStopPoll();
+                awsSsoShowError(2, d.message || res.statusText || 'AWS SSO polling failed');
+                return;
+            }
+            if (d.status === 'complete') {
+                awsSsoStopPoll();
+                awsSsoShowStep(3);
+                awsSsoFillTargets(null);
+            }
+            // status === "pending" -> keep polling
+        } catch (e) {
+            awsSsoStopPoll();
+            awsSsoShowError(2, 'AWS SSO polling failed: ' + e.message);
+        }
+    }
+
+    // Step 3: bind the assumed role to a bucket/region.
+    async function awsSsoConnect() {
+        const bucketEl = document.getElementById('awsSsoBucket');
+        const regionEl = document.getElementById('awsSsoRegion');
+        const bucket = ((bucketEl && bucketEl.value) || '').trim();
+        const region = ((regionEl && regionEl.value) || '').trim();
+        if (!bucket || !region) { awsSsoShowError(3, 'Bucket and region are both required'); return; }
+        const btn = document.getElementById('awsSsoConnectBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
+        awsSsoClearErrors();
+        try {
+            const res = await fetch('/api/auth/aws/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bucket: bucket, region: region })
+            });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                awsSsoShowError(3, d.message || res.statusText || 'Failed to connect to S3');
+                return;
+            }
+            _awsSsoSession = {
+                connected: true,
+                account: d.account,
+                role: d.role,
+                bucket: d.bucket || bucket,
+                region: d.region || region
+            };
+            setAwsSsoPill(_awsSsoSession);
+            awsSsoFillTargets(_awsSsoSession);
+        } catch (e) {
+            awsSsoShowError(3, 'Failed to connect to S3: ' + e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Use this bucket'; }
+        }
+    }
+
+    async function awsSsoDisconnect() {
+        try {
+            await fetch('/api/auth/aws/logout', { method: 'POST' });
+        } catch (e) { /* clear the UI regardless */ }
+        _awsSsoSession = null;
+        setAwsSsoPill(null);
+        awsSsoFillTargets(null);
+        awsSsoShowStep(1);
+        loadAwsSsoStatus();
+    }
     </script>
 
 

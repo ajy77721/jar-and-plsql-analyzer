@@ -5,6 +5,7 @@ import com.analyzer.storage.mongo.MongoConnection;
 import com.analyzer.storage.s3.S3ArtifactStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -281,7 +282,7 @@ public final class StorageFactory {
      * than left to each backend, so a future implementation cannot be added without it.
      */
     public static ArtifactStore create(Settings settings) {
-        return create(settings, null);
+        return create(settings, null, null);
     }
 
     /**
@@ -300,10 +301,28 @@ public final class StorageFactory {
      * exactly the way a bucket is.
      */
     public static ArtifactStore create(Settings settings, MongoConnection mongoConnection) {
-        return new CredentialGuardStore(createBackend(settings.validate(), mongoConnection));
+        return create(settings, mongoConnection, null);
     }
 
-    private static ArtifactStore createBackend(Settings settings, MongoConnection mongoConnection) {
+    /**
+     * As {@link #create(Settings, MongoConnection)}, with an explicit {@link AwsCredentialsProvider}
+     * for the S3 client.
+     *
+     * <p>This is the entry point the web application uses: it passes the {@code SsoCredentialsResolver}
+     * bean, whose whole purpose is to answer "the user's SSO role, or the default chain?" per
+     * request. Every other caller — CLIs, tests, non-Spring entry points — passes {@code null} and
+     * keeps the original behaviour, because a null provider is replaced by
+     * {@link DefaultCredentialsProvider#create()} in {@link #buildClient}. Existing signatures are
+     * preserved rather than changed so no call site has to learn about SSO to keep working.
+     */
+    public static ArtifactStore create(Settings settings, MongoConnection mongoConnection,
+                                       AwsCredentialsProvider credentialsProvider) {
+        return new CredentialGuardStore(
+                createBackend(settings.validate(), mongoConnection, credentialsProvider));
+    }
+
+    private static ArtifactStore createBackend(Settings settings, MongoConnection mongoConnection,
+                                               AwsCredentialsProvider credentialsProvider) {
         return switch (settings.mode()) {
             case LOCAL -> {
                 Path root = settings.dataRoot().toAbsolutePath().normalize();
@@ -313,7 +332,7 @@ public final class StorageFactory {
             case S3 -> {
                 String p = settings.normalisedPrefix();
                 log.info("Storage mode: S3 — s3://{}/{}", settings.bucket(), p);
-                yield new S3ArtifactStore(buildClient(settings), settings.bucket(), p);
+                yield new S3ArtifactStore(buildClient(settings, credentialsProvider), settings.bucket(), p);
             }
             case MONGODB -> {
                 String p = settings.normalisedPrefix();
@@ -347,7 +366,8 @@ public final class StorageFactory {
                 MongoArtifactStore mongoStore = new MongoArtifactStore(
                         conn.database(), p, inlineThreshold, "artifacts", 100_000L);
                 mongoStore.ensureIndexes();
-                S3ArtifactStore s3Store = new S3ArtifactStore(buildClient(settings), settings.bucket(), p);
+                S3ArtifactStore s3Store = new S3ArtifactStore(
+                        buildClient(settings, credentialsProvider), settings.bucket(), p);
                 log.info("Storage mode: HYBRID — mongo={}/{} s3=s3://{}/{} prefix='{}' "
                                 + "inline-threshold={} bytes big-threshold={} bytes",
                         conn.redactedUri(), settings.mongoDatabase(), settings.bucket(), p, p,
@@ -367,11 +387,19 @@ public final class StorageFactory {
      * <p>The synchronous Apache HTTP client is selected explicitly. The SDK would otherwise pick
      * whatever is on the classpath, and a Spring Boot fat jar already carries a Netty that the
      * async client would clash with.
+     *
+     * <p>{@code credentialsProvider} is honoured as given when non-null — that is how the web
+     * application wires in {@code SsoCredentialsResolver}, which itself falls back to the default
+     * chain when no SSO session is active. A null provider (every non-Spring caller) resolves to
+     * {@link DefaultCredentialsProvider}, preserving the credential-source guarantee described
+     * above: no access key ever comes from a property or a file this application writes.
      */
-    private static S3Client buildClient(Settings settings) {
+    private static S3Client buildClient(Settings settings, AwsCredentialsProvider credentialsProvider) {
         S3ClientBuilder b = S3Client.builder()
                 .httpClientBuilder(ApacheHttpClient.builder())
-                .credentialsProvider(DefaultCredentialsProvider.create());
+                .credentialsProvider(credentialsProvider != null
+                        ? credentialsProvider
+                        : DefaultCredentialsProvider.create());
         if (settings.region() != null && !settings.region().isBlank()) {
             b.region(Region.of(settings.region().trim()));
         }

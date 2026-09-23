@@ -1,5 +1,7 @@
 package com.analyzer.storage;
 
+import com.analyzer.storage.sso.SsoCredentialsResolver;
+import com.analyzer.storage.sso.SsoStoreSwapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -73,6 +75,8 @@ public class StorageConfig {
     @Bean("parserArtifactStore")
     public ArtifactStore parserArtifactStore(
             com.analyzer.storage.mongo.MongoConnection mongoConnection,
+            SsoStoreSwapper ssoStoreSwapper,
+            SsoCredentialsResolver ssoCredentialsResolver,
             @Value("${app.storage.parser.mode:${app.storage.mode:local}}") String modeProp,
             @Value("${app.data-dir.base:data}") String dataDir,
             @Value("${app.storage.s3.bucket:}") String bucket,
@@ -86,9 +90,9 @@ public class StorageConfig {
             @Value("${app.storage.hybrid.big-threshold:0}") long hybridBigThreshold,
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
             @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind) {
-        return buildArtifactStore(mongoConnection, modeProp, dataDir, bucket, prefix, region,
-                endpoint, mongoUri, mongoDatabase, mongoPrefix, inlineThreshold, hybridBigThreshold,
-                s3AlwaysPaths, s3WriteBehind);
+        return buildAndRegister("parser", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
+                modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
+                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
     }
 
     /**
@@ -105,6 +109,8 @@ public class StorageConfig {
     @Bean("jarArtifactStore")
     public ArtifactStore jarArtifactStore(
             com.analyzer.storage.mongo.MongoConnection mongoConnection,
+            SsoStoreSwapper ssoStoreSwapper,
+            SsoCredentialsResolver ssoCredentialsResolver,
             @Value("${app.storage.jar.mode:${app.storage.mode:local}}") String modeProp,
             @Value("${app.data-dir.base:data}") String dataDir,
             @Value("${app.storage.s3.bucket:}") String bucket,
@@ -118,18 +124,60 @@ public class StorageConfig {
             @Value("${app.storage.hybrid.big-threshold:0}") long hybridBigThreshold,
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
             @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind) {
-        return buildArtifactStore(mongoConnection, modeProp, dataDir, bucket, prefix, region,
-                endpoint, mongoUri, mongoDatabase, mongoPrefix, inlineThreshold, hybridBigThreshold,
-                s3AlwaysPaths, s3WriteBehind);
+        return buildAndRegister("jar", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
+                modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
+                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
+    }
+
+    /**
+     * Builds a store and, for an S3-backed mode, wraps it so it can later be re-pointed at a
+     * user-supplied bucket/region after an AWS SSO login.
+     *
+     * <p>Only S3/HYBRID stores are wrapped and registered: a LOCAL or pure-MONGODB store has no
+     * bucket, so there is nothing for a connect to change. Registering the rebuild function here
+     * (rather than duplicating the mode/prefix/threshold logic in {@code SsoStoreSwapper}) keeps the
+     * knowledge of how a store is constructed in exactly one place.
+     */
+    private ArtifactStore buildAndRegister(
+            String name, com.analyzer.storage.mongo.MongoConnection mongoConnection,
+            SsoStoreSwapper ssoStoreSwapper, SsoCredentialsResolver ssoCredentialsResolver,
+            String modeProp, String dataDir, String bucket, String prefix, String region,
+            String endpoint, String mongoUri, String mongoDatabase, String mongoPrefix,
+            int inlineThreshold, long hybridBigThreshold, String s3AlwaysPaths,
+            boolean s3WriteBehind) {
+        ArtifactStore store = buildArtifactStore(mongoConnection, ssoCredentialsResolver, modeProp,
+                dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase, mongoPrefix,
+                inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
+        StorageMode mode = StorageMode.parse(modeProp);
+        if (mode != StorageMode.S3 && mode != StorageMode.HYBRID) {
+            return store;
+        }
+        SwappableArtifactStore swappable = new SwappableArtifactStore(name, store);
+        // Rebuild uses the bean's own mode/prefix/endpoint/thresholds and only the bucket/region are
+        // overridden, so a connect changes where the bytes go and nothing else. The rebuild calls
+        // buildArtifactStore directly (not buildAndRegister), so it neither re-registers nor
+        // recurses.
+        ssoStoreSwapper.register(name, swappable, (newBucket, newRegion) ->
+                buildArtifactStore(mongoConnection, ssoCredentialsResolver, modeProp, dataDir,
+                        newBucket, prefix, newRegion, endpoint, mongoUri, mongoDatabase, mongoPrefix,
+                        inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind));
+        return swappable;
     }
 
     /**
      * Shared construction logic for both {@link #parserArtifactStore} and {@link #jarArtifactStore}
      * — identical to the single {@code artifactStore()} bean this replaced, modulo which mode
      * property resolved {@code modeProp}.
+     *
+     * <p>The {@link SsoCredentialsResolver} is handed to {@link StorageFactory} for S3/HYBRID modes
+     * so every S3 client — the one built at startup and any built later by a connect — signs with
+     * the user's SSO role while a session is active and the default chain otherwise. The resolver
+     * is unused in local/mongodb modes, matching the "no credentials in properties" guarantee
+     * below.
      */
     private ArtifactStore buildArtifactStore(
             com.analyzer.storage.mongo.MongoConnection mongoConnection,
+            SsoCredentialsResolver ssoCredentialsResolver,
             String modeProp, String dataDir, String bucket, String prefix, String region,
             String endpoint, String mongoUri, String mongoDatabase, String mongoPrefix,
             int inlineThreshold, long hybridBigThreshold, String s3AlwaysPaths,
@@ -152,7 +200,7 @@ public class StorageConfig {
             case HYBRID -> StorageFactory.Settings.hybrid(
                     bucket, mongoPrefix, region, endpoint, mongoUri, mongoDatabase,
                     inlineThreshold, hybridBigThreshold);
-        }, mongoConnection);
+        }, mongoConnection, ssoCredentialsResolver);
         // Path-based S3 routing (hybrid only): keys carrying one of the listed path segments —
         // e.g. the parser's `sources/` SQL files — go to S3 regardless of size, so the size
         // threshold keeps applying only to everything else. Empty/unset means no routing.
