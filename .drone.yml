@@ -81,13 +81,10 @@ steps:
 - name: deploy-staging
   pull: if-not-exists
   image: alpine/k8s:1.30.4
-  environment:
-    KUBE_TOKEN:
-      from_secret: staging_kubernetes_token
   commands:
-    - echo "KUBE_TOKEN length: $${#KUBE_TOKEN}"
+    - echo "token length: $${#STAGING_KUBERNETES_TOKEN}"
     - kubectl config set-cluster staging --server=https://api.staging.corp.mongodb.com
-    - kubectl config set-credentials deployer --token="$(printf "%s" "$${KUBE_TOKEN}" | tr -d "[:space:]")"
+    - kubectl config set-credentials deployer --token="$(printf "%s" "$${STAGING_KUBERNETES_TOKEN}" | tr -d "[:space:]")"
     - kubectl config set-context staging --cluster=staging --user=deployer --namespace=amp-delivery
     - kubectl config use-context staging
     - kubectl auth can-i list pods -n amp-delivery
