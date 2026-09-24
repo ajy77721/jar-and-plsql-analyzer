@@ -42,13 +42,7 @@ env:
   # AWS_REGION is required for the S3 storage backend (all artifacts live in S3):
   #   AWS_REGION: ap-south-1
 
-envSecrets:
-  # AWS credentials reach the app via the SDK default provider chain. Prefer a
-  # pod IAM role (no entry needed here); otherwise create an S3-scoped secret
-  # store entry and reference it, e.g.:
-  # aws-creds: <name-of-secret-store-entry>
-
-# -- Health probes -----------------------------------------------------------
+envSecrets: {}
 probes:
   enabled: true
   liveness:
