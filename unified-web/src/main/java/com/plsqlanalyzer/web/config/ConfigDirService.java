@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.*;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -465,7 +466,18 @@ public class ConfigDirService {
         Path target = configDir.resolve(filename);
         if (Files.exists(target)) return;
         Path cwd = Path.of("").toAbsolutePath();
-        for (Path dir : List.of(cwd, cwd.getParent(), cwd.getParent() != null ? cwd.getParent().getParent() : cwd)) {
+        // Null-safe ancestor walk: in a container the workdir may be shallow (e.g. /app →
+        // parent "/" → grandparent null), and List.of(null, ...) throws NPE — which crashed
+        // the pod on every fresh deployment (worked locally only because dev paths are deep).
+        List<Path> searchDirs = new ArrayList<>();
+        searchDirs.add(cwd);
+        Path parent = cwd.getParent();
+        if (parent != null) {
+            searchDirs.add(parent);
+            Path grandParent = parent.getParent();
+            if (grandParent != null) searchDirs.add(grandParent);
+        }
+        for (Path dir : searchDirs) {
             if (dir == null) continue;
             Path legacy = dir.resolve(filename);
             if (Files.exists(legacy) && !legacy.toAbsolutePath().equals(target.toAbsolutePath())) {
