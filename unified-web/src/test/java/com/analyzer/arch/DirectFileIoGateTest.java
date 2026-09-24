@@ -125,6 +125,12 @@ class DirectFileIoGateTest {
         //    STORED artifact is always reached via store.materialize(key) — never an assumed path.
         //    These are migrated; the residual ops are the temps themselves.
         ALLOWED.put("unified-web/AnalyzerController", 30);
+        // Analysis-ZIP ingest: a multipart ZIP genuinely arrives as a local temp, and ZipFile /
+        // the zip filesystem need a seekable local file to enumerate a central directory. Every
+        // STORED artifact still goes through ArtifactStore.write(key) — the temp is the upload
+        // itself, deleted in a finally, and no ZIP entry name ever becomes a filesystem path. The
+        // raw-.jar branch copies its single entry to a temp the queue executor owns.
+        ALLOWED.put("unified-web/ZipUploadService", 8);
         // Raised 11 -> 19 (2026-09-14): WarAnalyzerController grew this session with the JAR-side
         // feature ports (bundled-jars content read, domain-config upload, connections) — each new
         // route follows the SAME already-migrated pattern as the JAR side (a multipart/upload temp,

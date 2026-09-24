@@ -43,6 +43,15 @@
                     </svg>
                     Upload JAR
                 </button>
+                <button class="upload-btn" id="zip-upload-label" onclick="ZipUpload.open()" style="margin-top:8px"
+                        title="Store a previously produced analysis ZIP (JAR/WAR analysis or a raw .jar/.war) without re-running it">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    Upload analysis ZIP
+                </button>
                 <!-- Hidden per explicit user direction — a dev-only tool (label literally said
                      "(dev)"), not meant for the delivered UI. Left in the DOM (not deleted) so the
                      feature is easy to re-enable later; just not shown. -->
@@ -255,6 +264,17 @@
     <!-- dash-panel removed: sessions/logs available via top bar buttons -->
     <script src="js/app.js?v=1789301206"></script>
     <script src="js/targeted.js?v=1788676702"></script>
+
+    <!-- "Upload analysis ZIP" — shared dialog (also used by the parser page). -->
+    <script src="../shared/zip-upload.js?v=1"></script>
+    <script>
+        ZipUpload.init({
+            notify: function (msg, kind) {
+                JA.toast.show(msg, { error: 'error', success: 'success' }[kind] || 'info', 6000);
+            },
+            onStored: function () { JA.app.loadJars(); }
+        });
+    </script>
 
     <!-- Log FAB (bottom-left, always visible) -->
     <link rel="stylesheet" href="../shared/log-fab.css?v=1789225475">

@@ -74,6 +74,7 @@
                     <p>Oracle PL/SQL Parse Analysis &amp; Call Trace</p>
                     <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
                         <button class="btn btn-sm" onclick="PA.config.showModal()" title="Manage database connections">&#9881; Manage Connections</button>
+                        <button class="btn btn-sm" onclick="ZipUpload.open()" title="Store a previously produced analysis ZIP (PL/SQL parse tree, JAR/WAR analysis, or a raw .jar/.war) without re-running it">&#11014; Upload analysis ZIP</button>
                         <button class="btn btn-sm" onclick="PA.logViewer.toggle()" title="View application logs">&#128196; Logs</button>
                         <button class="btn btn-sm" onclick="PA.cacheManager.open()" title="Manage &amp; clear cache per connection (datasource / project / env)">&#128465; Clear Cache</button>
                         <button class="btn btn-sm" onclick="PA.promptManager.open()" title="Manage Claude prompt templates &amp; global extras">&#128221; Prompt Manager</button>
@@ -907,6 +908,15 @@
     <!-- Resizable columns + horizontal scroll for every PA.tf grid and the Explore Trace view.
          Loaded after app.js and after ../shared/tableFramework.js (both define what it hooks). -->
     <script src="js/tableResize.js?v=1790250000"></script>
+
+    <!-- "Upload analysis ZIP" — shared dialog (also used by the JAR page). -->
+    <script src="../shared/zip-upload.js?v=1"></script>
+    <script>
+        ZipUpload.init({
+            notify: function (msg, kind) { PA.toast(msg, kind === 'error' ? 'error' : 'success'); },
+            onStored: function () { if (PA.loadHistory) PA.loadHistory(); }
+        });
+    </script>
 
     <!-- Classic Chat -->
     <link rel="stylesheet" href="../shared/chat.css?v=1789232664">
