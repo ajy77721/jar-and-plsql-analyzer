@@ -82,6 +82,17 @@ public class LogArchiveService {
     private final int retainMin;
 
     /**
+     * The SSO session registry, consulted only to answer "is there a logged-in, connected user yet?"
+     * — never to read tokens. Field-injected and optional so the public constructor keeps its shape
+     * (tests and stripped-down contexts construct it directly with no SSO wiring at all).
+     */
+    @Autowired(required = false)
+    private SsoSessionRegistry ssoSessionRegistry;
+
+    /** Whether the "no authenticated user" skip has already been logged — one INFO, not one per tick. */
+    private volatile boolean skipLogged = false;
+
+    /**
      * Which {@code ArtifactStore} this ships to is otherwise-arbitrary: log archiving is
      * app-wide infrastructure, not owned by either the PL/SQL parser or the JAR analyzer feature
      * (its {@code logs/archive/} prefix never overlaps either feature's data). Pinned to
@@ -111,11 +122,48 @@ public class LogArchiveService {
         run();
     }
 
-    /** Runs one archive pass. Returns how many files were shipped, for tests. */
+    /**
+     * Runs one archive pass. Returns how many files were shipped, for tests.
+     *
+     * <p>Nothing touches the store until a user with credentials is active: in a per-user (S3)
+     * deployment the routing store cannot be used from this scheduler thread before somebody has
+     * logged in and connected, and the owner's rule is that no store call happens without an
+     * authenticated user. Until then the pass is skipped cleanly — one INFO line — and shipping
+     * resumes by itself once a connected user appears.
+     */
     public int run() {
+        if (!storeUsableWithoutLogin()) {
+            if (!skipLogged) {
+                skipLogged = true;
+                log.info("Log archiving paused: no authenticated AWS SSO user yet — shipping resumes "
+                        + "once a user with credentials is connected");
+            }
+            return 0;
+        }
+        skipLogged = false;
         int shippedNow = shipRolledLogs();
         pruneOldArchives();
         return shippedNow;
+    }
+
+    /**
+     * True when this pass may talk to the store.
+     *
+     * <p>Only a per-user routing store needs a login first; a local or MongoDB store has no
+     * per-user auth step, so archiving there is unaffected. Also true when no registry is wired in
+     * (a unit test, or a context with SSO switched off), which keeps the pre-existing behaviour
+     * exactly as it was.
+     */
+    private boolean storeUsableWithoutLogin() {
+        if (!(store instanceof SessionRoutingArtifactStore)) return true;
+        SsoSessionRegistry registry = ssoSessionRegistry;
+        if (registry == null) return true;
+        for (ActiveUserInfo user : registry.listActive()) {
+            // Logged in AND connected: a verified bucket means the user has credentials this
+            // deployment can actually write with. No token material is read or logged here.
+            if (user.identity() != null && user.bucket() != null) return true;
+        }
+        return false;
     }
 
     /**
