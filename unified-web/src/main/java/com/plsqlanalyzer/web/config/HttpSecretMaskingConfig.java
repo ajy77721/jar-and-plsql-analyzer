@@ -9,7 +9,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Keeps database passwords out of every HTTP response.
+ * Keeps database passwords (and TLS truststore passwords) out of every HTTP response.
  *
  * <p>{@code GET /api/plsql/config} serialised {@link ConnectionConfig} directly, so it returned the
  * plaintext production database passwords to any unauthenticated caller — and
@@ -55,6 +55,19 @@ public class HttpSecretMaskingConfig {
         abstract String getPassword();
         @JsonProperty("password")
         abstract void setPassword(String password);
+
+        // {@code truststorePassword} is a second secret on the same object (the JKS truststore
+        // password used by the DB2 / Oracle JSSE setups) and was NOT covered when this mixin only
+        // hid {@code password} — so {@code GET /api/plsql/config} and the per-environment
+        // connection list returned it in cleartext, the exact leak this class exists to prevent.
+        // Same getter/setter split as {@code password} above, and for the same reason: masking the
+        // getter alone would make Jackson ignore the property in BOTH directions, silently dropping
+        // a client-submitted truststore password. The explicit @JsonProperty on the setter keeps the
+        // write path bound while nothing writes it back out.
+        @JsonIgnore
+        abstract String getTruststorePassword();
+        @JsonProperty("truststorePassword")
+        abstract void setTruststorePassword(String truststorePassword);
     }
 
     /**

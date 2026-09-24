@@ -763,6 +763,19 @@ PA.api = {
         return res.json();
     },
 
+    /**
+     * Standard TCP port → database-type table from the server
+     * (`GET /api/plsql/config/db-type-suggest`, the authoritative copy of `DbType.standardPortMap`):
+     * `{ "1521": "ORACLE", "3306": "MYSQL", ... }`. The setup modal uses it to auto-select a DB type
+     * as a port is typed. Never raises the shared error banner — returns `{}` on failure so the
+     * caller quietly keeps its built-in fallback table.
+     */
+    async getDbTypeSuggestions() {
+        const res = await fetch('/api/plsql/config/db-type-suggest', { cache: 'no-store' });
+        if (!res.ok) return {};
+        return res.json();
+    },
+
     // Upload a TLS certificate/wallet for a connection.
     // content: PEM text for .pem, base64 for .zip/.jks → { ok:true, path:"certs/{name}/{filename}" }
     async uploadCert(connectionName, filename, content) {

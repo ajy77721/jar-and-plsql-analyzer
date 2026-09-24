@@ -12,6 +12,12 @@ PA.config = {
     _selectedConn: null,
     _testPassed: false,
     _tlsDbType: 'ORACLE',
+    // Standard TCP port → DB type. Superseded at runtime by the server table
+    // (GET /api/plsql/config/db-type-suggest); this built-in copy is the offline fallback so the
+    // port hint still works if that call fails. Keys are STRINGS because they come from JSON.
+    _portDbTypeMap: { '1521': 'ORACLE', '3306': 'MYSQL', '1433': 'SQLSERVER', '50000': 'DB2', '5432': 'POSTGRES' },
+    // Last "recent connections" list built by _recentHtml, indexed by the picker's option value.
+    _recentConns: [],
     // TLS certificate slots. `prop` maps to the camelCase ConnectionConfig JSON field;
     // `filename` is the fallback upload name (used for pasted content).
     _TLS_CERTS: {
@@ -24,7 +30,20 @@ PA.config = {
 
     async showModal() {
         document.getElementById('configModal').style.display = 'flex';
+        await this._loadPortSuggestions();
         await this.loadProjects();
+    },
+
+    /**
+     * Pull the standard port → DB-type table from the server so the mapping has one authority
+     * (`DbType.standardPortMap`). Best-effort: on any failure the built-in `_portDbTypeMap` stays in
+     * place, so port auto-detection never depends on a successful fetch.
+     */
+    async _loadPortSuggestions() {
+        try {
+            const map = await PA.api.getDbTypeSuggestions();
+            if (map && typeof map === 'object' && Object.keys(map).length) this._portDbTypeMap = map;
+        } catch (e) { /* keep the built-in fallback table */ }
     },
 
     closeModal() {
@@ -38,13 +57,15 @@ PA.config = {
 
     _renderProjects() {
         const el = document.getElementById('cfgProjectList');
+        // Recent connections sit at the very top of the setup modal, above the project tree.
+        const recent = this._recentHtml();
         if (!this._projects.length) {
-            el.innerHTML = '<div class="cfg-empty">No projects. Click "+ Add Project".</div>';
+            el.innerHTML = recent + '<div class="cfg-empty">No projects. Click "+ Add Project".</div>';
             document.getElementById('cfgEnvPanel').innerHTML = '';
             document.getElementById('cfgDetailPanel').innerHTML = '';
             return;
         }
-        el.innerHTML = this._projects.map(p => `
+        el.innerHTML = recent + this._projects.map(p => `
             <div class="cfg-item ${this._selectedProject === p.name ? 'active' : ''}"
                  onclick="PA.config.selectProject('${this._esc(p.name)}')">
                 <div class="cfg-item-name">${this._esc(p.name)}</div>
@@ -53,6 +74,51 @@ PA.config = {
                 <button class="cfg-del" onclick="event.stopPropagation();PA.config.deleteProject('${this._esc(p.name)}')" title="Delete">&#10005;</button>
             </div>
         `).join('');
+    },
+
+    /**
+     * "Recent connections" picker for the top of the setup modal. Flattens every connection across
+     * every project/environment (the config is global — there is no per-user store) and sorts by
+     * `lastTestedAt` descending, which the backend stamps on every successful test/save
+     * (ConfigController). Connections that predate the field carry no timestamp and fall to the
+     * bottom, ordered by name. Selecting an entry jumps straight to that connection's editor.
+     *
+     * Returns '' when there are no connections, so the modal looks unchanged on a fresh install.
+     */
+    _recentHtml() {
+        const recent = [];
+        (this._projects || []).forEach(p => (p.environments || []).forEach(e => (e.connections || []).forEach(c => {
+            recent.push({
+                project: p.name,
+                env: e.name,
+                name: c.name,
+                tested: !!c.tested,
+                lastTestedAt: c.lastTestedAt || 0
+            });
+        })));
+        recent.sort((a, b) => (b.lastTestedAt - a.lastTestedAt) || a.name.localeCompare(b.name));
+        this._recentConns = recent;
+        if (!recent.length) return '';
+        const opts = recent.map((r, i) =>
+            `<option value="${i}">${this._esc(r.name)} — ${this._esc(r.project)}/${this._esc(r.env)}${r.tested ? '' : ' (untested)'}</option>`
+        ).join('');
+        return `<div class="cfg-recent" style="padding:8px 10px;border-bottom:1px solid var(--border)">
+            <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px">Recent connections</div>
+            <select class="form-select cfg-inp" style="width:100%" onchange="PA.config.openRecent(this.value)">
+                <option value="">Jump to a connection…</option>
+                ${opts}
+            </select>
+        </div>`;
+    },
+
+    /** Navigate to the project/env of a recent-connection entry and open its editor. */
+    async openRecent(idx) {
+        if (idx === '' || idx == null) return;
+        const r = this._recentConns && this._recentConns[parseInt(idx, 10)];
+        if (!r) return;
+        await this.selectProject(r.project);
+        await this.selectEnv(r.env);
+        this.showConnForm(r.name);
     },
 
     async selectProject(name) {
@@ -122,6 +188,9 @@ PA.config = {
                     <div style="display:flex;gap:4px;align-items:center">
                         <span class="cfg-conn-type-badge">${this._esc(c.connectionType || 'SERVICE_NAME')}</span>
                         ${c.role && c.role !== 'DEFAULT' ? '<span class="cfg-conn-role-badge">' + this._esc(c.role) + '</span>' : ''}
+                        <button class="btn btn-sm" style="padding:0 6px;font-size:10px"
+                                onclick="event.stopPropagation();PA.config.duplicateConn('${this._esc(c.name)}')"
+                                title="Duplicate this connection's settings into a new one">Dup</button>
                         <button class="cfg-del" onclick="event.stopPropagation();PA.config.deleteConn('${this._esc(c.name)}')" title="Delete">&#10005;</button>
                     </div>
                 </div>`;
@@ -130,7 +199,12 @@ PA.config = {
         el.innerHTML = html;
     },
 
-    showConnForm(connName) {
+    /**
+     * Open the connection editor. `connName` selects an existing connection to edit (null = new).
+     * `source` is an optional pre-filled object used for the "Duplicate" flow: its NON-SECRET fields
+     * arrive as a fresh, unsaved connection (name already suffixed by `duplicateConn`).
+     */
+    showConnForm(connName, source) {
         this._selectedConn = connName;
         this._testPassed = false;
         const project = this._projects.find(p => p.name === this._selectedProject);
@@ -138,7 +212,7 @@ PA.config = {
         const existing = connName ? env?.connections?.find(c => c.name === connName) : null;
 
         const el = document.getElementById('cfgDetailPanel');
-        const c = existing || { connectionType: 'SERVICE_NAME', role: 'DEFAULT', port: 1521 };
+        const c = existing || source || { connectionType: 'SERVICE_NAME', role: 'DEFAULT', port: 1521 };
         const isEdit = !!existing;
 
         el.innerHTML = `
@@ -165,6 +239,14 @@ PA.config = {
                 </select></div>
 
             <div style="margin:12px 0 6px;font-size:12px;font-weight:700;color:var(--text)">Connection Details</div>
+            <div class="cfg-row"><label>Database Type</label>
+                <select id="cfDbType" class="form-select cfg-inp" onchange="PA.config._onDbTypeChange()">
+                    ${['ORACLE','MYSQL','SQLSERVER','DB2','POSTGRES'].map(t =>
+                        `<option value="${t}" ${((c.dbType || 'ORACLE').toUpperCase() === t) ? 'selected' : ''}>${t}</option>`
+                    ).join('')}
+                </select></div>
+            <div class="cfg-row" style="margin-top:-6px"><label></label>
+                <span id="cfDbTypeHint" style="font-size:11px;color:var(--text-muted)"></span></div>
             <div class="cfg-row"><label>Connection Type</label>
                 <select id="cfType" class="form-select cfg-inp" onchange="PA.config._onTypeChange()">
                     <option value="SERVICE_NAME" ${c.connectionType==='SERVICE_NAME'?'selected':''}>Service Name</option>
@@ -178,7 +260,7 @@ PA.config = {
                 <div class="cfg-row"><label>Hostname</label>
                     <input id="cfHost" value="${this._esc(c.hostname || '')}" class="form-input cfg-inp" placeholder="e.g. dbhost.company.com"></div>
                 <div class="cfg-row"><label>Port</label>
-                    <input id="cfPort" type="number" value="${c.port || 1521}" class="form-input cfg-inp" style="width:100px"></div>
+                    <input id="cfPort" type="number" value="${c.port || 1521}" class="form-input cfg-inp" style="width:100px" oninput="PA.config._suggestDbType('cfPort')"></div>
                 <div class="cfg-row"><label>Service Name</label>
                     <input id="cfSvc" value="${this._esc(c.serviceName || '')}" class="form-input cfg-inp" placeholder="e.g. ORCL"></div>
             </div>
@@ -186,7 +268,7 @@ PA.config = {
                 <div class="cfg-row"><label>Hostname</label>
                     <input id="cfHostSid" value="${this._esc(c.hostname || '')}" class="form-input cfg-inp"></div>
                 <div class="cfg-row"><label>Port</label>
-                    <input id="cfPortSid" type="number" value="${c.port || 1521}" class="form-input cfg-inp" style="width:100px"></div>
+                    <input id="cfPortSid" type="number" value="${c.port || 1521}" class="form-input cfg-inp" style="width:100px" oninput="PA.config._suggestDbType('cfPortSid')"></div>
                 <div class="cfg-row"><label>SID</label>
                     <input id="cfSid" value="${this._esc(c.sid || '')}" class="form-input cfg-inp" placeholder="e.g. ORCL"></div>
             </div>
@@ -283,7 +365,9 @@ PA.config = {
     },
 
     _tlsInit(c) {
-        this._tlsDbType = ((c && c.dbType) || 'ORACLE').toUpperCase();
+        // The Database Type select is the single source of truth for the form's type (it already
+        // reflects c.dbType), so the TLS rows below match whatever the user sees selected.
+        this._tlsDbType = (document.getElementById('cfDbType')?.value || (c && c.dbType) || 'ORACLE').toUpperCase();
         this._tlsApplyDbType();
         this._onSslModeChange();
         this._tlsNameChanged();
@@ -411,6 +495,53 @@ PA.config = {
         });
     },
 
+    /**
+     * Port → DB-type auto-detection. Runs on every keystroke in either Port field: looks the typed
+     * port up in the standard-port table (server-supplied, with a built-in fallback) and, on a hit,
+     * pre-selects that DB type plus a hint. The user retains the override because this only fires on
+     * PORT input — picking a different type in the select is never undone except by editing the port.
+     */
+    _suggestDbType(portInputId) {
+        const sel = document.getElementById('cfDbType');
+        if (!sel) return;
+        const hint = document.getElementById('cfDbTypeHint');
+        const port = parseInt((document.getElementById(portInputId)?.value || '').trim(), 10);
+        const suggested = (port > 0 && this._portDbTypeMap) ? this._portDbTypeMap[String(port)] : null;
+        if (!suggested) { if (hint) hint.textContent = ''; return; }
+        if (sel.value !== suggested) {
+            sel.value = suggested;
+            this._onDbTypeChange();
+        }
+        if (hint) hint.textContent = `Port ${port} suggests ${suggested}`;
+    },
+
+    /** The standard port for a DB type from the same table, or null when unknown. */
+    _standardPortFor(dbType) {
+        const m = this._portDbTypeMap || {};
+        for (const p of Object.keys(m)) {
+            if (String(m[p]).toUpperCase() === String(dbType).toUpperCase()) return parseInt(p, 10);
+        }
+        return null;
+    },
+
+    /**
+     * Database Type select changed: retarget the TLS section (wallet is Oracle-only, truststore is
+     * DB2-only), fill a blank port with this type's standard port, and — because the driver/URL just
+     * changed — re-arm the test gate.
+     */
+    _onDbTypeChange() {
+        const db = (document.getElementById('cfDbType')?.value || 'ORACLE').toUpperCase();
+        this._tlsDbType = db;
+        this._tlsApplyDbType();
+        const portId = (document.getElementById('cfType')?.value === 'SID') ? 'cfPortSid' : 'cfPort';
+        const portEl = document.getElementById(portId);
+        if (portEl && !String(portEl.value || '').trim()) {
+            const sp = this._standardPortFor(db);
+            if (sp) portEl.value = sp;
+        }
+        this._tlsResetTestGate();
+    },
+
     _onTypeChange() {
         const type = document.getElementById('cfType')?.value || 'SERVICE_NAME';
         ['ServiceName','Sid','Tns','Custom','Ldap'].forEach(t => {
@@ -435,7 +566,8 @@ PA.config = {
             username: document.getElementById('cfUser').value.trim(),
             password: document.getElementById('cfPass').value,
             role: document.getElementById('cfRole').value,
-            connectionType: type
+            connectionType: type,
+            dbType: document.getElementById('cfDbType')?.value || 'ORACLE'
         };
         if (type === 'SERVICE_NAME') {
             conn.hostname = document.getElementById('cfHost').value.trim();
@@ -482,7 +614,17 @@ PA.config = {
             if (res.success) {
                 this._testPassed = true;
                 saveBtn.disabled = false;
-                result.innerHTML = `<div class="cfg-test-ok">&#10003; ${this._esc(res.message)} — ${this._esc(res.version || '')}</div>`;
+                // Certificate expiry rides along on the test result (certExpiresInDays /
+                // certExpiryWarning, set server-side when a PEM trust/client cert is configured).
+                // Values are numbers/booleans only, so this interpolation is safe.
+                let certNote = '';
+                if (typeof res.certExpiresInDays === 'number') {
+                    const d = res.certExpiresInDays;
+                    certNote = res.certExpiryWarning
+                        ? ` <span style="color:var(--red)">&#9888; TLS cert expires in ${d} day(s)</span>`
+                        : ` <span style="color:var(--text-muted)">TLS cert valid for ${d} more day(s)</span>`;
+                }
+                result.innerHTML = `<div class="cfg-test-ok">&#10003; ${this._esc(res.message)} — ${this._esc(res.version || '')}${certNote}</div>`;
                 status.textContent = 'Test passed — ready to save';
                 status.style.color = 'var(--green, var(--green))';
                 if (Array.isArray(res.schemas) && res.schemas.length) {
@@ -525,6 +667,40 @@ PA.config = {
 
         await this.selectProject(this._selectedProject);
         this.selectEnv(this._selectedEnv);
+    },
+
+    /**
+     * "Duplicate connection": copy an existing connection's NON-SECRET settings into a fresh New
+     * Connection form. Typical use is the same host/service repeated across environments (PROD →
+     * UAT), where re-typing everything is the pain point.
+     *
+     * <p>Secrets are deliberately dropped: `password` and `truststorePassword` are never readable
+     * back over HTTP (see HttpSecretMaskingConfig), and a duplicated connection must be tested
+     * before it can be saved anyway. TLS cert PATHS are non-secret and are copied, but note they
+     * still point into the SOURCE connection's `certs/` directory (uploads are keyed by connection
+     * name) — re-upload to retarget them.
+     */
+    duplicateConn(connName) {
+        const project = this._projects.find(p => p.name === this._selectedProject);
+        const env = project?.environments?.find(e => e.name === this._selectedEnv);
+        const src = env?.connections?.find(c => c.name === connName);
+        if (!src) return;
+        const copy = Object.assign({}, src);
+        delete copy.password;
+        delete copy.truststorePassword;
+        delete copy.lastTestedAt;
+        copy.name = this._uniqueCopyName(src.name, env);
+        copy.tested = false;
+        this.showConnForm(null, copy);
+    },
+
+    /** A `_COPY`-suffixed name that does not already exist in this environment. */
+    _uniqueCopyName(base, env) {
+        const taken = new Set((env?.connections || []).map(c => (c.name || '').toLowerCase()));
+        let name = base + '_COPY';
+        let n = 2;
+        while (taken.has(name.toLowerCase())) name = base + '_COPY' + (n++);
+        return name;
     },
 
     async deleteConn(connName) {

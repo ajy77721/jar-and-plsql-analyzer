@@ -16,6 +16,13 @@ public class ConnectionConfig {
     private String customUrl;
     private String description;
     private boolean tested;
+    // Epoch millis of the last SUCCESSFUL connection test, or null/absent when never tested.
+    // Lets the setup modal rank "recently tested" connections at the top of its picker. Persisted
+    // as snake_case `last_tested_at` by ConfigLoader's naming strategy; REST binds camelCase
+    // `lastTestedAt` via Spring's default mapper — the same mapper split as hostnameValidation, so
+    // deliberately no explicit @JsonProperty (which would force snake_case on BOTH and drop the
+    // REST field).
+    private Long lastTestedAt;
     // ORACLE (default) | MYSQL | SQLSERVER
     private String dbType = "ORACLE";
     // Schemas reachable/queryable via this connection's credentials (may differ from the
@@ -233,6 +240,10 @@ public class ConnectionConfig {
 
     public boolean isTested() { return tested; }
     public void setTested(boolean tested) { this.tested = tested; }
+
+    /** Epoch millis of the last successful test, or null when the connection has never been tested. */
+    public Long getLastTestedAt() { return lastTestedAt; }
+    public void setLastTestedAt(Long lastTestedAt) { this.lastTestedAt = lastTestedAt; }
 
     public String getDbType() { return dbType; }
     public void setDbType(String dbType) { this.dbType = dbType; }

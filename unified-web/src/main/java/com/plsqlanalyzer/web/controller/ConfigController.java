@@ -9,13 +9,17 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -219,7 +223,19 @@ public class ConfigController {
     public ResponseEntity<?> testConnection(@PathVariable String projectName,
                                             @PathVariable String envName,
                                             @RequestBody ConnectionConfig conn) {
-        return doTest(conn);
+        ResponseEntity<?> result = doTest(conn);
+        // The body is a DETACHED copy, so a successful test here would otherwise leave no trace.
+        // Record the test time on the STORED connection (matched by name) so the setup modal can
+        // rank recently-tested connections; best-effort — an unknown name or a failed test is a no-op.
+        if (result.getBody() instanceof Map<?, ?> body && Boolean.TRUE.equals(body.get("success"))) {
+            EnvironmentConfig env = resolveEnv(projectName, envName);
+            ConnectionConfig stored = env != null ? env.findConnection(conn.getName()) : null;
+            if (stored != null) {
+                stored.setLastTestedAt(System.currentTimeMillis());
+                save();
+            }
+        }
+        return result;
     }
 
     @PostMapping("/projects/{projectName}/environments/{envName}/connections")
@@ -241,6 +257,9 @@ public class ConfigController {
             return ResponseEntity.badRequest().body(Map.of("error", "Connection '" + conn.getName() + "' already exists"));
         }
         env.getConnections().add(conn);
+        // A save is only reachable after a passing test, so stamp "last tested" now — this is what
+        // orders the setup modal's recent-connections picker even for configs that predate the field.
+        conn.setLastTestedAt(System.currentTimeMillis());
         save();
         log.info("Added connection {} to {}/{}", conn.getName(), projectName, envName);
         return ResponseEntity.ok(conn);
@@ -291,6 +310,9 @@ public class ConfigController {
         }
         if (updated.getWalletPath() != null) existing.setWalletPath(updated.getWalletPath());
         existing.setTested(true);
+        // Same reasoning as addConnection: the save gate guarantees a fresh passing test, so this
+        // update marks the connection as the most recently tested one.
+        existing.setLastTestedAt(System.currentTimeMillis());
         save();
         log.info("Updated connection {} in {}/{}", existing.getName(), projectName, envName);
         return ResponseEntity.ok(existing);
@@ -315,6 +337,19 @@ public class ConfigController {
     @PostMapping("/test-connection")
     public ResponseEntity<?> testAnyConnection(@RequestBody ConnectionConfig conn) {
         return doTest(conn);
+    }
+
+    /**
+     * Standard TCP port → database type, e.g. {@code {"1521":"ORACLE","3306":"MYSQL",...}}.
+     *
+     * <p>The setup screen calls this to pre-select a DB type when the operator types a well-known
+     * port, so the mapping has exactly one server-side definition ({@link DbType#standardPortMap()})
+     * rather than a second copy hard-coded in JavaScript. The UI keeps a built-in fallback so the
+     * form still works if this call fails.
+     */
+    @GetMapping("/db-type-suggest")
+    public ResponseEntity<Map<String, String>> getDbTypeSuggestions() {
+        return ResponseEntity.ok(DbType.standardPortMapByName());
     }
 
     // ── Certificate / wallet upload for TLS-enabled connections ──
@@ -438,10 +473,13 @@ public class ConfigController {
             return ResponseEntity.ok(cached[1]);
         }
         List<String> schemasBefore = conn.getSchemasRaw();
+        Long testedAtBefore = conn.getLastTestedAt();
         ResponseEntity<?> result = doTest(conn);
         // doTest() mutates `conn` (a live, config-attached object here) with freshly discovered
-        // schemas — persist that so it survives a restart, not just this JVM's lifetime.
-        if (!Objects.equals(schemasBefore, conn.getSchemasRaw())) {
+        // schemas and a fresh lastTestedAt — persist that so it survives a restart, not just this
+        // JVM's lifetime.
+        if (!Objects.equals(schemasBefore, conn.getSchemasRaw())
+                || !Objects.equals(testedAtBefore, conn.getLastTestedAt())) {
             save();
         }
         quickTestCache.put(cacheKey, new Object[]{System.currentTimeMillis(), result.getBody()});
@@ -545,6 +583,11 @@ public class ConfigController {
         // buildSslProperties() returns an empty Properties when TLS is disabled — a no-op then.
         props.putAll(conn.buildSslProperties(configDir));
 
+        // Cert-expiry preflight (independent of whether the socket connects): when a PEM trust or
+        // client cert is configured, report how long it stays valid so a near-expiry warning
+        // surfaces right in the test result line rather than as a mystery connect failure later.
+        Map<String, Object> certInfo = certExpiryInfo(conn, configDir);
+
         try {
             long start = System.currentTimeMillis();
             try (Connection c = DriverManager.getConnection(jdbcUrl, props)) {
@@ -556,6 +599,9 @@ public class ConfigController {
                 } else if (conn.getSchemasRaw() == null && user != null) {
                     conn.setSchemas(new ArrayList<>(List.of(user.toUpperCase())));
                 }
+                // Stamp the successful test — the setup modal sorts its recent-connections picker on
+                // this. Set on the in-memory object; callers that hold the live config persist it.
+                conn.setLastTestedAt(System.currentTimeMillis());
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("success", true);
                 body.put("message", "Connected in " + ms + "ms");
@@ -564,20 +610,93 @@ public class ConfigController {
                 body.put("url", jdbcUrl);
                 body.put("user", windowsAuth ? "(Windows auth)" : user);
                 body.put("schemas", conn.getSchemas());
+                body.putAll(certInfo);
                 return ResponseEntity.ok(body);
             }
         } catch (Exception e) {
             String raw = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             String friendly = buildFriendlyError(dbType, jdbcUrl, raw);
             log.warn("Connection test failed [{} / {}]: {}", dbType, jdbcUrl, raw);
-            return ResponseEntity.ok(Map.of(
-                    "success", false,
-                    "message", friendly,
-                    "dbType", dbType.name(),
-                    "url", jdbcUrl,
-                    "user", windowsAuth ? "(Windows auth)" : (user != null ? user : "")
-            ));
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("success", false);
+            body.put("message", friendly);
+            body.put("dbType", dbType.name());
+            body.put("url", jdbcUrl);
+            body.put("user", windowsAuth ? "(Windows auth)" : (user != null ? user : ""));
+            // Still worth reporting an about-to-expire cert even when the connect failed — it may be
+            // the very reason the handshake was rejected.
+            body.putAll(certInfo);
+            return ResponseEntity.ok(body);
         }
+    }
+
+    /** One {@code -----BEGIN CERTIFICATE-----}...{@code -----END CERTIFICATE-----} block (group 1 = body). */
+    private static final Pattern PEM_CERT_BLOCK = Pattern.compile(
+            "-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", Pattern.DOTALL);
+
+    /**
+     * Best-effort expiry of the PEM certificates configured on a connection (trust bundle and/or
+     * client certificate). Returns {@code camelCase} fields the UI renders directly:
+     *
+     * <ul>
+     *   <li>{@code certExpiresInDays} — the soonest {@code NotAfter} across all parsed certs, in
+     *       whole days (may be negative when already expired);</li>
+     *   <li>{@code certExpiryWarning} — true when that soonest expiry is under 30 days.</li>
+     * </ul>
+     *
+     * <p>Returns an empty map when no PEM cert is configured, the file is missing, or it cannot be
+     * parsed — expiry reporting must never turn a working connection test into a failure. Only PEM
+     * (trust/client cert) files are inspected; a JKS/PKCS12 truststore or wallet holds no readable
+     * PEM here and is skipped. Certificate contents are never logged.
+     */
+    private Map<String, Object> certExpiryInfo(ConnectionConfig conn, Path configDir) {
+        try {
+            Integer soonest = null;
+            for (String raw : new String[]{conn.getTrustCertPath(), conn.getClientCertPath()}) {
+                if (raw == null || raw.isBlank()) continue;
+                Path file = resolveTlsPath(Path.of(raw), configDir);
+                if (file == null || !Files.exists(file)) continue;
+                for (X509Certificate cert : readPemCertificates(file)) {
+                    long days = (cert.getNotAfter().getTime() - System.currentTimeMillis()) / 86_400_000L;
+                    int d = (int) days;
+                    if (soonest == null || d < soonest) soonest = d;
+                }
+            }
+            if (soonest == null) return Map.of();
+            Map<String, Object> info = new LinkedHashMap<>();
+            info.put("certExpiresInDays", soonest);
+            info.put("certExpiryWarning", soonest < 30);
+            return info;
+        } catch (Exception e) {
+            // Never fail the test over an unreadable/oddly-formatted cert; log the file name only.
+            log.debug("Cert expiry check skipped: {}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /**
+     * Mirror of the (package-private) {@code TlsKeystoreConverter.resolve} for the cert-expiry
+     * preflight: absolute paths pass through unchanged, relative ones are anchored at the config
+     * directory and the result is absolute+normalized — the same path {@code buildSslProperties}
+     * would hand the driver, so expiry is read from the file actually used at connect time.
+     */
+    private static Path resolveTlsPath(Path raw, Path configDir) {
+        if (raw == null) return null;
+        Path resolved = raw.isAbsolute() || configDir == null ? raw : configDir.resolve(raw);
+        return resolved.toAbsolutePath().normalize();
+    }
+
+    /** Parse every X.509 certificate out of a PEM file (headers stripped, base64 decoded to DER). */
+    private static List<X509Certificate> readPemCertificates(Path file) throws Exception {
+        String pem = Files.readString(file, StandardCharsets.UTF_8);
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        List<X509Certificate> certs = new ArrayList<>();
+        Matcher m = PEM_CERT_BLOCK.matcher(pem);
+        while (m.find()) {
+            byte[] der = Base64.getMimeDecoder().decode(m.group(1).trim());
+            certs.add((X509Certificate) cf.generateCertificate(new ByteArrayInputStream(der)));
+        }
+        return certs;
     }
 
     private String buildFriendlyError(DbType dbType, String jdbcUrl, String raw) {
