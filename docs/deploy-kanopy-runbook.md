@@ -283,3 +283,49 @@ git tag v1.0.0 && git push origin v1.0.0
 | K8s prod token | kubeconfig flow (3.3) | Drone Helm deploy | `prod_kubernetes_token` |
 | Slack webhook | Slack channel settings (3.5) | Drone notifications | `slack_webhook` |
 | S3 access | IAM role or keys (3.6) | **The running app pod** | none (IRSA) or envSecrets |
+
+---
+
+## Appendix: cross-account S3 access (all-org users)
+
+The app's per-user SSO model means EVERY user connects with THEIR OWN AWS role. For any
+user whose role is NOT in the bucket-owning account (331472312345), two one-time grants are
+needed — the app's capability probe will report `AccessDenied` and refuse to connect until
+they exist (by design — the denial is audited with the exact operation).
+
+**1. Bucket policy (in account 331472312345, on `amp-analyzer-parse-jar`)** — allow the org:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "OrgWideAnalyzerAccess",
+    "Effect": "Allow",
+    "Principal": "*",
+    "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+    "Resource": [
+      "arn:aws:s3:::amp-analyzer-parse-jar",
+      "arn:aws:s3:::amp-analyzer-parse-jar/*"
+    ],
+    "Condition": {
+      "StringEquals": { "aws:PrincipalOrgID": "<o-xxxxxxxxxx — the AWS Organization id>" },
+      "Bool": { "aws:PrincipalIsAWSService": "false" }
+    }
+  }]
+}
+```
+
+(The `PrincipalOrgID` condition restricts the grant to the MongoDB AWS Organization only —
+not the public. Get the org id: `aws organizations describe-organization`.)
+
+**2. Identity permission (in each user's account, e.g. 579766882180 / Kernel-Test.User)** —
+the role's own policy must also allow those four S3 actions on the bucket ARNs.
+
+**Who applies them:** the AWS account admins (aws-services@mongodb.com for the bucket side;
+each account's owners for their roles). One time only — after that every org user can
+connect with their own identity, fully attributed.
+
+**Email-ready request line:**
+> Please apply the attached bucket policy to s3://amp-analyzer-parse-jar (account 331472312345)
+> granting S3 read/write to principals in our AWS Organization (org-scoped, service-account
+> excluded), and enable CloudTrail S3 data events for per-user attribution.
