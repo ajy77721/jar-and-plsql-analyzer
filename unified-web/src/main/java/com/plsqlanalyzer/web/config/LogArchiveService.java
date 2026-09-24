@@ -26,6 +26,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 /**
@@ -91,6 +92,18 @@ public class LogArchiveService {
 
     /** Whether the "no authenticated user" skip has already been logged — one INFO, not one per tick. */
     private volatile boolean skipLogged = false;
+
+    /** How long a repeated prune failure stays quiet between WARN lines. */
+    private static final long PRUNE_WARN_INTERVAL_MS = TimeUnit.HOURS.toMillis(1);
+
+    /**
+     * Epoch millis of the last "could not prune" WARN. The prune runs every
+     * {@code app.logs.archive.interval-ms} (60s by default), and a deployment with no usable pod
+     * credentials fails it on every tick, so an unthrottled WARN would fill the log with the same
+     * line. Only the first failure, and then at most one an hour, is reported — the condition is
+     * neither actionable nor changing, and it clears by itself once credentials exist.
+     */
+    private volatile long lastPruneWarnEpochMs = 0L;
 
     /**
      * Which {@code ArtifactStore} this ships to is otherwise-arbitrary: log archiving is
@@ -195,7 +208,13 @@ public class LogArchiveService {
                 }
             }
         } catch (IOException | RuntimeException e) {
-            log.warn("Could not prune archived logs: {}", e.getMessage());
+            // Throttled to one WARN an hour: this path fails on every tick when the deployment has
+            // no usable credentials, and the message would otherwise repeat every 60s forever.
+            long now = System.currentTimeMillis();
+            if (now - lastPruneWarnEpochMs >= PRUNE_WARN_INTERVAL_MS) {
+                lastPruneWarnEpochMs = now;
+                log.warn("Could not prune archived logs: {}", e.getMessage());
+            }
         }
         return removed;
     }

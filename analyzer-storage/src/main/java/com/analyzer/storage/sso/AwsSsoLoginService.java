@@ -21,6 +21,7 @@ import software.amazon.awssdk.services.ssooidc.model.SlowDownException;
 import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -101,6 +102,19 @@ public class AwsSsoLoginService {
      */
     private static final String SCOPE_OPENID = "openid";
 
+    /**
+     * Standard OIDC profile/email scopes, requested alongside {@code openid} on the same reasoning:
+     * some Identity Center instances then put {@code email}/{@code name}/{@code preferred_username}
+     * straight into the {@code id_token}, which resolves the display identity without needing an
+     * Identity Store call (and therefore without needing {@code identitystore:DescribeUser} or
+     * {@code sso:ListInstances} on the user's role). They are ordinary OIDC scopes and are simply
+     * ignored by an instance that does not honour them, so requesting them is harmless; when they do
+     * work, the lookup below is not reached at all because name/email are already present.
+     */
+    private static final String SCOPE_PROFILE = "profile";
+
+    private static final String SCOPE_EMAIL = "email";
+
     /** Renew this long before real expiry, so an in-flight request never races the deadline. */
     private static final long REFRESH_SKEW_MS = TimeUnit.MINUTES.toMillis(5);
 
@@ -162,14 +176,17 @@ public class AwsSsoLoginService {
 
             // Both grant types are registered up front: the device-code grant is what /poll uses,
             // and refresh_token is what long-run renewal uses in accessToken(). AWS accepts exactly
-            // this pair and rejects an authorization_code registration. `openid` is requested so the
-            // CreateToken response carries an id_token with name/email claims.
+            // this pair and rejects an authorization_code registration. `openid`, `profile` and
+            // `email` are requested so the CreateToken response's id_token carries name/email
+            // claims where the instance supports them; `sso:account:access` is what grants the
+            // ListAccounts/ListAccountRoles/GetRoleCredentials calls the flow itself needs.
             // TEMP-DIAGNOSTIC: the request built here carries no secret (clientName/type/grants/
             // scopes are all public metadata), so logging it is safe; it exists only until the
             // registerClient rejection is root-caused.
             log.warn("[aws-sso][diag] registerClient request: clientName={} clientType={} grantTypes={} scopes={} region={} oidc={} endpointOverride={}",
                     CLIENT_NAME, CLIENT_TYPE_PUBLIC, GRANT_DEVICE_CODE + "," + GRANT_REFRESH_TOKEN,
-                    SCOPE_SSO_ACCOUNT_ACCESS + "," + SCOPE_OPENID, region, oidc.getClass().getName(),
+                    SCOPE_SSO_ACCOUNT_ACCESS + "," + SCOPE_OPENID + "," + SCOPE_PROFILE + "," + SCOPE_EMAIL,
+                    region, oidc.getClass().getName(),
                     oidc.serviceClientConfiguration().endpointOverride());
             RegisterClientResponse reg;
             try {
@@ -178,7 +195,7 @@ public class AwsSsoLoginService {
                         // Required by the endpoint; omitting it is the InvalidClientMetadataException.
                         .clientType(CLIENT_TYPE_PUBLIC)
                         .grantTypes(GRANT_DEVICE_CODE, GRANT_REFRESH_TOKEN)
-                        .scopes(SCOPE_SSO_ACCOUNT_ACCESS, SCOPE_OPENID));
+                        .scopes(SCOPE_SSO_ACCOUNT_ACCESS, SCOPE_OPENID, SCOPE_PROFILE, SCOPE_EMAIL));
             } catch (RuntimeException diag) {
                 log.warn("[aws-sso][diag] registerClient threw {} cause={} message={}",
                         diag.getClass().getName(), diag.getCause(), diag.getMessage());
@@ -376,6 +393,13 @@ public class AwsSsoLoginService {
         IdentityClaims claims = identityClaims(idToken);
         String name = claims.name();
         String email = claims.email();
+        // What the id_token actually contained, as KEYS and presence flags only — never the claim
+        // values (an id_token is bearer material, and a `sub`/email is personal data even when it is
+        // not a secret). Without this, "the session has no name/email" is indistinguishable from
+        // "the lookup never ran", which is exactly the ambiguity this line removes.
+        log.info("[aws-sso] id_token claim keys present: {} (hasName={} hasEmail={} hasUserId={} hasStoreId={})",
+                claims.keys(), claims.name() != null, claims.email() != null,
+                claims.userId() != null, claims.storeId() != null);
         // A bare `sub` is NOT a human name: Identity Center routinely returns only that. Prefer a
         // real name/email claim, and when there is none, ask Identity Store to turn the sub (which
         // for Identity Center is the Identity Store UserId) into a person. Best-effort — an empty
@@ -389,9 +413,26 @@ public class AwsSsoLoginService {
             AwsCredentialsProvider userCredentials = resolver == null ? null
                     : resolver.resolveFor(state == null ? null : state.sessionId(),
                             accessToken, account.accountId(), role.roleName());
-            AwsIdentityStoreLookup.ResolvedIdentity resolved = identityLookup
-                    .lookup(claims.userId(), claims.storeId(), userCredentials)
-                    .orElse(null);
+            AwsIdentityStoreLookup.ResolvedIdentity resolved;
+            if (claims.userId() == null) {
+                // The single silent path in the lookup: with no `sub`/`userId` there is nothing to
+                // describe, and it returns empty without a word. Say so here instead, together with
+                // what the token did carry, so "no Identity Store log line" is never the only clue.
+                resolved = null;
+                log.warn("[aws-sso] the id_token carried no sub/userId claim (keys present: {}), so the "
+                        + "Identity Store lookup was skipped; this session keeps a null name/email",
+                        claims.keys());
+            } else {
+                log.info("[aws-sso] asking Identity Store to resolve userId={} for the display name "
+                        + "(userCredentials={})", shortId(claims.userId()), userCredentials != null);
+                resolved = identityLookup
+                        .lookup(claims.userId(), claims.storeId(), userCredentials)
+                        .orElse(null);
+                if (resolved == null) {
+                    log.warn("[aws-sso] Identity Store resolved nothing for this user; the session "
+                            + "keeps a null name/email (see the [identity-store] line above for why)");
+                }
+            }
             if (resolved != null) {
                 name = firstNonBlank(name, resolved.name());
                 email = firstNonBlank(email, resolved.email());
@@ -422,10 +463,13 @@ public class AwsSsoLoginService {
      * a normal Identity Center configuration, not a login failure.
      */
     private static IdentityClaims identityClaims(String idToken) {
-        if (idToken == null || idToken.isBlank()) return new IdentityClaims(null, null, null, null);
+        if (idToken == null || idToken.isBlank()) {
+            log.info("[aws-sso] CreateToken returned no id_token, so there are no display claims to read");
+            return new IdentityClaims(null, null, null, null, List.of());
+        }
         try {
             String[] parts = idToken.split("\\.");
-            if (parts.length < 2) return new IdentityClaims(null, null, null, null);
+            if (parts.length < 2) return new IdentityClaims(null, null, null, null, List.of());
             JsonNode claims = JSON.readTree(Base64.getUrlDecoder().decode(parts[1]));
             String email = firstNonBlank(
                     text(claims, "email"), text(claims, "preferred_username"));
@@ -437,12 +481,30 @@ public class AwsSsoLoginService {
                     text(claims, "sub"), text(claims, "userId"), text(claims, "user_id"));
             String storeId = firstNonBlank(
                     text(claims, "identity_store_id"), text(claims, "identityStoreId"));
-            return new IdentityClaims(name, email, userId, storeId);
+            return new IdentityClaims(name, email, userId, storeId, claimKeys(claims));
         } catch (RuntimeException | IOException e) {
             // Class name only; the token itself is never logged.
             log.debug("[aws-sso] id_token claims could not be decoded ({})", e.getClass().getSimpleName());
-            return new IdentityClaims(null, null, null, null);
+            return new IdentityClaims(null, null, null, null, List.of());
         }
+    }
+
+    /**
+     * The names — never the values — of the top-level fields in a decoded id_token payload, sorted
+     * for a stable log line. This is the diagnostic that distinguishes "Identity Center sent us only
+     * {@code aud}/{@code exp}/{@code iat}/{@code iss}" from "we failed to read the claims at all".
+     */
+    private static List<String> claimKeys(JsonNode claims) {
+        if (claims == null || !claims.isObject()) return List.of();
+        List<String> keys = new ArrayList<>();
+        claims.fieldNames().forEachRemaining(keys::add);
+        keys.sort(String::compareTo);
+        return keys;
+    }
+
+    /** Short, non-reversible suffix of an id for a log line — as in {@link AwsIdentityStoreLookup}. */
+    private static String shortId(String id) {
+        return id == null ? "null" : (id.length() <= 8 ? "…" : "…" + id.substring(id.length() - 8));
     }
 
     private static String text(JsonNode node, String field) {
@@ -509,7 +571,10 @@ public class AwsSsoLoginService {
      * @param email      an email claim ({@code email}/{@code preferred_username}), or null
      * @param userId     the Identity Store UserId ({@code sub}), or null when absent
      * @param storeId    the IdentityStoreId named by the token, or null
+     * @param keys       the top-level claim names the token carried, for diagnostics only — never
+     *                   the values; empty when there was no decodable id_token
      */
-    private record IdentityClaims(String name, String email, String userId, String storeId) {
+    private record IdentityClaims(String name, String email, String userId, String storeId,
+                                  List<String> keys) {
     }
 }

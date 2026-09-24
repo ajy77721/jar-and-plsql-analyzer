@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.identitystore.model.DescribeUserResponse;
@@ -43,10 +45,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * chain. That is also the correct behaviour for callers with no request context.
  *
  * <p>Every failure is non-fatal and expected in the common case where the deployer has not granted
- * {@code identitystore:DescribeUser}/{@code sso:ListInstances}: the method logs one INFO line and
- * returns empty, never a stack trace, so a missing permission degrades to "anonymous" rather than
- * breaking login. Results (including a negative result) are cached per {@code UserId}, so the
- * lookup — and any failure — is attempted at most once per user per JVM.
+ * {@code identitystore:DescribeUser}/{@code sso:ListInstances}: the method logs one WARN line naming
+ * the SDK error code and returns empty, never a stack trace, so a missing permission degrades to
+ * "anonymous" rather than breaking login. A {@code null}/blank UserId — the id_token carried no
+ * {@code sub} — returns empty too, but <b>with a WARN of its own</b>, because that path never
+ * reaches the network and would otherwise leave no trace at all. Results (including a negative
+ * result) are cached per {@code UserId}, so the lookup — and any failure — is attempted at most once
+ * per user per JVM.
  *
  * <p>No token, secret or credential value is read, logged or returned here; only the display
  * identity. The {@link IdentityStoreId} is cached for the process lifetime because an Identity
@@ -102,7 +107,15 @@ public class AwsIdentityStoreLookup {
      */
     public Optional<ResolvedIdentity> lookup(String userId, String storeIdHint,
                                              AwsCredentialsProvider userCredentials) {
-        if (userId == null || userId.isBlank()) return Optional.empty();
+        if (userId == null || userId.isBlank()) {
+            // Deliberately the one path that returns without touching the cache or the network, so
+            // it must still say something: an empty UserId means the caller's id_token carried no
+            // `sub`/`userId`, and from the outside that looks identical to "the lookup never ran".
+            // This line is what makes the two distinguishable in the pod log.
+            log.warn("[identity-store] no UserId to look up (id_token had no sub/userId claim); "
+                    + "skipping the DescribeUser call — the session keeps a null name/email");
+            return Optional.empty();
+        }
         String key = userId.trim();
         // computeIfAbsent guards the single-flight per user: the first caller resolves, the rest
         // reuse the cached Optional (empty included). A UserId uniquely identifies one person, so
@@ -141,10 +154,12 @@ public class AwsIdentityStoreLookup {
             log.info("[identity-store] resolved display identity for user {}", shortId(userId));
             return Optional.of(new ResolvedIdentity(userId, name, email));
         } catch (RuntimeException e) {
-            // Class name only — a message here could echo request material and there is no secret
-            // to protect beyond what the SDK already excludes.
-            log.info("[identity-store] lookup unavailable ({}); continuing anonymously "
-                    + "(grant identitystore:DescribeUser to enable it)", e.getClass().getSimpleName());
+            // The failure REASON, never the request: an SDK service exception's error code and
+            // status are the actionable part (AccessDeniedException vs ResourceNotFoundException vs
+            // ValidationException tells the operator exactly which grant or which id is wrong), and
+            // neither is secret. Messages are avoided because one could echo request material.
+            log.warn("[identity-store] lookup unavailable ({}); continuing anonymously "
+                    + "(grant identitystore:DescribeUser to enable it)", failureReason(e));
             return Optional.empty();
         } finally {
             if (temporary) closeQuietly(client);
@@ -178,12 +193,30 @@ public class AwsIdentityStoreLookup {
             }
             return null;
         } catch (RuntimeException e) {
-            log.info("[identity-store] could not discover the IdentityStoreId ({}); "
-                    + "grant sso:ListInstances to enable the lookup", e.getClass().getSimpleName());
+            log.warn("[identity-store] could not discover the IdentityStoreId ({}); "
+                    + "grant sso:ListInstances to enable the lookup", failureReason(e));
             return null;
         } finally {
             if (temporary) closeQuietly(admin);
         }
+    }
+
+    /**
+     * A loggable, non-secret reason for a failed AWS call: the SDK error code and HTTP status when
+     * the exception is an {@code AwsServiceException}, otherwise the exception's simple class name.
+     *
+     * <p>Only the error <em>code</em> is taken from the response — never the message, which the SDK
+     * builds from the request and could therefore echo request material — and never anything from
+     * the credentials themselves.
+     */
+    private static String failureReason(RuntimeException e) {
+        if (e instanceof AwsServiceException service) {
+            AwsErrorDetails details = service.awsErrorDetails();
+            String code = details == null ? null : details.errorCode();
+            return (code == null || code.isBlank() ? e.getClass().getSimpleName() : code)
+                    + "/HTTP " + service.statusCode();
+        }
+        return e.getClass().getSimpleName();
     }
 
     /** Best-effort close of a per-lookup client; a failure here must never surface as an error. */

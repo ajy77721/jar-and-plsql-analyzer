@@ -152,8 +152,108 @@ public class AdminAuditService {
             while (tail.size() > MAX_TAIL) tail.removeFirst();
         }
         rollupFor(entry.key()).record(entry);
+        // A login that AWS could not name inherits the name this person is already known by, so a
+        // chosen display name survives across sessions. Runs after the rollup record, so the value
+        // it reads is what earlier events established.
+        backfillDisplayName(event, entry);
         // Lazy retention: at most once an hour, on the same path every event already takes.
         purgeIfDue(false);
+    }
+
+    // ── display-name backfill ───────────────────────────────────────────────────
+
+    /**
+     * Re-applies the name a person is already known by to a fresh, nameless login.
+     *
+     * <h2>The gap this closes</h2>
+     *
+     * <p>Identity Center's device flow frequently yields no name and no email, so a login lands as an
+     * anonymous account id. The person (or an admin) then gives themselves a display name — at
+     * {@code /connect}, or through the admin Users tab — which is held here, keyed by the account id
+     * that <em>is</em> their identity key while AWS names them nothing. That name lives on the
+     * rollup, and on the session it was set in, but a <em>later</em> login starts from AWS's blank
+     * identity again and shows nothing. So a name that is durable in the audit trail is not durable
+     * in the UI, which is the inconsistency this fixes.
+     *
+     * <h2>What it does</h2>
+     *
+     * <p>On a {@link SsoAuditEvent#LOGIN} whose identity has neither a name nor an email, it looks up
+     * the display name already recorded for that person and writes it onto the live
+     * {@link SsoSessionState} for the event's session, so {@code /session} (and every other surface
+     * that renders {@link SsoIdentity#shownName()}) reports it for this login too.
+     *
+     * <h2>Why a real name always wins</h2>
+     *
+     * <p>The backfill only runs when AWS supplied nothing. The moment Identity Center resolves a
+     * genuine name or email — via the id_token or the Identity Store lookup — {@link SsoIdentity#name}
+     * is non-null, this method stands down, and the AWS-derived name is what is shown. The display
+     * name is a placeholder until a real one exists, never an override of one.
+     *
+     * <p>Best-effort and listener-local: any failure leaves the login exactly as it was, and no
+     * token or credential value is read on this path.
+     */
+    private void backfillDisplayName(SsoAuditEvent event, AuditEntry entry) {
+        if (event == null || !SsoAuditEvent.LOGIN.equals(event.type())) return;
+        SsoIdentity identity = event.identity();
+        if (identity == null) return;
+        // A real name/email from AWS (or Identity Store) outranks anything remembered here.
+        if (blankToNull(identity.name()) != null || blankToNull(identity.email()) != null) return;
+        // Nothing to do when this login already carries a chosen name (only reachable if a caller
+        // set one before the event, which /connect does).
+        if (blankToNull(identity.displayName()) != null) return;
+        String accountId = blankToNull(identity.accountId());
+        if (accountId == null || event.sessionId() == null || event.sessionId().isBlank()) return;
+
+        String remembered = storedDisplayNameFor(entry.key(), accountId);
+        if (remembered == null) return;
+
+        SsoSessionRegistry registry = registryProvider.getIfAvailable();
+        if (registry == null) return;
+        SsoSessionState state = registry.get(event.sessionId());
+        if (state == null || !state.loggedIn()) return;
+        SsoIdentity live = state.identity();
+        // Re-check on what the session actually holds now: Identity Store may have resolved a real
+        // name between the event being built and this listener running.
+        if (live == null || blankToNull(live.name()) != null || blankToNull(live.email()) != null) return;
+        if (blankToNull(live.displayName()) != null) return;
+
+        state.identity(live.withDisplayName(remembered));
+        log.info("[admin-audit] applied the stored display name to this login's session identity "
+                + "(account {})", accountId);
+    }
+
+    /**
+     * The name this person is already known by, or {@code null} when none was ever recorded.
+     *
+     * <p>Three sources, in order of how specific they are:
+     *
+     * <ol>
+     *   <li>an admin-set override on the event's own rollup key (the account id, while AWS names
+     *       them nothing) — {@code displayNames};</li>
+     *   <li>the snapshot name on that same rollup, which is what an earlier event carried;</li>
+     *   <li>a name recorded against any <em>other</em> rollup for the same AWS account. A person's
+     *       rollup key moves from the account id to their chosen name the moment one exists (see
+     *       {@link #identityKey}), so the name set at {@code /connect} lives under a name-keyed
+     *       rollup that the account id alone would never find. Accepted only when every such rollup
+     *       agrees on the name, so a shared AWS account with several named people can never cause
+     *       one person's name to be handed to another.</li>
+     * </ol>
+     */
+    private String storedDisplayNameFor(String key, String accountId) {
+        String direct = key == null ? null : displayNames.get(key);
+        if (blankToNull(direct) != null) return direct.trim();
+        UserRollup own = key == null ? null : rollups.get(key);
+        if (own != null && blankToNull(own.name()) != null) return own.name().trim();
+
+        String found = null;
+        for (UserRollup r : rollups.values()) {
+            if (!accountId.equals(r.accountId()) || blankToNull(r.name()) == null) continue;
+            String override = displayNames.get(r.key());
+            String candidate = blankToNull(override) != null ? override.trim() : r.name().trim();
+            if (found == null) found = candidate;
+            else if (!found.equals(candidate)) return null; // several names for one account: stay out
+        }
+        return found;
     }
 
     /**
