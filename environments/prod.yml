@@ -29,6 +29,12 @@ services:
     type: ClusterIP
 
 # -- Ingress -----------------------------------------------------------------
+# Mesh-only namespace (Gatekeeper: [ingress-mesh-only]) — the chart must wire
+# traffic through the service mesh, matching the amp-context-beta pattern.
+mesh:
+  enabled: true
+  permissive: false
+
 ingress:
   enabled: true
   hosts:
