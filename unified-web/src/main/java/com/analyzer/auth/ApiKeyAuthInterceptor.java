@@ -88,6 +88,7 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
                 // Docs/manual content is jar-packaged help material served to the browsing UI —
                 // not user data. It ships inside the jar and must be readable before sign-in,
                 // like every other static asset. ("/api/docs" is the list endpoint — no slash.)
+                || path.startsWith("/api/meta/")
                 || path.equals("/api/docs")
                 || path.startsWith("/api/docs/");
     }

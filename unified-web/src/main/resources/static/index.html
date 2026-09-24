@@ -445,9 +445,12 @@
     <div class="footer">Unified Analyzer v1.0 &mdash; <span id="footerPort"></span> &mdash; <span id="dataRegionInfo">data region: loading…</span></div>
     <script>document.getElementById('footerPort').textContent = 'Port ' + location.port;</script>
     <script>
-      fetch('/api/auth/aws/session').then(r => r.ok ? r.json() : null).then(d => {
+      fetch('/api/meta/deployment').then(r => r.ok ? r.json() : null).then(d => {
         const el = document.getElementById('dataRegionInfo');
-        if (el && d) el.textContent = 'data: s3://' + (d.bucket || '?') + ' (' + (d.region || '?') + ')';
+        if (!el || !d) return;
+        el.textContent = 'cluster: ' + d.clusterRegion + ' · data: s3://' + (d.s3Bucket || '?') + ' (' + (d.s3Region || '?') + ', ' + d.s3ConnectLatencyMs + 'ms)';
+        el.style.color = d.sameRegion ? '' : 'var(--orange)';
+        el.title = d.latencyHint;
       }).catch(() => {});
     </script>
 
