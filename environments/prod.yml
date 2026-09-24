@@ -16,6 +16,7 @@ replicaCount: 1
 # -- Image -------------------------------------------------------------------
 image:
   repository: ghcr.io/modernization-factory/amp-analyzer
+  pullSecret: ghcr-secret
   pullPolicy: IfNotPresent
 
 # -- Services ----------------------------------------------------------------
