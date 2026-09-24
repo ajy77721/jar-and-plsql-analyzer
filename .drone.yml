@@ -77,11 +77,12 @@ steps:
   pull: if-not-exists
   image: alpine/k8s:1.30.4
   commands:
+  - echo "staging token length: $${#STAGING_KUBERNETES_TOKEN}"
   - kubectl config set-cluster staging --server=https://api.staging.corp.mongodb.com
-  - kubectl config set-credentials deployer --token="$(printf "%s" "$${STAGING_KUBERNETES_TOKEN}" | tr -d "[:space:]")"
+  - kubectl config set-credentials deployer --token="$(printf "%s" "$${STAGING_KUBERNETES_TOKEN}" | tr -d "[:space:]")" </dev/null
   - kubectl config set-context staging --cluster=staging --user=deployer --namespace=amp-delivery
   - kubectl config use-context staging
-  - kubectl auth can-i list pods -n amp-delivery
+  - kubectl auth can-i list pods -n amp-delivery </dev/null
   - timeout 120 helm repo add mongodb https://10gen.github.io/helm-charts || true
   - helm upgrade --install amp-analyzer mongodb/web-app --namespace amp-delivery --version 4.35.0 -f ./environments/staging.yml --set image.repository=ghcr.io/modernization-factory/amp-analyzer --set image.tag=git-${DRONE_COMMIT_SHA:0:7} --wait --timeout 10m0s
   when:
@@ -94,11 +95,12 @@ steps:
   pull: if-not-exists
   image: alpine/k8s:1.30.4
   commands:
+  - echo "prod token length: $${#PROD_KUBERNETES_TOKEN}"
   - kubectl config set-cluster prod --server=https://api.prod.corp.mongodb.com
-  - kubectl config set-credentials deployer --token="$(printf "%s" "$${PROD_KUBERNETES_TOKEN}" | tr -d "[:space:]")"
+  - kubectl config set-credentials deployer --token="$(printf "%s" "$${PROD_KUBERNETES_TOKEN}" | tr -d "[:space:]")" </dev/null
   - kubectl config set-context prod --cluster=prod --user=deployer --namespace=amp-delivery
   - kubectl config use-context prod
-  - kubectl auth can-i list pods -n amp-delivery
+  - kubectl auth can-i list pods -n amp-delivery </dev/null
   - timeout 120 helm repo add mongodb https://10gen.github.io/helm-charts || true
   - helm upgrade --install amp-analyzer mongodb/web-app --namespace amp-delivery --version 4.35.0 -f ./environments/prod.yml --set image.repository=ghcr.io/modernization-factory/amp-analyzer --set image.tag=${DRONE_TAG} --wait --timeout 10m0s
   when:
