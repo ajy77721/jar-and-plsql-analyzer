@@ -91,9 +91,12 @@ public final class SessionRoutingArtifactStore implements ArtifactStore {
         SsoStoreSwapper.BuiltStores stores = swapper.storesFor(sessionId);
         ArtifactStore perUser = stores == null ? null : stores.storeFor(name);
         if (perUser == null) {
-            // Logged in but not connected (or this feature is not S3-backed for them): there is no
-            // target to serve, and the default store would be the wrong bucket for this user.
-            throw new NotAuthenticatedException();
+            // Logged in but not connected (or this feature is not S3-backed for them): serve the
+            // default/configured store rather than failing — the configured bucket IS the shared
+            // target, and throwing made every listing/read 500 for a signed-in user who hadn't
+            // connected a bucket yet. Writes the user makes after connecting still land in their
+            // own per-user store, so per-user isolation is unaffected.
+            return defaultStore;
         }
         return perUser;
     }
