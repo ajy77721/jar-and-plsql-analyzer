@@ -8,9 +8,15 @@ import com.analyzer.storage.sso.SsoIdentity;
 import com.analyzer.storage.sso.SsoSessionRegistry;
 import com.analyzer.storage.sso.SsoSessionState;
 import com.analyzer.storage.sso.SsoStoreSwapper;
+import com.plsqlanalyzer.config.ConnectionConfig;
+import com.plsqlanalyzer.config.EnvironmentConfig;
+import com.plsqlanalyzer.config.PlsqlConfig;
+import com.plsqlanalyzer.config.ProjectConfig;
+import com.plsqlanalyzer.web.parser.model.AnalysisInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -76,15 +83,36 @@ public class AdminController {
     private final AdminAuditService audit;
     private final ObjectProvider<SsoSessionRegistry> ssoRegistry;
     private final ObjectProvider<AwsSsoLoginService> ssoLogin;
+    /**
+     * Read-only operational views. All three are the SAME beans the analyzers themselves use, so
+     * the admin portal never re-implements enumeration: connections come from the live config bean,
+     * PL/SQL analyses from the parser service's own listing, and JAR analyses from the JAR
+     * persistence service's own listing.
+     */
+    private final PlsqlConfig plsqlConfig;
+    private final com.plsqlanalyzer.web.parser.service.AnalysisService parserAnalysisService;
+    private final com.jaranalyzer.service.PersistenceService jarPersistenceService;
     private final String username;
     private final String password;
 
     /** token → expiry epoch millis. In-memory and deliberately not persisted. */
     private final ConcurrentHashMap<String, Long> liveTokens = new ConcurrentHashMap<>();
 
+    /**
+     * How far before an analysis's timestamp a CONNECT/LOGIN event may sit and still be treated as
+     * that analysis's owner. Best-effort attribution only — the audit records no analysis event, so
+     * this is a proximity heuristic, never a claim.
+     */
+    private static final long OWNER_WINDOW_MS = 12L * 60 * 60 * 1000;
+
     public AdminController(AdminAuditService audit,
                            ObjectProvider<SsoSessionRegistry> ssoRegistry,
                            ObjectProvider<AwsSsoLoginService> ssoLogin,
+                           PlsqlConfig plsqlConfig,
+                           @Qualifier("parserAnalysisService")
+                           com.plsqlanalyzer.web.parser.service.AnalysisService parserAnalysisService,
+                           @Qualifier("jarPersistenceService")
+                           com.jaranalyzer.service.PersistenceService jarPersistenceService,
                            // Env-var fallback (APP_ADMIN_USERNAME/PASSWORD) lets Kanopy inject
                            // real credentials via envSecrets without code changes; the property
                            // defaults are for local dev only and must not reach production.
@@ -93,6 +121,9 @@ public class AdminController {
         this.audit = audit;
         this.ssoRegistry = ssoRegistry;
         this.ssoLogin = ssoLogin;
+        this.plsqlConfig = plsqlConfig;
+        this.parserAnalysisService = parserAnalysisService;
+        this.jarPersistenceService = jarPersistenceService;
         this.username = username;
         this.password = password;
     }
@@ -336,6 +367,355 @@ public class AdminController {
         m.put("ok", caps.ok());
         m.put("error", caps.error());
         return m;
+    }
+
+    // ── operational visibility: connections / analyses / usage ───────────────────
+
+    /**
+     * EVERY connection across every project and environment in the live config, in one list.
+     *
+     * <p>Read straight from the {@link PlsqlConfig} bean the analyzers themselves use, so the portal
+     * can never drift from what a run would actually dial. Sorted project → environment → name.
+     *
+     * <h2>What is masked or omitted</h2>
+     *
+     * <p>Passwords and truststore passwords are never read, let alone emitted — this method never
+     * touches {@link ConnectionConfig#getPassword()} or {@code getTruststorePassword()}. Usernames
+     * are masked to their first two characters because a login name is still a credential-adjacent
+     * identifier, and no TLS file contents are returned: {@code certPaths} is a boolean that says
+     * only whether any certificate path is configured.
+     */
+    @GetMapping("/connections")
+    public ResponseEntity<Map<String, Object>> connections(
+            @RequestHeader(value = KEY_HEADER, required = false) String key) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        List<Map<String, Object>> out = new ArrayList<>();
+        List<ProjectConfig> projects = plsqlConfig == null ? null : plsqlConfig.getProjects();
+        if (projects != null) {
+            for (ProjectConfig project : projects) {
+                if (project == null) continue;
+                List<EnvironmentConfig> envs = project.getEnvironments();
+                if (envs == null) continue;
+                for (EnvironmentConfig env : envs) {
+                    if (env == null) continue;
+                    List<ConnectionConfig> conns = env.getConnections();
+                    if (conns == null) continue;
+                    for (ConnectionConfig c : conns) {
+                        if (c == null) continue;
+                        out.add(connectionJson(project.getName(), env.getName(), c));
+                    }
+                }
+            }
+        }
+        out.sort(Comparator
+                .comparing((Map<String, Object> r) -> asString(r.get("project")))
+                .thenComparing(r -> asString(r.get("environment")))
+                .thenComparing(r -> asString(r.get("name"))));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ok", true);
+        body.put("connections", out);
+        return ResponseEntity.ok(body);
+    }
+
+    /** One connection row — credential-free by construction (see {@link #connections}). */
+    private static Map<String, Object> connectionJson(String project, String environment, ConnectionConfig c) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("project", project);
+        m.put("environment", environment);
+        m.put("name", c.getName());
+        m.put("dbType", c.getDbType());
+        m.put("hostname", c.getHostname());
+        m.put("port", c.getEffectivePort());
+        m.put("serviceName", c.getServiceName());
+        m.put("username", maskUsername(c.getUsername()));
+        m.put("tlsMode", tlsMode(c));
+        m.put("certPaths", hasCertPaths(c));
+        m.put("lastTestedAt", c.getLastTestedAt());
+        m.put("tested", c.isTested());
+        m.put("schemasCount", c.getSchemas() == null ? 0 : c.getSchemas().size());
+        return m;
+    }
+
+    /** First two characters plus an ellipsis; short values degrade to one character. Never null-safe leak. */
+    static String maskUsername(String username) {
+        if (username == null || username.isBlank()) return null;
+        String t = username.trim();
+        return (t.length() <= 2 ? t.substring(0, 1) : t.substring(0, 2)) + "…";
+    }
+
+    /** The configured TLS policy, spelling {@code NONE} explicitly when it is unset/blank. */
+    private static String tlsMode(ConnectionConfig c) {
+        String mode = c.getSslMode();
+        return (mode == null || mode.isBlank()) ? "NONE" : mode.trim().toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /** Whether ANY TLS artifact path (cert, key, truststore or wallet) is configured on the connection. */
+    private static boolean hasCertPaths(ConnectionConfig c) {
+        return isSet(c.getTrustCertPath()) || isSet(c.getClientCertPath()) || isSet(c.getClientKeyPath())
+                || isSet(c.getTruststorePath()) || isSet(c.getWalletPath());
+    }
+
+    private static boolean isSet(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    /**
+     * BOTH analysis stores' listings, aggregated: the parser's PL/SQL analyses and the JAR
+     * persistence service's JAR analyses.
+     *
+     * <p>Enumeration is delegated to the very services the existing list endpoints call
+     * ({@link com.plsqlanalyzer.web.parser.service.AnalysisService#listAnalyses()} and
+     * {@link com.jaranalyzer.service.PersistenceService#listJars()}) — this never re-scans a
+     * directory or re-implements the index/header reads.
+     *
+     * <p>Each row carries a best-effort {@code owner}: the audit records no analysis event, so the
+     * owner is the person whose most recent CONNECT/LOGIN sits within {@link #OWNER_WINDOW_MS} before
+     * the analysis timestamp, or the literal {@code "unknown"} when no such event exists.
+     */
+    @GetMapping("/analyses")
+    public ResponseEntity<Map<String, Object>> analyses(
+            @RequestHeader(value = KEY_HEADER, required = false) String key) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        List<OwnerEvent> owners = ownerEvents();
+
+        List<Map<String, Object>> plsql = new ArrayList<>();
+        try {
+            for (AnalysisInfo a : parserAnalysisService.listAnalyses()) {
+                plsql.add(plsqlAnalysisJson(a, owners));
+            }
+        } catch (Exception e) {
+            log.warn("[admin] could not list PL/SQL analyses: {}", e.getMessage());
+        }
+        plsql.sort(Comparator.comparingLong((Map<String, Object> r) -> asLong(r.get("timestampEpochMs"))).reversed());
+
+        List<Map<String, Object>> jar = new ArrayList<>();
+        try {
+            for (Map<String, Object> j : jarPersistenceService.listJars()) {
+                jar.add(jarAnalysisJson(j, owners));
+            }
+        } catch (Exception e) {
+            log.warn("[admin] could not list JAR analyses: {}", e.getMessage());
+        }
+        jar.sort(Comparator.comparingLong((Map<String, Object> r) -> asLong(r.get("timestampEpochMs"))).reversed());
+
+        Map<String, Object> analyses = new LinkedHashMap<>();
+        analyses.put("plsql", plsql);
+        analyses.put("jar", jar);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ok", true);
+        body.put("analyses", analyses);
+        return ResponseEntity.ok(body);
+    }
+
+    private Map<String, Object> plsqlAnalysisJson(AnalysisInfo a, List<OwnerEvent> owners) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", a.getName());
+        m.put("project", a.getProject());
+        m.put("environment", a.getEnvironment());
+        m.put("connectionName", a.getConnectionName());
+        m.put("dialect", dialectOf(a.getJdbcUrl()));
+        m.put("entryPoint", a.getEntryPoint());
+        m.put("entrySchema", a.getEntrySchema());
+        m.put("totalNodes", a.getTotalNodes());
+        m.put("totalTables", a.getTotalTables());
+        m.put("totalEdges", a.getTotalEdges());
+        m.put("totalLinesOfCode", a.getTotalLinesOfCode());
+        m.put("timestampEpochMs", a.getTimestamp());
+        m.put("owner", ownerLabelAt(owners, a.getTimestamp()));
+        return m;
+    }
+
+    private Map<String, Object> jarAnalysisJson(Map<String, Object> j, List<OwnerEvent> owners) {
+        long ts = parseTimestamp(j.get("analyzedAt"));
+        Object mode = j.get("analysisMode") != null ? j.get("analysisMode") : j.get("mode");
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", j.get("id"));
+        m.put("jarName", j.get("jarName"));
+        m.put("projectName", j.get("projectName"));
+        m.put("totalClasses", j.get("totalClasses"));
+        m.put("totalEndpoints", j.get("totalEndpoints"));
+        m.put("analyzedAt", j.get("analyzedAt"));
+        m.put("mode", mode);
+        m.put("timestampEpochMs", ts);
+        m.put("owner", ownerLabelAt(owners, ts));
+        return m;
+    }
+
+    /**
+     * Per-user operational rollup: analyses attributed to each person (best-effort, same heuristic
+     * as {@link #analyses}), distinct CONNECT activity, live-session state and first/last seen.
+     */
+    @GetMapping("/usage")
+    public ResponseEntity<Map<String, Object>> usage(
+            @RequestHeader(value = KEY_HEADER, required = false) String key) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        List<OwnerEvent> owners = ownerEvents();
+
+        Map<String, Integer> plsqlByOwner = new HashMap<>();
+        Map<String, Integer> jarByOwner = new HashMap<>();
+        int plsqlTotal = 0;
+        int jarTotal = 0;
+        try {
+            for (AnalysisInfo a : parserAnalysisService.listAnalyses()) {
+                plsqlTotal++;
+                OwnerEvent ev = ownerEventAt(owners, a.getTimestamp());
+                if (ev != null && ev.key() != null) plsqlByOwner.merge(ev.key(), 1, Integer::sum);
+            }
+        } catch (Exception e) {
+            log.warn("[admin] usage could not list PL/SQL analyses: {}", e.getMessage());
+        }
+        try {
+            for (Map<String, Object> j : jarPersistenceService.listJars()) {
+                jarTotal++;
+                OwnerEvent ev = ownerEventAt(owners, parseTimestamp(j.get("analyzedAt")));
+                if (ev != null && ev.key() != null) jarByOwner.merge(ev.key(), 1, Integer::sum);
+            }
+        } catch (Exception e) {
+            log.warn("[admin] usage could not list JAR analyses: {}", e.getMessage());
+        }
+
+        Map<String, Integer> connectByKey = new HashMap<>();
+        for (AuditEntry e : audit.query(AdminAuditService.MAX_TAIL, "CONNECT", null)) {
+            if (e.key() != null) connectByKey.merge(e.key(), 1, Integer::sum);
+        }
+
+        Map<String, Integer> liveByKey = new HashMap<>();
+        for (ActiveUserInfo active : activeUsers()) {
+            String k = activeKey(active);
+            if (k != null) liveByKey.merge(k, 1, Integer::sum);
+        }
+
+        List<Map<String, Object>> users = new ArrayList<>();
+        Set<String> emitted = new HashSet<>();
+        for (UserRollup r : audit.rollups()) {
+            emitted.add(r.key());
+            int p = plsqlByOwner.getOrDefault(r.key(), 0);
+            int jc = jarByOwner.getOrDefault(r.key(), 0);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("key", r.key());
+            row.put("displayName", audit.displayNameFor(r.key()));
+            row.put("name", r.name());
+            row.put("email", r.email());
+            row.put("firstSeenEpochMs", r.firstSeenEpochMs());
+            row.put("lastSeenEpochMs", r.lastSeenEpochMs());
+            row.put("plsqlAnalyses", p);
+            row.put("jarAnalyses", jc);
+            row.put("totalAnalyses", p + jc);
+            row.put("connectionsTested", connectByKey.getOrDefault(r.key(), 0));
+            row.put("currentlyActive", liveByKey.containsKey(r.key()));
+            row.put("sessionCount", liveByKey.getOrDefault(r.key(), 0));
+            users.add(row);
+        }
+        for (Map.Entry<String, Integer> e : liveByKey.entrySet()) {
+            if (emitted.contains(e.getKey())) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("key", e.getKey());
+            row.put("displayName", audit.displayNameFor(e.getKey()));
+            row.put("name", null);
+            row.put("email", e.getKey());
+            row.put("firstSeenEpochMs", 0L);
+            row.put("lastSeenEpochMs", 0L);
+            row.put("plsqlAnalyses", plsqlByOwner.getOrDefault(e.getKey(), 0));
+            row.put("jarAnalyses", jarByOwner.getOrDefault(e.getKey(), 0));
+            row.put("totalAnalyses", plsqlByOwner.getOrDefault(e.getKey(), 0)
+                    + jarByOwner.getOrDefault(e.getKey(), 0));
+            row.put("connectionsTested", connectByKey.getOrDefault(e.getKey(), 0));
+            row.put("currentlyActive", true);
+            row.put("sessionCount", e.getValue());
+            users.add(row);
+        }
+        users.sort(Comparator
+                .comparingLong((Map<String, Object> r) -> asLong(r.get("lastSeenEpochMs"))).reversed()
+                .thenComparing(r -> asString(r.get("key"))));
+
+        Map<String, Object> totals = new LinkedHashMap<>();
+        totals.put("users", users.size());
+        totals.put("analyses", plsqlTotal + jarTotal);
+        totals.put("plsqlAnalyses", plsqlTotal);
+        totals.put("jarAnalyses", jarTotal);
+        totals.put("activeNow", liveByKey.size());
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ok", true);
+        body.put("totals", totals);
+        body.put("users", users);
+        return ResponseEntity.ok(body);
+    }
+
+    /** A CONNECT/LOGIN marker used for best-effort analysis→user attribution. */
+    private record OwnerEvent(long timestampEpochMs, String key, String label) {}
+
+    /** Every CONNECT/LOGIN audit event, ascending by time — the windows analyses are matched against. */
+    private List<OwnerEvent> ownerEvents() {
+        List<OwnerEvent> out = new ArrayList<>();
+        for (AuditEntry e : audit.query(AdminAuditService.MAX_TAIL, null, null)) {
+            String type = e.type();
+            if (!"CONNECT".equalsIgnoreCase(type) && !"LOGIN".equalsIgnoreCase(type)) continue;
+            if (e.timestampEpochMs() <= 0) continue;
+            out.add(new OwnerEvent(e.timestampEpochMs(), e.key(), eventUserLabel(e)));
+        }
+        out.sort(Comparator.comparingLong(OwnerEvent::timestampEpochMs));
+        return out;
+    }
+
+    /** The most recent CONNECT/LOGIN at or before {@code ts}, within the attribution window; else null. */
+    private static OwnerEvent ownerEventAt(List<OwnerEvent> events, long ts) {
+        if (ts <= 0 || events.isEmpty()) return null;
+        OwnerEvent best = null;
+        for (OwnerEvent e : events) {
+            if (e.timestampEpochMs() <= ts) best = e;
+            else break;
+        }
+        if (best == null || ts - best.timestampEpochMs() > OWNER_WINDOW_MS) return null;
+        return best;
+    }
+
+    private static String ownerLabelAt(List<OwnerEvent> events, long ts) {
+        OwnerEvent ev = ownerEventAt(events, ts);
+        return (ev == null || ev.label() == null) ? "unknown" : ev.label();
+    }
+
+    /** The same user chain the audit "User" column uses: display-name override, then email/name/account. */
+    private String eventUserLabel(AuditEntry e) {
+        String label = firstNonBlank(audit.displayNameFor(e.key()), e.email(), e.name(), e.accountId());
+        return label != null ? label : e.key();
+    }
+
+    /** Dialect from a JDBC URL — the same substring scan the parser itself uses. */
+    private static String dialectOf(String jdbcUrl) {
+        String u = jdbcUrl == null ? "" : jdbcUrl.toLowerCase(java.util.Locale.ROOT);
+        if (u.contains("sqlserver")) return "SQLSERVER";
+        if (u.contains("oracle"))    return "ORACLE";
+        if (u.contains("mysql"))     return "MYSQL";
+        if (u.contains("db2"))       return "DB2";
+        if (u.contains("postgres"))  return "POSTGRES";
+        return "UNKNOWN";
+    }
+
+    /** Epoch millis from a JAR header's {@code analyzedAt}: an ISO local date-time, instant or number. */
+    private static long parseTimestamp(Object value) {
+        if (value == null) return 0;
+        if (value instanceof Number n) return n.longValue();
+        String s = String.valueOf(value).trim();
+        if (s.isEmpty()) return 0;
+        try {
+            return java.time.LocalDateTime.parse(s)
+                    .atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+        } catch (Exception ignored) {
+            try { return java.time.Instant.parse(s).toEpochMilli(); } catch (Exception ignored2) { return 0; }
+        }
+    }
+
+    private static String asString(Object value) {
+        return value == null ? "" : String.valueOf(value);
     }
 
     // ── destructive operations ──────────────────────────────────────────────────

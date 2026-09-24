@@ -142,6 +142,49 @@
         .meta { color: var(--text-muted); font-size: 12px; }
         .empty { color: var(--text-muted); font-size: 13px; padding: 26px 4px; text-align: center; }
 
+        /* ── usage summary strip ───────────────────────────────────────────── */
+        .summary-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .stat {
+            flex: 1 1 160px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .stat-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+        }
+        .stat-value { font-size: 22px; font-weight: 700; }
+
+        /* ── tabular grouping + section headings ───────────────────────────── */
+        tr.group-row td {
+            background: var(--bg-hover);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-secondary);
+            padding: 7px 10px;
+        }
+        .section-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            margin: 20px 0 8px;
+        }
+        .section-title:first-of-type { margin-top: 4px; }
+
         /* ── tables ────────────────────────────────────────────────────────── */
         .table-scroll { overflow-x: auto; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -228,12 +271,29 @@
 
     <div class="tabs" role="tablist">
         <button id="tab-users" class="tab active" type="button" role="tab">Users</button>
+        <button id="tab-connections" class="tab" type="button" role="tab">Connections</button>
+        <button id="tab-analyses" class="tab" type="button" role="tab">Analyses</button>
         <button id="tab-audit" class="tab" type="button" role="tab">Audit History</button>
     </div>
 
     <main>
         <!-- Users -->
         <section id="panel-users" class="panel" role="tabpanel">
+            <!-- Usage summary: the portal's headline three numbers, from /api/admin/usage. -->
+            <div class="summary-strip" id="usage-strip">
+                <div class="stat">
+                    <span class="stat-label">Total users</span>
+                    <span class="stat-value" id="usage-users">—</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Total analyses</span>
+                    <span class="stat-value" id="usage-analyses">—</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Active now</span>
+                    <span class="stat-value" id="usage-active">—</span>
+                </div>
+            </div>
             <div class="toolbar">
                 <span id="users-meta" class="meta">Loading…</span>
                 <span class="spacer"></span>
@@ -279,6 +339,94 @@
                     </table>
                 </div>
             </details>
+        </section>
+
+        <!-- Connections -->
+        <section id="panel-connections" class="panel" role="tabpanel" hidden>
+            <div class="toolbar">
+                <span id="conn-meta" class="meta">Loading…</span>
+                <span class="spacer"></span>
+                <label for="conn-search">Search</label>
+                <input id="conn-search" type="text" placeholder="project, env, name, host" spellcheck="false">
+                <span class="meta">Auto-refreshes every 30s</span>
+            </div>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Connection</th>
+                        <th>Type</th>
+                        <th>Host:Port</th>
+                        <th>TLS</th>
+                        <th>Cert</th>
+                        <th>Tested</th>
+                        <th>Schemas</th>
+                    </tr>
+                    </thead>
+                    <tbody id="conn-body"></tbody>
+                </table>
+            </div>
+            <div id="conn-empty" class="empty" hidden>No connections configured.</div>
+        </section>
+
+        <!-- Analyses -->
+        <section id="panel-analyses" class="panel" role="tabpanel" hidden>
+            <div class="toolbar">
+                <label for="an-search">Search</label>
+                <input id="an-search" type="text" placeholder="name, entry point, project" spellcheck="false">
+                <label for="an-user">User</label>
+                <input id="an-user" type="text" placeholder="owner" spellcheck="false">
+                <label for="an-type">Type</label>
+                <select id="an-type">
+                    <option value="">All types</option>
+                    <option value="plsql">PL/SQL</option>
+                    <option value="jar">JAR</option>
+                </select>
+                <button id="an-apply" class="btn small" type="button">Apply</button>
+                <span class="spacer"></span>
+                <span id="an-meta" class="meta"></span>
+            </div>
+
+            <h3 id="an-plsql-title" class="section-title">PL/SQL analyses</h3>
+            <div id="an-plsql-table" class="table-scroll">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Project / Env</th>
+                        <th>Dialect</th>
+                        <th>Entry point</th>
+                        <th class="nowrap">Nodes</th>
+                        <th class="nowrap">Tables</th>
+                        <th class="nowrap">Edges</th>
+                        <th class="nowrap">LOC</th>
+                        <th>When</th>
+                        <th>Owner</th>
+                    </tr>
+                    </thead>
+                    <tbody id="an-plsql-body"></tbody>
+                </table>
+            </div>
+            <div id="an-plsql-empty" class="empty" hidden>No PL/SQL analyses match the current filters.</div>
+
+            <h3 id="an-jar-title" class="section-title">JAR analyses</h3>
+            <div id="an-jar-table" class="table-scroll">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>JAR</th>
+                        <th>Project</th>
+                        <th>Mode</th>
+                        <th class="nowrap">Classes</th>
+                        <th class="nowrap">Endpoints</th>
+                        <th>When</th>
+                        <th>Owner</th>
+                    </tr>
+                    </thead>
+                    <tbody id="an-jar-body"></tbody>
+                </table>
+            </div>
+            <div id="an-jar-empty" class="empty" hidden>No JAR analyses match the current filters.</div>
         </section>
 
         <!-- Audit -->
@@ -332,11 +480,17 @@
     var PAGE_SIZE = 200;
     var POLL_MS = 30000;
 
+    var TABS = ['users', 'connections', 'analyses', 'audit'];
+
     var state = {
         tab: 'users',
         auditLimit: PAGE_SIZE,
         pollTimer: null,
-        busy: false
+        busy: false,
+        /* Last-loaded operational data, kept so an in-page filter never refetches. */
+        connections: [],
+        plsqlAnalyses: [],
+        jarAnalyses: []
     };
 
     var $ = function (id) { return document.getElementById(id); };
@@ -462,7 +616,6 @@
                 storeToken(data.token);
                 $('login-error').hidden = true;
                 showApp();
-                await loadUsers();
             } else {
                 $('login-error').textContent = (data && data.error) ? data.error : 'Invalid admin credentials';
                 $('login-error').hidden = false;
@@ -485,19 +638,26 @@
 
     function selectTab(tab) {
         state.tab = tab;
-        var users = tab === 'users';
-        $('tab-users').classList.toggle('active', users);
-        $('tab-audit').classList.toggle('active', !users);
-        $('panel-users').hidden = !users;
-        $('panel-audit').hidden = users;
-        if (users) loadUsers(); else loadAudit(true);
+        TABS.forEach(function (t) {
+            $('tab-' + t).classList.toggle('active', t === tab);
+            $('panel-' + t).hidden = (t !== tab);
+        });
+        loadTab(tab);
     }
 
-    $('tab-users').addEventListener('click', function () { selectTab('users'); });
-    $('tab-audit').addEventListener('click', function () { selectTab('audit'); });
-    $('refresh-btn').addEventListener('click', function () {
-        if (state.tab === 'users') loadUsers(); else loadAudit(true);
+    /* Loads the data for one tab. Every tab self-refreshes from the same server, so the poll timer
+       and the Refresh button can both just call this for whatever tab is showing. */
+    function loadTab(tab) {
+        if (tab === 'users') { loadUsage(); loadUsers(); }
+        else if (tab === 'connections') loadConnections();
+        else if (tab === 'analyses') loadAnalyses();
+        else loadAudit(true);
+    }
+
+    TABS.forEach(function (t) {
+        $('tab-' + t).addEventListener('click', function () { selectTab(t); });
     });
+    $('refresh-btn').addEventListener('click', function () { loadTab(state.tab); });
 
     /* ── users tab ─────────────────────────────────────────────────────────── */
 
@@ -682,6 +842,193 @@
         }
     }
 
+    /* ── usage summary (Users tab strip) ──────────────────────────────────── */
+
+    async function loadUsage() {
+        try {
+            var data = await api('/api/admin/usage');
+            var t = (data && data.totals) || {};
+            $('usage-users').textContent = (t.users === undefined || t.users === null) ? '—' : t.users;
+            $('usage-analyses').textContent = (t.analyses === undefined || t.analyses === null) ? '—' : t.analyses;
+            $('usage-active').textContent = (t.activeNow === undefined || t.activeNow === null) ? '—' : t.activeNow;
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    /* ── connections tab ──────────────────────────────────────────────────── */
+
+    async function loadConnections() {
+        try {
+            var data = await api('/api/admin/connections');
+            state.connections = (data && data.connections) || [];
+            renderConnections();
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    /* TLS badge: NONE grey, REQUIRED orange, VERIFY_* green (CA/FULL both mean "verify"). */
+    function tlsBadge(mode) {
+        var m = (mode == null || mode === '') ? 'NONE' : String(mode).toUpperCase();
+        var cls = 'badge-gray';
+        if (m === 'REQUIRED') cls = 'badge-orange';
+        else if (m.indexOf('VERIFY') === 0) cls = 'badge-green';
+        return el('span', 'badge ' + cls, m);
+    }
+
+    function hostPort(c) {
+        var host = (c.hostname === undefined || c.hostname === null || c.hostname === '') ? '—' : c.hostname;
+        var port = (c.port === undefined || c.port === null || c.port === 0) ? '' : ':' + c.port;
+        return host + port;
+    }
+
+    function renderConnections() {
+        var body = $('conn-body');
+        body.textContent = '';
+        var term = ($('conn-search').value || '').trim().toLowerCase();
+        var rows = (state.connections || []).filter(function (c) {
+            if (!term) return true;
+            return [c.project, c.environment, c.name, c.hostname, c.dbType, c.serviceName, c.username]
+                .map(function (v) { return v == null ? '' : String(v); })
+                .join(' ').toLowerCase().indexOf(term) >= 0;
+        });
+        $('conn-empty').hidden = rows.length > 0;
+
+        // The backend already sorts project → env → name, so a change of group key is a new heading.
+        var lastGroup = null;
+        rows.forEach(function (c) {
+            var group = textOr(c.project) + ' / ' + textOr(c.environment);
+            if (group !== lastGroup) {
+                lastGroup = group;
+                var gr = document.createElement('tr');
+                gr.className = 'group-row';
+                var gc = el('td', null, group);
+                gc.colSpan = 7;
+                gr.appendChild(gc);
+                body.appendChild(gr);
+            }
+
+            var tr = document.createElement('tr');
+            tr.appendChild(td(c.name));
+            tr.appendChild(td(c.dbType));
+            tr.appendChild(td(hostPort(c), 'mono'));
+
+            var tlsCell = el('td', 'nowrap');
+            tlsCell.appendChild(tlsBadge(c.tlsMode));
+            tr.appendChild(tlsCell);
+
+            var certCell = el('td', 'nowrap');
+            if (c.certPaths) certCell.appendChild(el('span', 'badge badge-blue', 'present'));
+            else certCell.appendChild(el('span', 'muted', 'none'));
+            tr.appendChild(certCell);
+
+            var testedCell = el('td', 'nowrap');
+            testedCell.appendChild(el('span', 'badge ' + (c.tested ? 'badge-green' : 'badge-gray'), c.tested ? 'yes' : 'no'));
+            testedCell.appendChild(el('span', 'muted',
+                c.lastTestedAt ? ' ' + fmtTime(c.lastTestedAt) : ' · never'));
+            tr.appendChild(testedCell);
+
+            tr.appendChild(td(c.schemasCount));
+            body.appendChild(tr);
+        });
+
+        $('conn-meta').textContent = rows.length + ' connection' + (rows.length === 1 ? '' : 's');
+    }
+
+    $('conn-search').addEventListener('input', function () { renderConnections(); });
+
+    /* ── analyses tab (PL/SQL + JAR, one screen) ──────────────────────────── */
+
+    async function loadAnalyses() {
+        try {
+            var data = await api('/api/admin/analyses');
+            var a = (data && data.analyses) || {};
+            state.plsqlAnalyses = a.plsql || [];
+            state.jarAnalyses = a.jar || [];
+            renderAnalyses();
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    }
+
+    function ownerCell(owner) {
+        var label = (owner === undefined || owner === null || owner === '') ? 'unknown' : owner;
+        return td(label, label === 'unknown' ? 'muted' : null);
+    }
+
+    function renderAnalyses() {
+        var term = ($('an-search').value || '').trim().toLowerCase();
+        var user = ($('an-user').value || '').trim().toLowerCase();
+        var type = $('an-type').value;
+        var showPlsql = type === '' || type === 'plsql';
+        var showJar = type === '' || type === 'jar';
+
+        function matches(row, fields) {
+            if (user && String(row.owner == null ? '' : row.owner).toLowerCase().indexOf(user) < 0) return false;
+            if (!term) return true;
+            return fields.map(function (k) {
+                return row[k] == null ? '' : String(row[k]);
+            }).join(' ').toLowerCase().indexOf(term) >= 0;
+        }
+
+        // PL/SQL
+        var pbody = $('an-plsql-body');
+        pbody.textContent = '';
+        var prows = showPlsql
+            ? (state.plsqlAnalyses || []).filter(function (r) {
+                return matches(r, ['name', 'project', 'environment', 'dialect', 'entryPoint', 'entrySchema', 'owner']);
+            })
+            : [];
+        $('an-plsql-title').hidden = !showPlsql;
+        $('an-plsql-table').hidden = !showPlsql;
+        $('an-plsql-empty').hidden = !(showPlsql && prows.length === 0);
+        prows.forEach(function (r) {
+            var tr = document.createElement('tr');
+            tr.appendChild(td(r.name));
+            tr.appendChild(td(textOr(r.project) + ' / ' + textOr(r.environment), 'muted'));
+            tr.appendChild(td(r.dialect));
+            tr.appendChild(td(r.entryPoint));
+            tr.appendChild(td(r.totalNodes, 'nowrap'));
+            tr.appendChild(td(r.totalTables, 'nowrap'));
+            tr.appendChild(td(r.totalEdges, 'nowrap'));
+            tr.appendChild(td(r.totalLinesOfCode, 'nowrap'));
+            tr.appendChild(td(fmtTime(r.timestampEpochMs), 'nowrap muted'));
+            tr.appendChild(ownerCell(r.owner));
+            pbody.appendChild(tr);
+        });
+
+        // JAR
+        var jbody = $('an-jar-body');
+        jbody.textContent = '';
+        var jrows = showJar
+            ? (state.jarAnalyses || []).filter(function (r) {
+                return matches(r, ['jarName', 'projectName', 'mode', 'owner']);
+            })
+            : [];
+        $('an-jar-title').hidden = !showJar;
+        $('an-jar-table').hidden = !showJar;
+        $('an-jar-empty').hidden = !(showJar && jrows.length === 0);
+        jrows.forEach(function (r) {
+            var tr = document.createElement('tr');
+            tr.appendChild(td(r.jarName));
+            tr.appendChild(td(r.projectName, 'muted'));
+            tr.appendChild(td(r.mode));
+            tr.appendChild(td(r.totalClasses, 'nowrap'));
+            tr.appendChild(td(r.totalEndpoints, 'nowrap'));
+            tr.appendChild(td(r.analyzedAt ? r.analyzedAt : fmtTime(r.timestampEpochMs), 'nowrap muted'));
+            tr.appendChild(ownerCell(r.owner));
+            jbody.appendChild(tr);
+        });
+
+        $('an-meta').textContent = prows.length + ' PL/SQL · ' + jrows.length + ' JAR';
+    }
+
+    $('an-search').addEventListener('input', function () { renderAnalyses(); });
+    $('an-user').addEventListener('input', function () { renderAnalyses(); });
+    $('an-type').addEventListener('change', function () { renderAnalyses(); });
+    $('an-apply').addEventListener('click', function () { renderAnalyses(); });
+
     /* ── audit tab ─────────────────────────────────────────────────────────── */
 
     async function loadAudit(reset) {
@@ -770,9 +1117,11 @@
         stopPolling();
         state.pollTimer = setInterval(function () {
             if (document.hidden) return;
-            if (state.tab !== 'users') return;
             if ($('app-view').hidden) return;
-            loadUsers();
+            // The audit tab is never auto-refreshed: it can be filtered/paged by hand, and a poll
+            // would reset that view under the operator.
+            if (state.tab === 'audit') return;
+            loadTab(state.tab);
         }, POLL_MS);
     }
 
@@ -791,9 +1140,9 @@
             return;
         }
         /* Probe with the stored token: a 403 here is the page telling us the token is stale or
-           was never valid, and the api() helper reacts by re-showing the login form. */
+           was never valid, and the api() helper reacts by re-showing the login form. showApp()
+           selects the active tab, which loads that tab's data. */
         showApp();
-        await loadUsers();
     })();
 })();
 </script>
