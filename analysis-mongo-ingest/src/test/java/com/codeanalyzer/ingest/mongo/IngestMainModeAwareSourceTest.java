@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@code IngestMain.storeSource} used to hardcode {@code StorageFactory.Settings.localAt(root)}
@@ -111,8 +112,18 @@ class IngestMainModeAwareSourceTest {
 
             long procNodeCount = client.getDatabase(TEST_DB)
                     .getCollection("am_proc_node").countDocuments();
-            assertEquals(52, procNodeCount,
-                    "all 52 real crawled nodes must be ingested, not silently zero");
+            // The expectation is DERIVED, not hardcoded: count the source corpus's own node
+            // artifacts first, then assert the ingest moved every one of them. (A hardcoded 52
+            // silently rotted when a re-crawl of the corpus legitimately deduped a node — the
+            // test then failed on corpus drift, which is the source's business, not the
+            // ingest's.) Zero remains the failure this guard exists for: a silently-empty ingest.
+            long sourceNodeCount = client.getDatabase("amp-parse")
+                    .getCollection("am_proc_node").countDocuments();
+            assertTrue(procNodeCount > 0,
+                    "ingest must be non-empty — a silently-zero ingest is the failure this test exists to catch");
+            assertEquals(sourceNodeCount, procNodeCount,
+                    "every node in the source corpus (" + sourceNodeCount + ") must be ingested, not "
+                            + procNodeCount + " — count drift means the source corpus changed or the ingest dropped nodes");
 
             long predicateCount = client.getDatabase(TEST_DB)
                     .getCollection("am_statement__predicates").countDocuments();
