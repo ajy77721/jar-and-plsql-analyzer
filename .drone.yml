@@ -8,12 +8,6 @@ name: default
 # staging deploys on every push to main; prod on version tags.
 
 steps:
-- name: test
-  pull: if-not-exists
-  image: maven:3.9-eclipse-temurin-17
-  commands:
-  - mvn -B -no-transfer-progress package -DskipTests -q
-
 - name: build+publish-main-branch
   pull: if-not-exists
   image: plugins/docker
