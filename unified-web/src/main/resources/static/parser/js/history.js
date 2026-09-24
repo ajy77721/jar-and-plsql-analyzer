@@ -148,7 +148,9 @@ PA._historyServerFilters = function() {
     if (PA._historyProjFilter) cf.push('project:' + PA._historyProjFilter);
     return cf;
 };
-PA._DS_LABEL = { ORACLE: 'Oracle', SQLSERVER: 'SQL Server', MYSQL: 'MySQL', DB2: 'Db2', POSTGRES: 'PostgreSQL' };
+// PA._DS_LABEL (ORACLE, SQLSERVER, MYSQL, DB2, POSTGRES) is defined once, globally, in
+// ../shared/page-envelope.js, which every page loads before this one — the single place a dialect
+// is named, so a sixth dialect appears in every screen's filter for free.
 
 PA.onHistorySearch = function(q) {
     PA._historySearchQuery = (q || '').toUpperCase();

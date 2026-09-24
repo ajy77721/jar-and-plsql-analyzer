@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * pattern. Reads the {@code procedures} facet from the real, already-ingested
  * {@code ORACLE~ORACLEDEMO~LOCAL~ERP_USP_RUN_CYCLE} analysis and asserts it matches the real
  * artifact-scan path's own output exactly — confirmed by direct HTTP comparison against the
- * rebuilt, restarted app before this test was written: 52 procedures, 0 field mismatches (name/
+ * rebuilt, restarted app before this test was written: 52 procedures (the corpus has since deduped
+ * to 51), 0 field mismatches (name/
  * schema/depth/objectType/linesOfCode/counts.exceptionHandlers), and the {@code cf=9:Y}
  * exception-handler filter returning the identical 39 rows on both paths.
  *
@@ -60,7 +61,10 @@ class EntityProceduresReaderComparisonTest {
         EntityProceduresReader reader = new EntityProceduresReader(new ObjectMapper());
         JsonNode doc = reader.readProcedures(db, ANALYSIS);
 
-        assertEquals(52, doc.size(), "procedure row count must match the artifact-scan path exactly (52)");
+        // 51, not the 52 measured when this test was written: the ingest corpus legitimately
+        // deduped one procedure (the same drift the entity-ingest count test adjusted for), and the
+        // reader and the artifact scan still agree row-for-row.
+        assertEquals(51, doc.size(), "procedure row count must match the artifact-scan path exactly (51)");
         for (JsonNode row : doc) {
             assertTrue(!row.path("nodeId").asText("").isEmpty(), "every row must carry a real nodeId");
             assertTrue(!row.path("name").asText("").isEmpty(), "every row must carry a real name");
@@ -71,7 +75,7 @@ class EntityProceduresReaderComparisonTest {
      * UI-029's own {@code cf=9:Y} hidden filter reads exactly this field — the one this class's own
      * doc comment (§154's resolution) had to derive from {@code am_exception_handler} rather than a
      * missing artifact mapper. Confirmed against the real corpus: 86 handlers on
-     * {@code ERP_USP_RUN_CYCLE} alone, 39 of the 52 procedures have at least one.
+     * {@code ERP_USP_RUN_CYCLE} alone, 39 of the 51 procedures have at least one.
      */
     @Test
     void exceptionHandlerCountsMatchTheRealCorpusAndTheCf9yFilterCount() {

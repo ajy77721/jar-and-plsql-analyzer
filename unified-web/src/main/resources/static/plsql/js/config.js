@@ -381,7 +381,7 @@ PA.config = {
             <div style="margin:12px 0 6px;font-size:12px;font-weight:700;color:var(--text)">Connection Details</div>
             <div class="cfg-row"><label>Database Type</label>
                 <select id="cfDbType" class="form-select cfg-inp" onchange="PA.config._onDbTypeChange()">
-                    ${['ORACLE','MYSQL','SQLSERVER','DB2','POSTGRES'].map(t =>
+                    ${Object.keys(PA._DS_LABEL).map(t =>
                         `<option value="${t}" ${((c.dbType || 'ORACLE').toUpperCase() === t) ? 'selected' : ''}>${t}</option>`
                     ).join('')}
                 </select></div>

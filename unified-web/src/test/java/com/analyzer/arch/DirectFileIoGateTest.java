@@ -71,12 +71,21 @@ class DirectFileIoGateTest {
         // {config}/certs/<connection>/ — the self-contained-connection design puts cert material
         // beside plsql-config.yaml on purpose (drivers need file paths; see the plsql-config TLS
         // entries below). Same local-config concern as the original 3 ops.
-        ALLOWED.put("unified-web/ConfigController", 6);
+        // Raised 6→9 (2026-09-24): the per-user connection work materialises a user's TLS cert to a
+        // local file at dial time (temp write + read), which is the same cert-beside-config material
+        // as the entries above, three more ops. No analysis artifact flows through here.
+        ALLOWED.put("unified-web/ConfigController", 9);
 
         // ── Credential files — plaintext production DB passwords. These MUST stay on local disk;
         //    CredentialGuardStore throws if they are pushed through the store.
         ALLOWED.put("unified-web/AnalysisService", 6);
         ALLOWED.put("unified-web/ParserAnalysisExecutor", 1);
+        // The per-user connection store (users/<key>/connections.yaml), encrypted with an
+        // AES-GCM key at rest — the same user-credential category as ConfigDirService: a signed-in
+        // user's private DB credentials and their per-user TLS cert material MUST stay local, never
+        // in shared storage artifacts, and are materialised to local files at dial time because the
+        // drivers consume file paths.
+        ALLOWED.put("unified-web/UserConnectionStore", 10);
         ALLOWED.put("plsql-parser/DbConnectionManager", 2);
 
         // ── TLS certificate paths for JDBC — the drivers themselves consume FILE paths (MySQL
@@ -110,7 +119,10 @@ class DirectFileIoGateTest {
 
         // ── Storage bootstrap — the one Path.of that builds the store root itself.
         ALLOWED.put("plsql-parser/FlowAnalysisMain", 1);
-        // flow-poc/PocRunner deleted (was budget 2): fully migrated to the store — 0 direct ops.
+        // flow-poc/PocRunner: the module was restored from decompiled sources, so its original 2
+        // direct ops are back. A standalone PoC CLI (not a production path), it predates the
+        // ArtifactStore migration — the original entry budgeted exactly these 2 ops.
+        ALLOWED.put("flow-poc/PocRunner", 2);
         ALLOWED.put("jar-analyzer-core/JarDataPaths", 1);
         // Mode 4 (entity-ingest) — IngestMain.storeSource(String) builds a StorageFactory.Settings
         // the identical way FlowAnalysisMain/PocRunner do above, for the identical reason: a CLI's

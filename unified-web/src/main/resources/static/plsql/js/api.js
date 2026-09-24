@@ -820,12 +820,13 @@ PA.api = {
      * Standard TCP port → database-type table from the server
      * (`GET /api/plsql/config/db-type-suggest`, the authoritative copy of `DbType.standardPortMap`):
      * `{ "1521": "ORACLE", "3306": "MYSQL", ... }`. The setup modal uses it to auto-select a DB type
-     * as a port is typed. Never raises the shared error banner — returns `{}` on failure so the
-     * caller quietly keeps its built-in fallback table.
+     * as a port is typed. A failed fetch is surfaced through the shared error banner and returns the
+     * FAILED sentinel — an empty array, which the caller's `Object.keys(map).length` check reads as
+     * "no suggestions", so the built-in fallback table still stays in place.
      */
     async getDbTypeSuggestions() {
         const res = await fetch('/api/plsql/config/db-type-suggest', { cache: 'no-store' });
-        if (!res.ok) return {};
+        if (!res.ok) return PA.apiFail(res);
         return res.json();
     },
 

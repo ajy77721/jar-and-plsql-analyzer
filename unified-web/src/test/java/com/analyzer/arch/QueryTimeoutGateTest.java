@@ -65,15 +65,18 @@ class QueryTimeoutGateTest {
      * there fails rather than being tolerated by a leftover allowance.
      */
     private static final Map<String, Integer> BUDGET = new TreeMap<>(Map.ofEntries(
-            // ChatController.java, ClaudePurposeSummaryService.java, FacetPageResponder.java: not
-            // MongoDB queries at all — java.util.regex.Matcher.find() and Stream.distinct(), which
-            // the QUERY regex cannot distinguish from a Mongo collection's .find()/.distinct() by
-            // method name alone (see the regex's own doc comment on this exact class of false
-            // positive). Confirmed by reading each call site directly.
+            // ChatController.java, ClaudePurposeSummaryService.java, FacetPageResponder.java,
+            // ConfigController.java: not MongoDB queries at all — java.util.regex.Matcher.find() and
+            // Stream.distinct(), which the QUERY regex cannot distinguish from a Mongo collection's
+            // .find()/.distinct() by method name alone (see the regex's own doc comment on this
+            // exact class of false positive). ConfigController's is the Matcher over PEM_CERT_BLOCK
+            // in readPemCertificates — the per-user connection cert parsing, added 2026-09-24.
+            // Confirmed by reading each call site directly.
             Map.entry("ChatController.java", 1),
             Map.entry("ClaudeChunkReader.java", 1),
             Map.entry("ClaudePurposeSummaryService.java", 1),
             Map.entry("ClaudeVerificationService.java", 1),
+            Map.entry("ConfigController.java", 1),
             Map.entry("ConversionController.java", 4),
             Map.entry("ConversionService.java", 1),
             Map.entry("EndpointReachability.java", 2),
@@ -192,12 +195,14 @@ class QueryTimeoutGateTest {
     void theScanStillFindsQueries() throws IOException {
         // Every regex gate's failure mode is matching nothing and passing forever.
         int total = untimedByFile().values().stream().mapToInt(Integer::intValue).sum();
-        assertEquals(53, total,
-                "the scan found " + total + " unbudgeted queries; it measured 53 (2026-09-14, after "
-                        + "budgeting 3 pre-existing java.util.regex.Matcher/Stream.distinct() false "
-                        + "positives it had never accounted for: ChatController, "
-                        + "ClaudePurposeSummaryService, FacetPageResponder — was 50). If the number "
-                        + "fell, lower the budgets; if the pattern broke, fix the pattern.");
+        assertEquals(54, total,
+                "the scan found " + total + " unbudgeted queries; it measured 54 (2026-09-24, after "
+                        + "budgeting a 4th java.util.regex.Matcher false positive it had never "
+                        + "accounted for — ConfigController's PEM_CERT_BLOCK scan in "
+                        + "readPemCertificates, added with the per-user connection cert work — on top "
+                        + "of the 3 pre-existing ones (ChatController, ClaudePurposeSummaryService, "
+                        + "FacetPageResponder; was 53). If the number fell, lower the budgets; if the "
+                        + "pattern broke, fix the pattern.");
     }
 
     @Test

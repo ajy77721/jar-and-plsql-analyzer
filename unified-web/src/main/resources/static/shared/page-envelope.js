@@ -21,6 +21,16 @@
     PA.PAGE_MEDIA_TYPE = 'application/vnd.analyzer.page+json';
 
     /**
+     * The one place a dialect is named: {@code Object.keys(PA._DS_LABEL)} is the datasource list
+     * every dropdown and filter derives from, so a sixth dialect reaches every screen at once.
+     * Hardcoding the list in a screen is the defect this prevents — a PostgreSQL analysis once
+     * showed in the history table but was missing from the filter beside it. Defined here, in the
+     * file every page loads first, so a page that never loads the parser's history.js (the plsql
+     * setup modal) still has it.
+     */
+    PA._DS_LABEL = { ORACLE: 'Oracle', SQLSERVER: 'SQL Server', MYSQL: 'MySQL', DB2: 'Db2', POSTGRES: 'PostgreSQL' };
+
+    /**
      * Normalises either response shape into an envelope.
      *
      * A bare array is reported as a single complete page, so calling code can always read
