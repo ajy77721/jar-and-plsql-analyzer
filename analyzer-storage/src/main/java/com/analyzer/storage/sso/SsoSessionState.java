@@ -1,5 +1,7 @@
 package com.analyzer.storage.sso;
 
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+
 import java.util.List;
 
 /**
@@ -34,6 +36,11 @@ import java.util.List;
  */
 public final class SsoSessionState {
 
+    /** How this session authenticated: the Identity Center device flow. */
+    public static final String SOURCE_SSO = "sso";
+    /** How this session authenticated: classic IAM access keys (an account outside Identity Center). */
+    public static final String SOURCE_IAM = "iam";
+
     /** The {@code HttpSession} id this state belongs to; its key in {@link SsoSessionRegistry}. */
     private final String sessionId;
 
@@ -45,6 +52,22 @@ public final class SsoSessionState {
     private volatile TokenState tokens;
     private volatile SsoIdentity identity;
     private volatile boolean loggedIn;
+
+    /**
+     * The caller's fixed credentials when this session authenticated with classic IAM access keys
+     * instead of Identity Center — the equivalent of the short-lived role credentials the SSO path
+     * mints per request. A session has <b>either</b> SSO material ({@link #tokens()}/{@link #registration})
+     * <b>or</b> these, never both. They are held in memory only, never returned in a response and
+     * never logged; {@link #clear()} (logout or the registry's idle sweep) drops them.
+     */
+    private volatile AwsCredentials iamCredentials;
+
+    /**
+     * Which mechanism authenticated this session — {@link #SOURCE_SSO} (the default) or
+     * {@link #SOURCE_IAM}. Carried onto the audit trail so a CONNECT can be attributed to the source
+     * that produced the credentials. Not a secret.
+     */
+    private volatile String credentialSource = SOURCE_SSO;
 
     /**
      * Every (account, roles) pair the completed login exposed, so the UI can offer the choice the
@@ -140,6 +163,35 @@ public final class SsoSessionState {
         this.loggedIn = loggedIn;
     }
 
+    /** This session's fixed IAM credentials, or {@code null} when it authenticated via SSO. */
+    public AwsCredentials iamCredentials() {
+        return iamCredentials;
+    }
+
+    /** {@link #SOURCE_SSO} or {@link #SOURCE_IAM}: which mechanism authenticated this session. */
+    public String credentialSource() {
+        return credentialSource;
+    }
+
+    /**
+     * Authenticates this session with classic IAM access keys instead of the SSO device flow: drops
+     * any SSO material, then records the caller's own credentials as this session's fixed credential
+     * source and marks the session logged in as {@code identity}.
+     *
+     * <p>The credentials are the ones the caller supplied to {@code /api/auth/aws/iam-connect}; they
+     * are the same for every request this session makes, so — unlike SSO role credentials — there is
+     * nothing to mint or refresh. A session is either IAM or SSO, so any prior SSO state is cleared.
+     */
+    public void connectIam(AwsCredentials credentials, SsoIdentity identity) {
+        synchronized (lock) {
+            clear();
+            this.iamCredentials = credentials;
+            this.identity = identity;
+            this.loggedIn = identity != null;
+            this.credentialSource = SOURCE_IAM;
+        }
+    }
+
     /** The (account, roles) choices this login exposed; empty until the device flow completes. */
     public List<AccountChoice> accountChoices() {
         return accountChoices;
@@ -216,6 +268,8 @@ public final class SsoSessionState {
             bucket = null;
             region = null;
             capabilities = null;
+            iamCredentials = null;
+            credentialSource = SOURCE_SSO;
         }
     }
 

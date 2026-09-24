@@ -92,7 +92,7 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
         if (sessionId == null) {
             return fallback.resolveCredentials();
         }
-        AwsSessionCredentials credentials = credentialsFor(sessionId);
+        AwsCredentials credentials = credentialsFor(sessionId);
         return credentials != null ? credentials : fallback.resolveCredentials();
     }
 
@@ -110,7 +110,7 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
     public AwsCredentialsProvider resolveFor(String sessionId) {
         if (sessionId == null) return fallback;
         return () -> {
-            AwsSessionCredentials credentials = credentialsFor(sessionId);
+            AwsCredentials credentials = credentialsFor(sessionId);
             return credentials != null ? credentials : fallback.resolveCredentials();
         };
     }
@@ -178,7 +178,7 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
     public CapturedCredentials captureCurrent() {
         String sessionId = currentSession.currentSessionId();
         if (sessionId == null) return null;
-        AwsSessionCredentials credentials = credentialsFor(sessionId);
+        AwsCredentials credentials = credentialsFor(sessionId);
         return credentials == null ? null : new CapturedCredentials(sessionId, credentials);
     }
 
@@ -187,14 +187,28 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
         if (sessionId != null) cache.remove(sessionId);
     }
 
-    /** Returns this user's cached-or-freshly-minted role credentials, or {@code null} if none. */
-    private AwsSessionCredentials credentialsFor(String sessionId) {
+    /**
+     * Returns this user's credentials — their fixed IAM access keys when the session authenticated
+     * with {@code /api/auth/aws/iam-connect}, otherwise their cached-or-freshly-minted SSO role
+     * credentials — or {@code null} when the session has none.
+     *
+     * <p>A session is either IAM or SSO (see {@link SsoSessionState#connectIam}), so the IAM check
+     * comes first and short-circuits: there is no token to refresh and nothing to cache for keys that
+     * are constant for the life of the session.
+     */
+    private AwsCredentials credentialsFor(String sessionId) {
         SsoSessionState state = registry.get(sessionId);
         // No state, or a state between logins: there is nothing to sign with. Drop any cached
         // triple so a later login for the same session id cannot accidentally reuse the old one.
         if (state == null || !state.loggedIn()) {
             cache.remove(sessionId);
             return null;
+        }
+        // IAM access keys are fixed for the session — return them as-is; never logged or cached.
+        AwsCredentials iam = state.iamCredentials();
+        if (iam != null) {
+            cache.remove(sessionId);
+            return iam;
         }
         long now = System.currentTimeMillis();
         Cached current = cache.get(sessionId);

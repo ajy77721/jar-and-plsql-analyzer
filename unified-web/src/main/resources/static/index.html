@@ -343,30 +343,92 @@
             </div>
             <div style="overflow-y:auto;flex:1;padding:24px">
 
-                <!-- Step 1 — SSO start -->
+                <!-- Step 1 — choose the sign-in method, then start. -->
                 <div id="awsSsoStep1">
                     <div id="awsSsoError1" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
-                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Identity Center portal URL</label>
-                    <input id="awsSsoStartUrl" type="text" placeholder="https://d-xxxxxxxxxx.awsapps.com/start"
-                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
-                        onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
-                    <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.5;margin-top:6px">
-                        Your AWS access portal URL — usually prefilled, only change if instructed.<br>
-                        Saved in this browser for next time.
+
+                    <!-- Mode switch: Identity Center (the default) or classic IAM access keys for an
+                         AWS account that is not in any Identity Center (no portal URL to give). -->
+                    <div style="display:flex;background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);padding:3px;margin-bottom:16px">
+                        <button type="button" id="awsSsoModeSsoBtn" onclick="awsSsoSetMode('sso')" style="flex:1;background:var(--orange);border:none;color:var(--text-inverse);padding:8px 10px;border-radius:var(--radius);font-size:12px;cursor:pointer;font-weight:700">Sign in with AWS SSO</button>
+                        <button type="button" id="awsSsoModeIamBtn" onclick="awsSsoSetMode('iam')" style="flex:1;background:transparent;border:none;color:var(--sidebar-muted);padding:8px 10px;border-radius:var(--radius);font-size:12px;cursor:pointer;font-weight:700">Use IAM access keys</button>
                     </div>
-                    <!-- Help affordance: where the portal URL (and one's account list) come from. -->
-                    <details style="margin-top:10px">
-                        <summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--sidebar-muted);outline:none">Where do I find this?</summary>
-                        <div style="font-size:11px;line-height:1.9;margin-top:8px">
-                            <a href="https://d-9067613a84.awsapps.com/start" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">My AWS accounts portal</a>
-                            <span style="color:var(--sidebar-muted)"> — the accounts you can access</span><br>
-                            <a href="https://kanopy.corp.mongodb.com/docs/configuration/kubeconfig/" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">Kanopy docs — kubeconfig &amp; portal setup</a><br>
-                            <a href="#" onclick="awsSsoOpenUserManual(); return false;" style="color:var(--orange);font-weight:600;text-decoration:none">User Manual</a>
+
+                    <!-- SSO branch (default) — the existing device-authorization flow, unchanged. -->
+                    <div id="awsSsoStartFields">
+                        <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Identity Center portal URL</label>
+                        <input id="awsSsoStartUrl" type="text" placeholder="https://d-xxxxxxxxxx.awsapps.com/start"
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
+                            onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <div style="font-size:10px;color:var(--sidebar-muted);line-height:1.5;margin-top:6px">
+                            Your AWS access portal URL — usually prefilled, only change if instructed.<br>
+                            Saved in this browser for next time.
                         </div>
-                    </details>
-                    <button id="awsSsoStartBtn" onclick="awsSsoContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
-                        Continue with AWS SSO
-                    </button>
+                        <!-- Help affordance: where the portal URL (and one's account list) come from. -->
+                        <details style="margin-top:10px">
+                            <summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--sidebar-muted);outline:none">Where do I find this?</summary>
+                            <div style="font-size:11px;line-height:1.9;margin-top:8px">
+                                <a href="https://d-9067613a84.awsapps.com/start" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">My AWS accounts portal</a>
+                                <span style="color:var(--sidebar-muted)"> — the accounts you can access</span><br>
+                                <a href="https://kanopy.corp.mongodb.com/docs/configuration/kubeconfig/" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">Kanopy docs — kubeconfig &amp; portal setup</a><br>
+                                <a href="#" onclick="awsSsoOpenUserManual(); return false;" style="color:var(--orange);font-weight:600;text-decoration:none">User Manual</a>
+                            </div>
+                        </details>
+                        <button id="awsSsoStartBtn" onclick="awsSsoContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                            Continue with AWS SSO
+                        </button>
+                    </div>
+
+                    <!-- IAM branch: an AWS account with no Identity Center, so no portal URL and no
+                         device verification — just the classic access key triple (access key, secret,
+                         optional session token) plus the S3 target. -->
+                    <div id="awsSsoIamFields" style="display:none">
+                        <div style="font-size:11px;color:var(--sidebar-muted);line-height:1.5;margin-bottom:12px">
+                            For an AWS account that is not in Identity Center. Your access key is used only
+                            for this session, kept in server memory, and never logged.
+                        </div>
+                        <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Access key ID</label>
+                        <input id="awsSsoIamAccessKey" type="password" autocomplete="off" spellcheck="false" placeholder="AKIA..."
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none;margin-bottom:12px"
+                            onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Secret access key</label>
+                        <input id="awsSsoIamSecret" type="password" autocomplete="off" spellcheck="false"
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none;margin-bottom:12px"
+                            onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Session token (optional)</label>
+                        <input id="awsSsoIamSessionToken" type="password" autocomplete="off" spellcheck="false" placeholder="Only for temporary credentials"
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
+                            onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <!-- Help affordance: where an IAM access key comes from. -->
+                        <details style="margin-top:10px">
+                            <summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--sidebar-muted);outline:none">Where do I find this?</summary>
+                            <div style="font-size:11px;line-height:1.9;margin-top:8px">
+                                Create an access key in the AWS console: <span style="color:var(--sidebar-text);font-weight:600">IAM &#8594; Users &#8594; (your user) &#8594; Security credentials &#8594; Create access key</span>.
+                                The secret is shown once, at creation.<br>
+                                <a href="https://console.aws.amazon.com/iam/home#/users" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">Open the IAM users page</a><br>
+                                <a href="#" onclick="awsSsoOpenUserManual(); return false;" style="color:var(--orange);font-weight:600;text-decoration:none">User Manual</a>
+                            </div>
+                        </details>
+                        <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-top:14px;margin-bottom:6px">S3 bucket</label>
+                        <input id="awsSsoIamBucket" type="text" value="amp-analyzer-parse-jar"
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none;margin-bottom:12px"
+                            onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">AWS region</label>
+                        <input id="awsSsoIamRegion" type="text" value="ap-south-1"
+                            style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"
+                            onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--sidebar-border)'">
+                        <div id="awsSsoIamCapabilities" style="display:none;margin-top:14px"></div>
+                        <div id="awsSsoIamIdentity" style="display:none;font-size:12px;font-weight:600;color:var(--sidebar-text);margin-top:12px"></div>
+                        <div id="awsSsoIamConnectedMsg" style="display:none;padding:10px 14px;background:var(--badge-green-bg);color:var(--green);font-size:12px;font-weight:600;border-radius:var(--radius);margin-top:14px"></div>
+                        <div style="display:flex;gap:10px;margin-top:16px">
+                            <button id="awsSsoIamTestBtn" onclick="awsSsoIamTest()" style="flex:1;background:var(--sidebar-hover);border:1px solid var(--sidebar-border);color:var(--sidebar-text);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                                Test access
+                            </button>
+                            <button id="awsSsoIamConnectBtn" onclick="awsSsoIamConnect()" style="flex:2;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                                Connect
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Step 2 — device verification -->
@@ -1204,6 +1266,12 @@
     const AWS_SSO_DEFAULT_BUCKET = 'amp-analyzer-parse-jar';
     const AWS_SSO_DEFAULT_REGION = 'ap-south-1';
     const AWS_SSO_POLL_FALLBACK_MS = 5000;
+    const AWS_SSO_MODE_KEY = 'awsSsoAuthMode';   // 'sso' (default) or 'iam', remembered per browser
+
+    // Which sign-in method step 1 is showing: the Identity Center device flow, or classic IAM access
+    // keys for an account with no Identity Center. Purely a UI branch — the server decides from the
+    // endpoint called.
+    let _awsSsoMode = 'sso';
 
     let _awsSsoPollId = null;    // setInterval handle for /api/auth/aws/poll
     let _awsSsoSession = null;   // last known session from /api/auth/aws/session or /connect
@@ -1219,16 +1287,18 @@
             if (session && session.connected) {
                 // Per-user identity: prefer the authenticated person, fall back to the account.
                 // Never render token material — only name/email/account/role/bucket.
-                // Identity Center id_tokens often carry no email/name claims — then the SSO role
-                // is the most human-meaningful identifier available.
+                // An IAM-key session has no role; its own IAM user name is the identifier.
+                const isIam = session.source === 'iam';
                 const who = session.displayName || session.name || session.email || session.accountName
-                    || (session.role ? session.role + ' (' + (session.account || 'SSO') + ')' : '?');
+                    || (session.role ? session.role + ' (' + (session.account || 'SSO') + ')'
+                                     : (isIam ? (session.accountId || 'IAM user') : '?'));
                 el.textContent = 'AWS: ' + who;
                 el.style.background = 'var(--badge-green-bg)';
                 el.style.color = 'var(--green)';
                 // capabilities is only present once the connect call has been verified server-side.
                 el.title = session.capabilities
-                    ? '✓verified — ' + (session.role || '?') + ' @ ' + (session.bucket || '?')
+                    ? '✓verified — ' + (isIam ? 'IAM access key' : (session.role || '?'))
+                      + ' @ ' + (session.bucket || '?')
                     : '';
             } else {
                 el.textContent = 'AWS: not connected';
@@ -1239,9 +1309,15 @@
         }
         const summary = document.getElementById('awsSsoBarSummary');
         if (summary) {
-            summary.textContent = (session && session.connected)
-                ? (session.role || '?') + ' @ ' + (session.bucket || '?') + ' (' + (session.region || '?') + ')'
-                : 'Connect with AWS SSO to read parse artifacts from S3';
+            if (session && session.connected) {
+                // An IAM-key session has no role: lead with the IAM user name (or the account id).
+                const who = session.source === 'iam'
+                    ? 'IAM ' + (session.displayName || session.name || session.accountId || 'user')
+                    : (session.role || '?');
+                summary.textContent = who + ' @ ' + (session.bucket || '?') + ' (' + (session.region || '?') + ')';
+            } else {
+                summary.textContent = 'Connect with AWS SSO to read parse artifacts from S3';
+            }
         }
         const action = document.getElementById('awsSsoBarAction');
         if (action) {
@@ -1314,8 +1390,8 @@
 
     // Three small permission badges. `caps` is the capabilities object from the connect/session
     // response; missing operations read as denied so a partial/failed probe is legible.
-    function awsSsoRenderCapabilities(caps) {
-        const el = document.getElementById('awsSsoCapabilities');
+    function awsSsoRenderCapabilities(caps, targetId) {
+        const el = document.getElementById(targetId || 'awsSsoCapabilities');
         if (!el) return;
         if (!caps || typeof caps !== 'object') { el.innerHTML = ''; el.style.display = 'none'; return; }
         const defs = [['Read', 'read'], ['Upload', 'upload'], ['Write', 'write']];
@@ -1339,6 +1415,15 @@
         const el = document.getElementById('awsSsoIdentity');
         if (!el) return;
         if (!session || !session.connected) { el.style.display = 'none'; return; }
+        // IAM-key session: there is no permission-set role, so name the IAM user directly.
+        if (session.source === 'iam') {
+            el.textContent = 'Signed in as '
+                + (session.displayName || session.name || session.accountId || 'IAM user')
+                + ' · IAM access key';
+            el.style.color = 'var(--sidebar-text)';
+            el.style.display = 'block';
+            return;
+        }
         const name = session.displayName || session.name || session.email;
         // A chooser pick replaces the server's auto-picked account/role wholesale (no fallback to the
         // session's values, which would name the account the user just declined).
@@ -1383,7 +1468,12 @@
         const msg = document.getElementById('awsSsoConnectedMsg');
         const disc = document.getElementById('awsSsoDisconnectWrap');
         if (session && session.connected) {
-            if (msg) { msg.textContent = 'Connected as ' + (session.role || '?'); msg.style.display = 'block'; }
+            if (msg) {
+                msg.textContent = 'Connected as ' + (session.source === 'iam'
+                    ? (session.displayName || session.name || session.accountId || 'IAM user')
+                    : (session.role || '?'));
+                msg.style.display = 'block';
+            }
             if (disc) disc.style.display = '';
         } else {
             if (msg) msg.style.display = 'none';
@@ -1427,6 +1517,8 @@
             const idx = step === 1 ? 1 : step === 2 ? 2
                 : step === 'choose' ? 3 : (_awsSsoChooseNeeded ? 4 : 3);
             label.textContent = 'Step ' + idx + ' of ' + total;
+            // The IAM branch is a single form, not the three-step device flow.
+            if (_awsSsoMode === 'iam' && step === 1) label.textContent = 'IAM access keys';
         }
         awsSsoClearErrors();
     }
@@ -1444,8 +1536,16 @@
             input.value = saved || _awsSsoDefaultStartUrl || '';
         }
         awsSsoFillTargets(_awsSsoSession);
-        // A live session means there is nothing to authorise — go straight to the S3 target.
-        awsSsoShowStep(_awsSsoSession ? 3 : 1);
+        // A live session means there is nothing to authorise — go straight to the S3 target. With no
+        // session, restore the sign-in method this browser last used (SSO remains the default).
+        if (_awsSsoSession) {
+            awsSsoShowStep(3);
+        } else {
+            let savedMode = 'sso';
+            try { savedMode = localStorage.getItem(AWS_SSO_MODE_KEY) || 'sso'; } catch (e) { /* storage unavailable */ }
+            awsSsoSetMode(savedMode === 'iam' ? 'iam' : 'sso');
+            awsSsoShowStep(1);
+        }
     }
 
     function closeAwsSsoModal() {
@@ -1496,6 +1596,178 @@
             awsSsoShowError(1, 'Failed to start AWS SSO: ' + e.message);
         } finally {
             if (btn) { btn.disabled = false; btn.textContent = 'Continue with AWS SSO'; }
+        }
+    }
+
+    // Switches step 1 between the two sign-in methods. Pure UI: the SSO branch keeps its existing
+    // fields and device flow untouched; the IAM branch shows the access-key form and never enters
+    // the device-verification steps.
+    function awsSsoSetMode(mode) {
+        _awsSsoMode = (mode === 'iam') ? 'iam' : 'sso';
+        try { localStorage.setItem(AWS_SSO_MODE_KEY, _awsSsoMode); } catch (e) { /* storage unavailable */ }
+        const ssoFields = document.getElementById('awsSsoStartFields');
+        const iamFields = document.getElementById('awsSsoIamFields');
+        if (ssoFields) ssoFields.style.display = (_awsSsoMode === 'iam') ? 'none' : '';
+        if (iamFields) iamFields.style.display = (_awsSsoMode === 'iam') ? '' : 'none';
+        const ssoBtn = document.getElementById('awsSsoModeSsoBtn');
+        const iamBtn = document.getElementById('awsSsoModeIamBtn');
+        const on = { bg: 'var(--orange)', fg: 'var(--text-inverse)' };
+        const off = { bg: 'transparent', fg: 'var(--sidebar-muted)' };
+        if (ssoBtn) {
+            ssoBtn.style.background = (_awsSsoMode === 'iam') ? off.bg : on.bg;
+            ssoBtn.style.color = (_awsSsoMode === 'iam') ? off.fg : on.fg;
+        }
+        if (iamBtn) {
+            iamBtn.style.background = (_awsSsoMode === 'iam') ? on.bg : off.bg;
+            iamBtn.style.color = (_awsSsoMode === 'iam') ? on.fg : off.fg;
+        }
+        const label = document.getElementById('awsSsoStepLabel');
+        if (label && _awsSsoMode === 'iam') label.textContent = 'IAM access keys';
+        if (_awsSsoMode === 'iam') awsSsoFillIamTargets();
+        awsSsoClearErrors();
+    }
+
+    // Bucket/region defaults for the IAM branch: the last target this browser connected with, else
+    // the built-in defaults — the same rule the SSO branch's step 3 uses.
+    function awsSsoFillIamTargets() {
+        const bucketEl = document.getElementById('awsSsoIamBucket');
+        const regionEl = document.getElementById('awsSsoIamRegion');
+        if (!bucketEl || !regionEl) return;
+        let savedBucket = null, savedRegion = null;
+        try {
+            savedBucket = localStorage.getItem(AWS_SSO_BUCKET_KEY);
+            savedRegion = localStorage.getItem(AWS_SSO_REGION_KEY);
+        } catch (e) { /* storage unavailable */ }
+        bucketEl.value = savedBucket || bucketEl.value || AWS_SSO_DEFAULT_BUCKET;
+        regionEl.value = savedRegion || regionEl.value || AWS_SSO_DEFAULT_REGION;
+        if (_awsSsoSession && _awsSsoSession.source === 'iam') awsSsoRenderIamIdentity(_awsSsoSession);
+    }
+
+    // The IAM branch's identity line, rendered from the endpoint response (or the live session).
+    // Only identity fields appear — never key material.
+    function awsSsoRenderIamIdentity(d) {
+        const el = document.getElementById('awsSsoIamIdentity');
+        if (!el || !d) return;
+        const who = d.displayName || d.name || d.accountId || 'IAM user';
+        el.textContent = 'Signed in as ' + who
+            + (d.accountId ? ' · account ' + d.accountId : '')
+            + ' · IAM access key';
+        el.style.color = 'var(--sidebar-text)';
+        el.style.display = 'block';
+    }
+
+    // Reads and validates the IAM branch's fields into a request body, or null (with the error shown).
+    function awsSsoIamPayload() {
+        const ak = document.getElementById('awsSsoIamAccessKey');
+        const sk = document.getElementById('awsSsoIamSecret');
+        const st = document.getElementById('awsSsoIamSessionToken');
+        const bucketEl = document.getElementById('awsSsoIamBucket');
+        const regionEl = document.getElementById('awsSsoIamRegion');
+        const accessKeyId = ((ak && ak.value) || '').trim();
+        const secretKey = ((sk && sk.value) || '').trim();
+        const sessionToken = ((st && st.value) || '').trim();
+        const bucket = ((bucketEl && bucketEl.value) || '').trim();
+        const region = ((regionEl && regionEl.value) || '').trim();
+        if (!accessKeyId) { awsSsoShowError(1, 'Enter your AWS access key ID'); return null; }
+        if (!secretKey) { awsSsoShowError(1, 'Enter your AWS secret access key'); return null; }
+        if (!bucket || !region) { awsSsoShowError(1, 'Bucket and region are both required'); return null; }
+        const payload = { accessKeyId: accessKeyId, secretKey: secretKey, bucket: bucket, region: region };
+        if (sessionToken) payload.sessionToken = sessionToken;
+        return payload;
+    }
+
+    // "Test access" in the IAM branch: verifies the keys with AWS STS and dry-runs the same
+    // read/upload/write probe as the SSO branch, connecting nothing.
+    async function awsSsoIamTest() {
+        awsSsoClearErrors();
+        const payload = awsSsoIamPayload();
+        if (!payload) return;
+        payload.dryRun = true;
+        const btn = document.getElementById('awsSsoIamTestBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
+        try {
+            const res = await fetch('/api/auth/aws/iam-connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const d = await res.json().catch(() => ({}));
+            awsSsoRenderCapabilities(d.capabilities, 'awsSsoIamCapabilities');
+            if (!res.ok || d.ok === false) {
+                awsSsoShowError(1, d.error || 'Access test failed — see the badges above.');
+            } else {
+                awsSsoRenderIamIdentity(d);
+            }
+        } catch (e) {
+            awsSsoShowError(1, 'Access test failed: ' + e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Test access'; }
+        }
+    }
+
+    // Connects the IAM branch: verifies the keys, probes the bucket and swaps this session's stores,
+    // exactly as the SSO branch's Connect does — just with the caller's own access keys.
+    async function awsSsoIamConnect() {
+        awsSsoClearErrors();
+        const payload = awsSsoIamPayload();
+        if (!payload) return;
+        const btn = document.getElementById('awsSsoIamConnectBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
+        try {
+            const res = await fetch('/api/auth/aws/iam-connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok || d.ok === false) {
+                awsSsoShowError(1, d.error || d.message || res.statusText || 'Failed to connect with these keys');
+                awsSsoRenderCapabilities(d.capabilities, 'awsSsoIamCapabilities');
+                return;
+            }
+            // Once the server holds the session, the secret no longer needs to sit in the page.
+            const sk = document.getElementById('awsSsoIamSecret');
+            const st = document.getElementById('awsSsoIamSessionToken');
+            if (sk) sk.value = '';
+            if (st) st.value = '';
+            _awsSsoSession = {
+                connected: true,
+                source: 'iam',
+                name: d.name,
+                email: d.email,
+                displayName: d.displayName,
+                accountId: d.accountId,
+                accountName: d.accountName,
+                role: d.role,
+                account: d.account,
+                bucket: d.bucket || payload.bucket,
+                region: d.region || payload.region,
+                capabilities: d.capabilities || { read: true, upload: true, write: true }
+            };
+            _awsSsoChosen = null;
+            _awsSsoChooseNeeded = false;
+            setAwsSsoPill(_awsSsoSession);
+            awsSsoRenderIamIdentity(_awsSsoSession);
+            awsSsoRenderCapabilities(_awsSsoSession.capabilities, 'awsSsoIamCapabilities');
+            const ok = document.getElementById('awsSsoIamConnectedMsg');
+            if (ok) {
+                ok.textContent = 'Connected as '
+                    + (_awsSsoSession.displayName || _awsSsoSession.name || 'IAM user');
+                ok.style.display = 'block';
+            }
+            try {
+                localStorage.setItem(AWS_SSO_BUCKET_KEY, _awsSsoSession.bucket);
+                localStorage.setItem(AWS_SSO_REGION_KEY, _awsSsoSession.region);
+            } catch (e) { /* storage unavailable — non-fatal */ }
+            // Every home-page data call was 401ing before this first connect, so reload the stats now.
+            invalidateCache();
+            loadStats();
+            loadProgress();
+            loadClaudeStats();
+        } catch (e) {
+            awsSsoShowError(1, 'Failed to connect with these keys: ' + e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
         }
     }
 
@@ -1754,6 +2026,19 @@
         _awsSsoAccounts = null;
         _awsSsoChosen = null;
         _awsSsoChooseNeeded = false;
+        // Drop any IAM key material still in the page and its per-connect strips.
+        const ak = document.getElementById('awsSsoIamAccessKey');
+        const sk = document.getElementById('awsSsoIamSecret');
+        const st = document.getElementById('awsSsoIamSessionToken');
+        if (ak) ak.value = '';
+        if (sk) sk.value = '';
+        if (st) st.value = '';
+        const iamCaps = document.getElementById('awsSsoIamCapabilities');
+        const iamId = document.getElementById('awsSsoIamIdentity');
+        const iamOk = document.getElementById('awsSsoIamConnectedMsg');
+        if (iamCaps) iamCaps.style.display = 'none';
+        if (iamId) iamId.style.display = 'none';
+        if (iamOk) iamOk.style.display = 'none';
         setAwsSsoPill(null);
         awsSsoFillTargets(null);
         awsSsoShowStep(1);

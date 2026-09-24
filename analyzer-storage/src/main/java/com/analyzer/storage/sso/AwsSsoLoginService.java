@@ -847,7 +847,7 @@ public class AwsSsoLoginService {
     private void publishLogin(SsoSessionState state, SsoIdentity identity) {
         try {
             events.publishEvent(new SsoAuditEvent(SsoAuditEvent.LOGIN, state.sessionId(), identity,
-                    null, null, null, System.currentTimeMillis()));
+                    null, null, null, System.currentTimeMillis(), SsoSessionState.SOURCE_SSO));
         } catch (RuntimeException e) {
             log.debug("[aws-sso] LOGIN audit event could not be published ({})", e.getClass().getSimpleName());
         }

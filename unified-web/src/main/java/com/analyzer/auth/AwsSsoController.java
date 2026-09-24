@@ -1,5 +1,6 @@
 package com.analyzer.auth;
 
+import com.analyzer.storage.sso.AwsIamIdentityResolver;
 import com.analyzer.storage.sso.AwsSsoLoginService;
 import com.analyzer.storage.sso.SsoIdentity;
 import com.analyzer.storage.sso.SsoSessionRegistry;
@@ -11,6 +12,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -43,6 +47,12 @@ import java.util.Map;
  *                              "accountId"?: "...", "roleName"?: "..." }   (the last two optional)
  *   -> { started:true, verificationUri, verificationUriComplete, userCode,
  *        intervalSeconds, expiresAt }
+ * POST /api/auth/aws/iam-connect { "accessKeyId": "...", "secretKey": "...", "sessionToken"?: "...",
+ *                                 "bucket": "...", "region": "...", "dryRun"?: false }
+ *   -> success: { ok:true, source:"iam", bucket, region, name, email, displayName, accountId,
+ *                 accountName, roleName, account, role, capabilities:{ read, upload, write } }
+ *   -> failure: { ok:false, error, capabilities:{ read, upload, write } }
+ *      (the classic-IAM path for accounts with no Identity Center; see the method for the steps)
  * POST /api/auth/aws/poll
  *   -> { status:"pending"|"complete"|"expired"|"none", accountId?, accountName?, roleName? }
  * GET  /api/auth/aws/accounts
@@ -83,6 +93,7 @@ public class AwsSsoController {
     private final AwsSsoLoginService loginService;
     private final SsoStoreSwapper storeSwapper;
     private final SsoSessionRegistry registry;
+    private final AwsIamIdentityResolver iamIdentity;
 
     /**
      * Configured Identity Center portal URL, prefilled into the login modal so a deployed user does
@@ -93,10 +104,11 @@ public class AwsSsoController {
     private String startUrlProperty;
 
     public AwsSsoController(AwsSsoLoginService loginService, SsoStoreSwapper storeSwapper,
-                            SsoSessionRegistry registry) {
+                            SsoSessionRegistry registry, AwsIamIdentityResolver iamIdentity) {
         this.loginService = loginService;
         this.storeSwapper = storeSwapper;
         this.registry = registry;
+        this.iamIdentity = iamIdentity;
     }
 
     /** Step 1: register a client and begin device authorization against the user's portal URL. */
@@ -244,6 +256,8 @@ public class AwsSsoController {
             String roleName = identity == null ? null : identity.roleName();
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("ok", true);
+            // How this session authenticated ("sso" or "iam"), so the UI can render the source.
+            out.put("source", state.credentialSource());
             out.put("bucket", result.bucket());
             out.put("region", result.region());
             out.put("name", identity == null ? null : identity.shownName());
@@ -263,6 +277,133 @@ public class AwsSsoController {
             log.warn("[aws-sso] connect failed ({})", e.getClass().getSimpleName());
             return error("Could not connect S3 storage: " + e.getMessage());
         }
+    }
+
+    /**
+     * Connects S3 storage for a user whose AWS account is <b>not in any Identity Center</b>: classic
+     * IAM access keys instead of the device flow.
+     *
+     * <pre>
+     * POST /api/auth/aws/iam-connect
+     *   { "accessKeyId": "AKIA...", "secretKey": "...", "sessionToken"?: "...",
+     *     "bucket": "...", "region": "...", "dryRun"?: false }
+     *   -> success: { ok:true, source:"iam", bucket, region, name, email:null, displayName,
+     *                 accountId, accountName:null, roleName:null, account, role,
+     *                 capabilities:{ read, upload, write } }
+     *   -> failure: { ok:false, error, capabilities:{ read, upload, write } }
+     * </pre>
+     *
+     * <p>Steps, in order, so nothing is ever half-connected:
+     * <ol>
+     *   <li>validate the key material (each required value non-blank) and build this session's fixed
+     *       credentials — {@link AwsSessionCredentials} when a session token was supplied, else
+     *       {@link AwsBasicCredentials};</li>
+     *   <li>ask {@code sts:GetCallerIdentity} with <em>those</em> credentials and derive the identity
+     *       from the ARN: an IAM user ARN {@code arn:aws:iam::<account>:user/<name>} names the user
+     *       and the account. The Identity Store lookup is deliberately skipped — this account is not
+     *       in Identity Center, so there is no {@code sub}/{@code storeId} to look up;</li>
+     *   <li>record the credentials and identity on the caller's session state (memory only, keyed by
+     *       session id, cleared by {@code /logout} and the registry's idle sweep) so every later S3
+     *       call this session makes signs as this IAM user;</li>
+     *   <li>run the same capability probe {@code /connect} gates on, then — unless this is a
+     *       {@code dryRun} "Test access" — build and swap the session's stores exactly as
+     *       {@code /connect} does. A successful connect publishes a CONNECT audit event carrying the
+     *       IAM identity and {@code source:"iam"}.</li>
+     * </ol>
+     *
+     * <p>No access key, secret or session token is ever logged or returned. A failure (blank input,
+     * bad keys, an STS refusal, a denied capability) is {@code {ok:false, error}} mirroring
+     * {@code /connect}, carrying the probe's exact failed operation; the session is left
+     * authenticated so the user can correct the bucket and retry.
+     */
+    @PostMapping("/iam-connect")
+    public Map<String, Object> iamConnect(@RequestBody(required = false) Map<String, String> body,
+                                          HttpServletRequest req) {
+        String accessKeyId = trimmed(body, "accessKeyId");
+        String secretKey = trimmed(body, "secretKey");
+        String sessionToken = trimmed(body, "sessionToken");
+        String bucket = trimmed(body, "bucket");
+        String region = trimmed(body, "region");
+        boolean dryRun = "true".equalsIgnoreCase(trimmed(body, "dryRun"));
+        if (accessKeyId == null) return error("An access key ID is required.");
+        if (secretKey == null) return error("A secret access key is required.");
+        // A session token present means temporary credentials; absent means long-lived IAM user keys.
+        AwsCredentials credentials = sessionToken != null
+                ? AwsSessionCredentials.create(accessKeyId, secretKey, sessionToken)
+                : AwsBasicCredentials.create(accessKeyId, secretKey);
+        try {
+            // Create the session (and its registry entry) first, so every later call finds state
+            // under the same id even if the browser never sent a JSESSIONID cookie.
+            String sessionId = req.getSession(true).getId();
+            SsoSessionState state = registry.getOrCreate(sessionId);
+            // STS first: nothing is connected until we know whose keys these are. Signs with only
+            // the caller's credentials, never an ambient chain.
+            SsoIdentity identity = iamIdentity.resolve(credentials);
+            // Bind them to THIS session so the credential resolver hands every later S3 call the
+            // IAM identity. A session is either IAM or SSO; this clears any prior SSO material.
+            state.connectIam(credentials, identity);
+            SsoStoreSwapper.Capabilities caps =
+                    storeSwapper.testCapabilities(sessionId, bucket, region);
+            if (caps == null || !caps.ok()) {
+                log.warn("[aws-iam] bucket capability probe rejected: {}",
+                        caps == null ? "no probe result" : caps.error());
+                Map<String, Object> out = error(caps == null
+                        ? "Bucket capability verification failed." : caps.error());
+                out.put("capabilities", capabilitiesMap(caps));
+                return out;
+            }
+            if (dryRun) {
+                // "Test access": keys verified and the probe is green, but nothing is built/swapped.
+                return iamSuccess(null, null, caps, identity);
+            }
+            SsoStoreSwapper.ConnectResult result = storeSwapper.connect(sessionId, bucket, region);
+            if (!result.ok()) {
+                Map<String, Object> out = error(result.capabilities() == null
+                        ? "Bucket capability verification failed." : result.capabilities().error());
+                out.put("capabilities", capabilitiesMap(result.capabilities()));
+                return out;
+            }
+            state.verifiedTarget(result.bucket(), result.region(), result.capabilities());
+            return iamSuccess(result.bucket(), result.region(), result.capabilities(), identity);
+        } catch (IllegalArgumentException e) {
+            return error(e.getMessage());
+        } catch (RuntimeException e) {
+            log.warn("[aws-iam] connect failed ({})", e.getClass().getSimpleName());
+            return error("Could not connect S3 storage: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The success shape shared by the IAM connect and its dry-run test. Carries identity and target
+     * metadata only — never an access key, secret or session token.
+     */
+    private static Map<String, Object> iamSuccess(String bucket, String region,
+                                                  SsoStoreSwapper.Capabilities caps,
+                                                  SsoIdentity identity) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        // How this session authenticated, so the UI can name the source rather than infer it from the
+        // absence of a permission-set role.
+        out.put("source", SsoSessionState.SOURCE_IAM);
+        out.put("bucket", bucket);
+        out.put("region", region);
+        out.put("name", identity == null ? null : identity.shownName());
+        out.put("email", identity == null ? null : identity.email());   // always null for an IAM user
+        out.put("displayName", identity == null ? null : identity.displayName());
+        out.put("accountId", identity == null ? null : identity.accountId());
+        out.put("accountName", identity == null ? null : identity.accountName()); // null: not in an ARN
+        out.put("roleName", identity == null ? null : identity.roleName());       // null: no permission set
+        // Legacy aliases, mirroring /connect: same values under the shorter keys.
+        out.put("account", identity == null ? null : identity.accountId());
+        out.put("role", identity == null ? null : identity.roleName());
+        out.put("capabilities", capabilitiesMap(caps));
+        return out;
+    }
+
+    /** A trimmed request-body value, or {@code null} when absent or blank. */
+    private static String trimmed(Map<String, String> body, String key) {
+        String v = body == null ? null : body.get(key);
+        return (v == null || v.isBlank()) ? null : v.trim();
     }
 
     /**
@@ -323,6 +464,8 @@ public class AwsSsoController {
         String roleName = identity == null ? null : identity.roleName();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("connected", state != null && state.loggedIn());
+        // "sso" for an Identity Center login, "iam" for classic access keys, null when not logged in.
+        out.put("source", (state == null || !state.loggedIn()) ? null : state.credentialSource());
         out.put("name", identity == null ? null : identity.shownName());
         out.put("email", identity == null ? null : identity.email());
         out.put("displayName", identity == null ? null : identity.displayName());

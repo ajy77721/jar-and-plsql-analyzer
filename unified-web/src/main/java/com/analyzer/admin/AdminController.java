@@ -353,6 +353,8 @@ public class AdminController {
         m.put("role", e.roleName());
         m.put("bucket", e.bucket());
         m.put("region", e.region());
+        // "iam" for a session authenticated with classic access keys, "sso" otherwise.
+        m.put("source", e.source());
         m.put("capabilities", capabilitiesJson(e.capabilities()));
         m.put("sessionIdMasked", AdminAuditService.maskSession(e.sessionId()));
         return m;

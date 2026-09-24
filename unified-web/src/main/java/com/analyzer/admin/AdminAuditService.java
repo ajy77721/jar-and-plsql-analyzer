@@ -323,6 +323,9 @@ public class AdminAuditService {
         m.put("roleName", e.roleName());
         m.put("bucket", e.bucket());
         m.put("region", e.region());
+        // "iam" when the session authenticated with classic access keys, "sso" otherwise; null on a
+        // record written before this field existed.
+        m.put("source", e.source());
         m.put("capabilities", capabilitiesToMap(e.capabilities()));
         try {
             return json.writeValueAsString(m);
@@ -369,7 +372,8 @@ public class AdminAuditService {
                     textOrNull(n.get("bucket")),
                     textOrNull(n.get("region")),
                     caps,
-                    n.path("timestampEpochMs").asLong(0L));
+                    n.path("timestampEpochMs").asLong(0L),
+                    textOrNull(n.get("source")));
         } catch (Exception ex) {
             return null;
         }
@@ -668,7 +672,8 @@ public class AdminAuditService {
                              String bucket,
                              String region,
                              SsoStoreSwapper.Capabilities capabilities,
-                             long timestampEpochMs) {
+                             long timestampEpochMs,
+                             String source) {
 
         static AuditEntry from(SsoAuditEvent event) {
             SsoIdentity id = event.identity();
@@ -686,7 +691,8 @@ public class AdminAuditService {
                     event.bucket(),
                     event.region(),
                     event.capabilities(),
-                    event.timestampEpochMs());
+                    event.timestampEpochMs(),
+                    event.source());
         }
 
         /**

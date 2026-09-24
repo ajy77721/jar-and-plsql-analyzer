@@ -369,7 +369,8 @@ public class SsoStoreSwapper {
                               Capabilities capabilities) {
         try {
             events.publishEvent(new SsoAuditEvent(type, sessionId, registry.identity(sessionId),
-                    bucket, region, capabilities, System.currentTimeMillis()));
+                    bucket, region, capabilities, System.currentTimeMillis(),
+                    registry.credentialSource(sessionId)));
         } catch (RuntimeException e) {
             log.debug("[aws-sso] {} audit event could not be published ({})",
                     type, e.getClass().getSimpleName());

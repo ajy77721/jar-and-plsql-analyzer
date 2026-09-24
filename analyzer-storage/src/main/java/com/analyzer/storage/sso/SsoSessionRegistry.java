@@ -118,6 +118,16 @@ public class SsoSessionRegistry {
     }
 
     /**
+     * Which mechanism authenticated this session — {@code "iam"} for classic access keys,
+     * {@code "sso"} otherwise — or {@code null} when the session is unknown. Carried onto the audit
+     * trail so a CONNECT/LOGOUT can be attributed to the credential source behind it.
+     */
+    public String credentialSource(String sessionId) {
+        SsoSessionState state = get(sessionId);
+        return state == null ? null : state.credentialSource();
+    }
+
+    /**
      * A snapshot of every tracked session, for the admin portal: who each session is (when logged
      * in), which bucket/region it verified, and when it was last active.
      *
@@ -195,7 +205,7 @@ public class SsoSessionRegistry {
         try {
             events.publishEvent(new SsoAuditEvent(type, state.sessionId(), state.identity(),
                     state.bucket(), state.region(), state.capabilities(),
-                    System.currentTimeMillis()));
+                    System.currentTimeMillis(), state.credentialSource()));
         } catch (RuntimeException e) {
             // Never let an audit listener break logout.
             log.debug("[aws-sso] audit event {} could not be published ({})",

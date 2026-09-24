@@ -25,6 +25,9 @@ package com.analyzer.storage.sso;
  * @param region        the verified target region, when the type has one; otherwise {@code null}
  * @param capabilities  the probe outcome for {@code CONNECT}/{@code SWAP-DENIED}; otherwise {@code null}
  * @param timestampEpochMs when the transition happened, epoch millis
+ * @param source        which mechanism authenticated the session — {@link SsoSessionState#SOURCE_IAM}
+ *                      for classic access keys, {@link SsoSessionState#SOURCE_SSO} otherwise, or
+ *                      {@code null} when unknown (an event published before login). Not a secret.
  */
 public record SsoAuditEvent(String type,
                             String sessionId,
@@ -32,7 +35,17 @@ public record SsoAuditEvent(String type,
                             String bucket,
                             String region,
                             SsoStoreSwapper.Capabilities capabilities,
-                            long timestampEpochMs) {
+                            long timestampEpochMs,
+                            String source) {
+
+    /**
+     * The pre-IAM shape, kept so existing publishers that have no source to name stay unchanged.
+     * The source is left {@code null}, which the audit reader treats as "unknown/SSO".
+     */
+    public SsoAuditEvent(String type, String sessionId, SsoIdentity identity, String bucket,
+                         String region, SsoStoreSwapper.Capabilities capabilities, long timestampEpochMs) {
+        this(type, sessionId, identity, bucket, region, capabilities, timestampEpochMs, null);
+    }
 
     /** A completed device-flow login. */
     public static final String LOGIN = "LOGIN";
