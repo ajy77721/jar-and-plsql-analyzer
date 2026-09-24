@@ -19,6 +19,8 @@ import software.amazon.awssdk.services.ssooidc.model.CreateTokenResponse;
 import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
 import software.amazon.awssdk.services.ssooidc.model.SlowDownException;
 import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
+import software.amazon.awssdk.services.sts.StsClient;
+import software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -39,9 +41,15 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #poll(SsoSessionState)} is called repeatedly (the UI paces itself by
  *       {@link DeviceFlowStart#intervalSeconds()}). {@code ssooidc:CreateToken} with the device-code
  *       grant either returns {@code authorization_pending}/{@code slow_down} — surfaced as
- *       {@code "pending"} — or the tokens. On success the identity is resolved through the {@code sso}
- *       service ({@code ListAccounts}, then {@code ListAccountRoles} preferring a
- *       PowerUser/Administrator role) and the display name/email are decoded from the {@code id_token}.</li>
+ *       {@code "pending"} — or the tokens. On success every (account, role) pair is enumerated
+ *       through the {@code sso} service ({@code ListAccounts}, then one {@code ListAccountRoles} per
+ *       account) and stored on the state so the UI can offer the choice; the identity auto-picks the
+ *       configured/preferred pair (else the first account, preferring a PowerUser/Administrator
+ *       role), and the display name/email are decoded from the {@code id_token}.</li>
+ *   <li>{@link #chooseIdentity(SsoSessionState, String, String)} lets the caller switch a completed
+ *       login to a specific (account, role) pair — the modal's chooser step — validating it against
+ *       the enumerated choices, minting that pair's credentials and re-running the display-name
+ *       lookup. A later {@code sso:GetRoleCredentials} then signs as the chosen pair.</li>
  *   <li>{@link #accessToken(SsoSessionState)} transparently renews an expired access token with the
  *       refresh-token grant, so a long analysis run does not die mid-flight.</li>
  * </ol>
@@ -137,19 +145,41 @@ public class AwsSsoLoginService {
     private final ObjectProvider<SsoCredentialsResolver> credentialsResolver;
 
     /**
+     * Deployment-wide preferred AWS account, from {@code app.storage.sso.account-id}, or blank. When
+     * set and the user's login exposes it, the automatic pick lands there instead of on the arbitrary
+     * first account — the fix for "everyone lands in the wrong account". A user's own choice at
+     * {@code /connect} (and a per-login request from {@code /start}) still wins over it, and a
+     * configured account the user cannot see is simply ignored (they get the chooser / first).
+     */
+    private final String configuredAccountId;
+
+    /** Deployment-wide preferred role within {@link #configuredAccountId}; blank means any/auto. */
+    private final String configuredRoleName;
+
+    /** Cap on {@code sso:ListAccountRoles} calls made at poll-complete, so a many-account login
+     *  cannot fan out into an unbounded burst against the Identity Center API. */
+    private static final int MAX_ACCOUNT_ROLE_LOOKUPS = 50;
+
+    /**
      * @param regionProperty the Identity Center / IAM region the OIDC and SSO endpoints live in.
      *                       It is distinct from the S3 bucket region a user may connect to, but in
      *                       the common case both are the same and {@code app.storage.s3.region} is
      *                       the natural default.
+     * @param configuredAccountId the account the auto-pick should prefer, or blank for "first".
+     * @param configuredRoleName  the role the auto-pick should prefer within that account, or blank.
      */
     public AwsSsoLoginService(
             @Value("${app.storage.sso.region:${app.storage.s3.region:us-east-1}}") String regionProperty,
+            @Value("${app.storage.sso.account-id:}") String configuredAccountId,
+            @Value("${app.storage.sso.role-name:}") String configuredRoleName,
             ApplicationEventPublisher events,
             AwsIdentityStoreLookup identityLookup,
             ObjectProvider<SsoCredentialsResolver> credentialsResolver) {
         this.events = events;
         this.identityLookup = identityLookup;
         this.credentialsResolver = credentialsResolver;
+        this.configuredAccountId = configuredAccountId == null ? "" : configuredAccountId.trim();
+        this.configuredRoleName = configuredRoleName == null ? "" : configuredRoleName.trim();
         this.region = Region.of((regionProperty == null || regionProperty.isBlank())
                 ? "us-east-1" : regionProperty.trim());
         // Built once: both clients are thread-safe and stateless, and rebuilding one per call would
@@ -251,7 +281,11 @@ public class AwsSsoLoginService {
                         .deviceCode(flow.deviceCode()));
                 storeTokens(state, token);
                 state.pendingFlow(null);
-                SsoIdentity id = resolveIdentity(state, token.accessToken(), token.idToken());
+                // Enumerate every (account, roles) pair the login exposes — the UI offers this as a
+                // choice, and the auto-pick below lands on the configured/preferred one when it can.
+                List<SsoSessionState.AccountChoice> choices = listChoices(token.accessToken());
+                state.accountChoices(choices);
+                SsoIdentity id = resolveIdentity(state, token.accessToken(), token.idToken(), choices);
                 state.identity(id);
                 state.loggedIn(true);
                 log.info("[aws-sso] login complete — account {} role {}", id.accountId(), id.roleName());
@@ -364,35 +398,333 @@ public class AwsSsoLoginService {
     }
 
     /**
-     * Resolves identity from a fresh access token: first account, then a PowerUser/Administrator role.
+     * Enumerates every (account, roles) pair {@code accessToken} can see:
+     * {@code sso:ListAccounts}, then one {@code sso:ListAccountRoles} per account.
+     *
+     * <p>The per-account role call is <b>tolerant</b>: an account whose role listing fails is kept in
+     * the result with an empty role list (visible, but not selectable) rather than aborting the whole
+     * login, and the calls are capped at {@link #MAX_ACCOUNT_ROLE_LOOKUPS} so a login that exposes
+     * hundreds of accounts cannot fan out into an unbounded burst. A failure of {@code ListAccounts}
+     * itself still propagates — with no accounts there is nothing to log in <em>as</em>.
+     *
+     * @return one {@link SsoSessionState.AccountChoice} per visible account, in AWS's order
+     */
+    public List<SsoSessionState.AccountChoice> listChoices(String accessToken) {
+        List<AccountInfo> accounts = sso.listAccounts(b -> b.accessToken(accessToken)).accountList();
+        List<SsoSessionState.AccountChoice> out = new ArrayList<>(accounts.size());
+        int calls = 0;
+        for (AccountInfo account : accounts) {
+            List<String> roles = new ArrayList<>();
+            if (account.accountId() != null && calls < MAX_ACCOUNT_ROLE_LOOKUPS) {
+                calls++;
+                try {
+                    for (RoleInfo r : sso.listAccountRoles(b -> b
+                            .accessToken(accessToken)
+                            .accountId(account.accountId())).roleList()) {
+                        if (r.roleName() != null && !r.roleName().isBlank()) roles.add(r.roleName());
+                    }
+                } catch (RuntimeException e) {
+                    // Class name only — the request carries the bearer token. The account stays in the
+                    // list with no roles, so the UI can show it but cannot let the user pick it.
+                    log.warn("[aws-sso] could not list roles for one account ({}); keeping it with no roles",
+                            e.getClass().getSimpleName());
+                }
+            }
+            out.add(new SsoSessionState.AccountChoice(account.accountId(), account.accountName(),
+                    List.copyOf(roles)));
+        }
+        return out;
+    }
+
+    /**
+     * The (account, role) the automatic pick lands on, honouring the preference order
+     * <b>per-login request &gt; deployment property &gt; first account / preferred role</b>.
+     *
+     * <p>Returns {@code null} when {@code choices} is empty. A preferred account that the user cannot
+     * see is ignored — no error — so a mis-set property degrades to today's behaviour and the UI's
+     * chooser still lets the user override it.
+     */
+    private SsoSessionState.AccountChoice preferredChoice(SsoSessionState state,
+                                                          List<SsoSessionState.AccountChoice> choices) {
+        if (choices.isEmpty()) return null;
+        // The per-login request (a per-user pre-target from /start) outweighs the deployment default.
+        String wantAccount = firstNonBlank(
+                state == null ? null : state.requestedAccountId(), configuredAccountId);
+        String wantRole = firstNonBlank(
+                state == null ? null : state.requestedRoleName(), configuredRoleName);
+        if (wantAccount != null) {
+            for (SsoSessionState.AccountChoice c : choices) {
+                if (wantAccount.equals(c.accountId())) {
+                    return new SsoSessionState.AccountChoice(c.accountId(), c.accountName(),
+                            orderRoles(c.roles(), wantRole));
+                }
+            }
+            // Configured/requested account is not among the user's accounts: fall back (do not error).
+            log.info("[aws-sso] preferred account {} is not exposed by this login; falling back to the "
+                    + "first account (the user can still choose)", wantAccount);
+        }
+        SsoSessionState.AccountChoice first = choices.get(0);
+        return new SsoSessionState.AccountChoice(first.accountId(), first.accountName(),
+                orderRoles(first.roles(), wantRole));
+    }
+
+    /**
+     * Reorders {@code roles} so the preferred one (when present) is first, then a PowerUser/
+     * Administrator role, then AWS's original order. The first element is what the auto-pick uses;
+     * the list order is also what the UI shows, so the emphasis is consistent across both.
+     */
+    private static List<String> orderRoles(List<String> roles, String preferredRole) {
+        List<String> out = new ArrayList<>(roles);
+        if (preferredRole != null && out.remove(preferredRole)) {
+            out.add(0, preferredRole);
+            return out;
+        }
+        for (int i = 0; i < out.size(); i++) {
+            String r = out.get(i);
+            if (r.contains("PowerUser") || r.contains("Administrator")) {
+                out.remove(i);
+                out.add(0, r);
+                break;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Resolves identity from a fresh access token using the pre-listed {@code choices}: the preferred
+     * account/{@code role} when one is configured or requested, else the first account with a
+     * PowerUser/Administrator role preferred.
+     *
+     * <p><b>How a person is named (the resolution chain).</b> The id_token's own claims win when they
+     * exist; when they do not, this deployment's identity is read from {@code sts:GetCallerIdentity}
+     * — Identity Center puts the user's email in the role-session name, and that call needs no
+     * permission of its own, so it is a self-managed, zero-setup source of who the user is. Identity
+     * Store may still add a display name (which outranks the raw email local part); a stored
+     * display name (the audit rollup's backfill) is the last resort, applied by a listener after this
+     * returns. So: <b>id_token claims &gt; STS email &gt; Identity Store &gt; rollup backfill &gt;
+     * anonymous</b>, applied per field on the name/email precedence described at each step below.
      *
      * <p>{@code state} is the just-authenticated user's own session state; it is used to mint that
-     * user's role credentials for the Identity Store display-name lookup below, so the lookup does
-     * not need ambient credentials on the pod.
+     * user's role credentials (once) for the STS probe and the Identity Store lookup below, so
+     * neither needs ambient credentials on the pod.
      */
-    private SsoIdentity resolveIdentity(SsoSessionState state, String accessToken, String idToken) {
-        List<AccountInfo> accounts = sso.listAccounts(b -> b.accessToken(accessToken)).accountList();
-        if (accounts.isEmpty()) {
+    private SsoIdentity resolveIdentity(SsoSessionState state, String accessToken, String idToken,
+                                        List<SsoSessionState.AccountChoice> choices) {
+        SsoSessionState.AccountChoice account = preferredChoice(state, choices);
+        if (account == null) {
             throw new IllegalStateException(
                     "The SSO login succeeded but the identity exposes no AWS accounts; assign the user to an account in Identity Center.");
         }
-        AccountInfo account = accounts.get(0);
-        List<RoleInfo> roles = sso.listAccountRoles(b -> b
-                .accessToken(accessToken)
-                .accountId(account.accountId())).roleList();
-        if (roles.isEmpty()) {
+        if (account.roles().isEmpty()) {
             throw new IllegalStateException(
                     "The SSO login succeeded but account " + account.accountId()
                             + " exposes no roles; assign a permission set in Identity Center.");
         }
-        RoleInfo role = roles.stream()
-                .filter(r -> r.roleName() != null
-                        && (r.roleName().contains("PowerUser") || r.roleName().contains("Administrator")))
-                .findFirst()
-                .orElse(roles.get(0));
+        String role = account.roles().get(0);
         IdentityClaims claims = identityClaims(idToken);
+        // Keep the Identity Store coordinates so a later chosen account can re-run this lookup.
+        state.idTokenClaims(new SsoSessionState.IdTokenClaims(claims.userId(), claims.storeId()));
         String name = claims.name();
         String email = claims.email();
+        // Mint the user's role credentials AT MOST ONCE per login and share the provider between the
+        // STS probe and the Identity Store lookup: both sign as this user, and on a pod with no
+        // ambient credentials theirs is the only chain that can.
+        AwsCredentialsProvider userCredentials = (name == null || email == null)
+                ? userCredentials(state, accessToken, account.accountId(), role)
+                : null;
+        // STS email: the mechanism this feature exists for. It fills `email` only when the id_token
+        // carried none — a real token claim always wins — but it IS the person, so it also outranks
+        // a remembered display name from the audit rollup, which is why the backfill stands down as
+        // soon as this populates email.
+        String stsEmail = null;
+        if (email == null) {
+            stsEmail = stsCallerEmail(userCredentials);
+            if (stsEmail != null) email = stsEmail;
+        }
+        // A bare `sub` is NOT a human name: Identity Center routinely returns only that. Prefer a
+        // real name claim, then Identity Store's display name — which beats the raw STS email local
+        // part below — and when that is absent, fall back to the local part. Best-effort: an empty
+        // result simply leaves that field null, exactly as before.
+        AwsIdentityStoreLookup.ResolvedIdentity resolved = null;
+        if (name == null || email == null) {
+            resolved = lookupIdentity(claims, userCredentials);
+            if (resolved != null) {
+                name = firstNonBlank(name, resolved.name());
+                // STS email already set above outranks the Identity Store email here.
+                email = firstNonBlank(email, resolved.email());
+            }
+        }
+        // Nothing named this person anywhere: a minimally humanised local part of the STS email is
+        // still the person, and far better than the bare account id.
+        if (name == null && email != null) {
+            name = nameFromEmail(email);
+        }
+        // One INFO line per login saying which source named this session — never a value, only which
+        // source won (token-claims | sts-email | identity-store | anonymous; `backfill` is logged by
+        // the audit listener when it applies a remembered name to an otherwise-anonymous login).
+        log.info("[aws-sso] identity source: {}", identitySource(claims, stsEmail, resolved));
+        return new SsoIdentity(name, email,
+                account.accountId(), account.accountName(), role, null);
+    }
+
+    /**
+     * The requesting user's own short-lived role credentials for {@code accountId}/{@code roleName},
+     * or {@code null} when none can be obtained (no resolver bean, or AWS refused the mint). Both the
+     * STS probe and the Identity Store lookup sign with these; on a pod with no ambient credentials
+     * theirs is the only chain that can work. No credential value is ever logged.
+     */
+    private AwsCredentialsProvider userCredentials(SsoSessionState state, String accessToken,
+                                                   String accountId, String roleName) {
+        SsoCredentialsResolver resolver = credentialsResolver.getIfAvailable();
+        return resolver == null ? null
+                : resolver.resolveFor(state == null ? null : state.sessionId(),
+                        accessToken, accountId, roleName);
+    }
+
+    /**
+     * The email this login is actually for, read from {@code sts:GetCallerIdentity}.
+     *
+     * <p>Identity Center derives the role-session name from the signed-in user, and for this
+     * deployment that name is the user's email; {@code GetCallerIdentity} returns it as
+     * {@code <principalId>:<role-session-name>} in {@code UserId}, e.g.
+     * {@code AROAU2LKKDAMTWBDT3YUB:ajaysingh.thakur@mongodb.com}. The call requires no permission of
+     * its own — every AWS principal may make it — so a person is resolved with zero user effort and
+     * zero admin setup.
+     *
+     * <p>Best-effort: no credentials, a malformed UserId (no colon, or no {@code @} after it) or an
+     * SDK failure all yield {@code null}. The address is read but never logged.
+     */
+    private String stsCallerEmail(AwsCredentialsProvider userCredentials) {
+        if (userCredentials == null) return null;
+        try (StsClient sts = StsClient.builder()
+                .region(region)
+                .credentialsProvider(userCredentials)
+                .build()) {
+            GetCallerIdentityResponse caller = sts.getCallerIdentity();
+            return emailFromCallerUserId(caller.userId());
+        } catch (RuntimeException e) {
+            // Class name only — an SDK exception can echo the request, and the request carries the
+            // role credentials.
+            log.info("[aws-sso] STS GetCallerIdentity failed ({}); continuing without an STS email",
+                    e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * The email encoded in a {@code GetCallerIdentity} {@code UserId}, or {@code null}.
+     *
+     * <p>The value is {@code <principalId>:<role-session-name>}: the part after the <em>first</em>
+     * colon is the role-session name, which Identity Center sets to the user's email. A plain IAM
+     * user's UserId carries no colon, and a non-email session name carries no {@code @} — both yield
+     * {@code null}, so a non-Identity-Center principal simply has no STS email.
+     */
+    private static String emailFromCallerUserId(String userId) {
+        if (userId == null) return null;
+        int colon = userId.indexOf(':');
+        if (colon < 0) return null;
+        String sessionName = userId.substring(colon + 1).trim();
+        return sessionName.contains("@") ? sessionName : null;
+    }
+
+    /**
+     * A minimally humanised name from an email address: the local part with its separators turned
+     * into spaces. The local part is kept as-is otherwise — no letter's case is fabricated — so
+     * {@code ajaysingh.thakur@mongodb.com} yields {@code ajaysingh thakur}. Returns {@code null} for
+     * an empty local part.
+     */
+    private static String nameFromEmail(String email) {
+        if (email == null) return null;
+        int at = email.indexOf('@');
+        String local = (at > 0 ? email.substring(0, at) : email).trim();
+        if (local.isEmpty()) return null;
+        return local.replaceAll("[._-]+", " ").trim();
+    }
+
+    /**
+     * Which source named this login — the highest-priority contributor in the resolution order.
+     * Returns a bare label only, never a value; this is the one INFO line per login the identity
+     * work is allowed to emit.
+     */
+    private static String identitySource(IdentityClaims claims, String stsEmail,
+                                         AwsIdentityStoreLookup.ResolvedIdentity resolved) {
+        if (claims.name() != null || claims.email() != null) return "token-claims";
+        if (stsEmail != null) return "sts-email";
+        if (resolved != null) return "identity-store";
+        return "anonymous";
+    }
+
+    /**
+     * Applies a user's explicit (account, role) choice — the modal's new step — to a session that has
+     * already completed the device flow.
+     *
+     * <p>Validates the pair against the choices the login actually exposed (so a stale or forged
+     * value cannot send {@code GetRoleCredentials} at an account the user does not have), mints the
+     * <b>chosen</b> pair's credentials and caches them under this session (so the identity lookup
+     * below and every later S3 call sign as the chosen pair), and re-runs the display-name lookup for
+     * that account. The returned {@link SsoIdentity} carries the chosen account/role, the identity
+     * name/email (from the id_token, backfilled through Identity Store when it can), and any display
+     * name already set on the session.
+     *
+     * @throws IllegalArgumentException when the pair is not one this login exposed
+     * @throws IllegalStateException    when the session has no live access token
+     */
+    public SsoIdentity chooseIdentity(SsoSessionState state, String accountId, String roleName) {
+        if (state == null) return null;
+        synchronized (state.lock()) {
+            SsoSessionState.AccountChoice chosen = null;
+            for (SsoSessionState.AccountChoice c : state.accountChoices()) {
+                if (c.accountId() != null && c.accountId().equals(accountId)) { chosen = c; break; }
+            }
+            if (chosen == null) {
+                throw new IllegalArgumentException(
+                        "Account " + accountId + " is not one this AWS SSO login can use.");
+            }
+            if (roleName == null || !chosen.roles().contains(roleName)) {
+                throw new IllegalArgumentException(
+                        "Role " + roleName + " is not available in account " + accountId + ".");
+            }
+            String token = accessToken(state);
+            if (token == null) {
+                throw new IllegalStateException(
+                        "The AWS SSO session has no live access token; log in again.");
+            }
+            SsoIdentity current = state.identity();
+            String name = current == null ? null : current.name();
+            String email = current == null ? null : current.email();
+            String displayName = current == null ? null : current.displayName();
+            if (name == null || email == null) {
+                // Re-run the display-name lookup for the CHOSEN account: the credentials minted here
+                // (and cached under this session) are what the Identity Store call — and every later
+                // S3 call — signs with.
+                SsoSessionState.IdTokenClaims stored = state.idTokenClaims();
+                IdentityClaims claims = new IdentityClaims(name, email,
+                        stored == null ? null : stored.userId(),
+                        stored == null ? null : stored.storeId(), List.of());
+                AwsCredentialsProvider userCredentials =
+                        userCredentials(state, token, accountId, roleName);
+                AwsIdentityStoreLookup.ResolvedIdentity resolved =
+                        lookupIdentity(claims, userCredentials);
+                if (resolved != null) {
+                    name = firstNonBlank(name, resolved.name());
+                    email = firstNonBlank(email, resolved.email());
+                }
+            }
+            return new SsoIdentity(name, email, accountId, chosen.accountName(), roleName, displayName);
+        }
+    }
+
+    /**
+     * The Identity Store lookup, signed with this user's credentials for {@code accountId}/
+     * {@code roleName} when the id_token carried a {@code sub}. Best-effort: a missing sub, missing
+     * credentials or an empty Identity Store answer yields {@code null} rather than failing the login.
+     *
+     * @param userCredentials this user's freshly minted role credentials (see
+     *                        {@link #userCredentials}), or {@code null} to let the lookup fall back to
+     *                        the process default chain
+     */
+    private AwsIdentityStoreLookup.ResolvedIdentity lookupIdentity(
+            IdentityClaims claims, AwsCredentialsProvider userCredentials) {
         // What the id_token actually contained, as KEYS and presence flags only — never the claim
         // values (an id_token is bearer material, and a `sub`/email is personal data even when it is
         // not a secret). Without this, "the session has no name/email" is indistinguishable from
@@ -400,46 +732,25 @@ public class AwsSsoLoginService {
         log.info("[aws-sso] id_token claim keys present: {} (hasName={} hasEmail={} hasUserId={} hasStoreId={})",
                 claims.keys(), claims.name() != null, claims.email() != null,
                 claims.userId() != null, claims.storeId() != null);
-        // A bare `sub` is NOT a human name: Identity Center routinely returns only that. Prefer a
-        // real name/email claim, and when there is none, ask Identity Store to turn the sub (which
-        // for Identity Center is the Identity Store UserId) into a person. Best-effort — an empty
-        // result just leaves the identity anonymous as before.
-        if (name == null || email == null) {
-            // The lookup runs inside this user's own poll request, and the access token above was
-            // just issued to them: mint their role credentials and sign the Identity Store call with
-            // them. On a pod with no ambient credentials this is the only chain that can work;
-            // a null here (minting failed) degrades to the default chain inside the lookup.
-            SsoCredentialsResolver resolver = credentialsResolver.getIfAvailable();
-            AwsCredentialsProvider userCredentials = resolver == null ? null
-                    : resolver.resolveFor(state == null ? null : state.sessionId(),
-                            accessToken, account.accountId(), role.roleName());
-            AwsIdentityStoreLookup.ResolvedIdentity resolved;
-            if (claims.userId() == null) {
-                // The single silent path in the lookup: with no `sub`/`userId` there is nothing to
-                // describe, and it returns empty without a word. Say so here instead, together with
-                // what the token did carry, so "no Identity Store log line" is never the only clue.
-                resolved = null;
-                log.warn("[aws-sso] the id_token carried no sub/userId claim (keys present: {}), so the "
-                        + "Identity Store lookup was skipped; this session keeps a null name/email",
-                        claims.keys());
-            } else {
-                log.info("[aws-sso] asking Identity Store to resolve userId={} for the display name "
-                        + "(userCredentials={})", shortId(claims.userId()), userCredentials != null);
-                resolved = identityLookup
-                        .lookup(claims.userId(), claims.storeId(), userCredentials)
-                        .orElse(null);
-                if (resolved == null) {
-                    log.warn("[aws-sso] Identity Store resolved nothing for this user; the session "
-                            + "keeps a null name/email (see the [identity-store] line above for why)");
-                }
-            }
-            if (resolved != null) {
-                name = firstNonBlank(name, resolved.name());
-                email = firstNonBlank(email, resolved.email());
-            }
+        if (claims.userId() == null) {
+            // The single silent path in the lookup: with no `sub`/`userId` there is nothing to
+            // describe, and it returns empty without a word. Say so here instead, together with
+            // what the token did carry, so "no Identity Store log line" is never the only clue.
+            log.warn("[aws-sso] the id_token carried no sub/userId claim (keys present: {}), so the "
+                    + "Identity Store lookup was skipped; this session keeps a null name/email",
+                    claims.keys());
+            return null;
         }
-        return new SsoIdentity(name, email,
-                account.accountId(), account.accountName(), role.roleName(), null);
+        log.info("[aws-sso] asking Identity Store to resolve userId={} for the display name "
+                + "(userCredentials={})", shortId(claims.userId()), userCredentials != null);
+        AwsIdentityStoreLookup.ResolvedIdentity resolved = identityLookup
+                .lookup(claims.userId(), claims.storeId(), userCredentials)
+                .orElse(null);
+        if (resolved == null) {
+            log.warn("[aws-sso] Identity Store resolved nothing for this user; the session "
+                    + "keeps a null name/email (see the [identity-store] line above for why)");
+        }
+        return resolved;
     }
 
     /**

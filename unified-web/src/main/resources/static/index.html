@@ -354,6 +354,16 @@
                         Your AWS access portal URL — usually prefilled, only change if instructed.<br>
                         Saved in this browser for next time.
                     </div>
+                    <!-- Help affordance: where the portal URL (and one's account list) come from. -->
+                    <details style="margin-top:10px">
+                        <summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--sidebar-muted);outline:none">Where do I find this?</summary>
+                        <div style="font-size:11px;line-height:1.9;margin-top:8px">
+                            <a href="https://d-9067613a84.awsapps.com/start" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">My AWS accounts portal</a>
+                            <span style="color:var(--sidebar-muted)"> — the accounts you can access</span><br>
+                            <a href="https://kanopy.corp.mongodb.com/docs/configuration/kubeconfig/" target="_blank" rel="noopener" style="color:var(--orange);font-weight:600;text-decoration:none">Kanopy docs — kubeconfig &amp; portal setup</a><br>
+                            <a href="#" onclick="awsSsoOpenUserManual(); return false;" style="color:var(--orange);font-weight:600;text-decoration:none">User Manual</a>
+                        </div>
+                    </details>
                     <button id="awsSsoStartBtn" onclick="awsSsoContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
                         Continue with AWS SSO
                     </button>
@@ -374,6 +384,25 @@
                         <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--orange);animation:pulse 1.5s infinite;margin-right:6px"></span>
                         Waiting for approval&hellip;
                     </div>
+                </div>
+
+                <!-- Choose account + role — shown only when the login exposes more than one choice.
+                     The pinned/default account is pre-selected; the user confirms or changes it. -->
+                <div id="awsSsoStepChoose" style="display:none">
+                    <div id="awsSsoErrorChoose" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+                    <div style="font-size:12px;color:var(--sidebar-muted);line-height:1.5;margin-bottom:10px">
+                        Choose which AWS account and role to connect as:
+                    </div>
+                    <div id="awsSsoAccountCount" style="font-size:12px;font-weight:600;color:var(--sidebar-text);margin-bottom:12px"></div>
+                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">AWS account</label>
+                    <select id="awsSsoAccountSelect" onchange="awsSsoOnAccountChange()"
+                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none;margin-bottom:14px"></select>
+                    <label style="display:block;font-size:12px;font-weight:600;color:var(--sidebar-muted);margin-bottom:6px">Role</label>
+                    <select id="awsSsoRoleSelect"
+                        style="width:100%;background:var(--sidebar-bg);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);color:var(--sidebar-text);padding:10px 14px;font-size:12px;font-family:'Cascadia Code','Fira Code',monospace;outline:none"></select>
+                    <button id="awsSsoChooseBtn" onclick="awsSsoChooseContinue()" style="margin-top:16px;width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:10px 20px;border-radius:var(--radius-md);font-size:13px;cursor:pointer;font-weight:700;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                        Continue
+                    </button>
                 </div>
 
                 <!-- Step 3 — S3 target -->
@@ -1180,6 +1209,9 @@
     let _awsSsoSession = null;   // last known session from /api/auth/aws/session or /connect
     let _awsSsoDefaultStartUrl = '';  // server-configured portal URL (session.defaultStartUrl), for prefill
     let _awsSsoAutoOpened = false;  // auto-open the login modal at most once per page load
+    let _awsSsoAccounts = null;      // [{accountId, accountName, roles}] from /api/auth/aws/accounts
+    let _awsSsoChooseNeeded = false; // true when the login exposed >1 account or >1 role (shows the chooser)
+    let _awsSsoChosen = null;        // {accountId, accountName, roleName} the user picked, sent to /connect
 
     function setAwsSsoPill(session) {
         const el = document.getElementById('awsSsoStatus');
@@ -1300,19 +1332,32 @@
 
     // Identity line above the step-3 target inputs: who the SSO token belongs to. Falls back
     // name -> email -> accountName; greys out when the token carried no identity claims.
-    // Only identity fields are rendered — never token material.
+    // Only identity fields are rendered — never token material. Once the user has picked an
+    // account/role in the chooser, that choice is what the line shows (the server adopts it at
+    // /connect), so what is displayed matches what will be connected.
     function awsSsoRenderIdentity(session) {
         const el = document.getElementById('awsSsoIdentity');
         if (!el) return;
         if (!session || !session.connected) { el.style.display = 'none'; return; }
-        const name = session.displayName || session.name || session.email || session.accountName;
-        const role = session.role;
+        const name = session.displayName || session.name || session.email;
+        // A chooser pick replaces the server's auto-picked account/role wholesale (no fallback to the
+        // session's values, which would name the account the user just declined).
+        const role = _awsSsoChosen ? _awsSsoChosen.roleName : session.role;
+        const account = _awsSsoChosen ? _awsSsoChosen.accountId : session.account;
+        const accountName = _awsSsoChosen ? _awsSsoChosen.accountName : session.accountName;
+        const who = name || accountName;
         // When no personal claims exist, lead with the role — never a bare "unknown".
-        el.textContent = name
-            ? 'Signed in as ' + name + ' · ' + (role || 'unknown')
-            : 'Signed in via AWS SSO as ' + (role || 'unknown') + ' · account ' + (session.account || '?');
-        el.style.color = (name || role) ? 'var(--sidebar-text)' : 'var(--sidebar-muted)';
+        el.textContent = who
+            ? 'Signed in as ' + who + ' · ' + (role || 'unknown')
+            : 'Signed in via AWS SSO as ' + (role || 'unknown') + ' · account ' + (account || '?');
+        el.style.color = (who || role) ? 'var(--sidebar-text)' : 'var(--sidebar-muted)';
         el.style.display = 'block';
+    }
+
+    // The "User Manual" link inside the login modal's help section: opens the existing
+    // UserManual dialog (the same component the nav uses), guarded so a page without it is inert.
+    function awsSsoOpenUserManual() {
+        if (window.UserManual && typeof UserManual.open === 'function') UserManual.open();
     }
 
     function awsSsoFillTargets(session) {
@@ -1346,28 +1391,43 @@
         }
     }
 
+    // Step keys: 1 (start), 2 (device verification), 'choose' (account/role), 3 (S3 target).
+    // The chooser only participates when the login exposed more than one choice, so the visible
+    // step count is 3 normally and 4 when the chooser is in play.
+    const AWS_SSO_STEP_KEYS = [1, 2, 'choose', 3];
+    function awsSsoPanelId(step) {
+        return step === 'choose' ? 'awsSsoStepChoose' : 'awsSsoStep' + step;
+    }
+    function awsSsoErrorId(step) {
+        return step === 'choose' ? 'awsSsoErrorChoose' : 'awsSsoError' + step;
+    }
     function awsSsoShowError(step, msg) {
-        for (const n of [1, 2, 3]) {
-            const el = document.getElementById('awsSsoError' + n);
+        for (const n of AWS_SSO_STEP_KEYS) {
+            const el = document.getElementById(awsSsoErrorId(n));
             if (el) el.style.display = 'none';
         }
-        const el = document.getElementById('awsSsoError' + step);
+        const el = document.getElementById(awsSsoErrorId(step));
         if (el) { el.textContent = msg; el.style.display = 'block'; }
     }
     function awsSsoClearErrors() {
-        for (const n of [1, 2, 3]) {
-            const el = document.getElementById('awsSsoError' + n);
+        for (const n of AWS_SSO_STEP_KEYS) {
+            const el = document.getElementById(awsSsoErrorId(n));
             if (el) el.style.display = 'none';
         }
     }
 
-    function awsSsoShowStep(n) {
-        for (const s of [1, 2, 3]) {
-            const el = document.getElementById('awsSsoStep' + s);
-            if (el) el.style.display = (s === n) ? '' : 'none';
+    function awsSsoShowStep(step) {
+        for (const s of AWS_SSO_STEP_KEYS) {
+            const el = document.getElementById(awsSsoPanelId(s));
+            if (el) el.style.display = (s === step) ? '' : 'none';
         }
         const label = document.getElementById('awsSsoStepLabel');
-        if (label) label.textContent = 'Step ' + n + ' of 3';
+        if (label) {
+            const total = _awsSsoChooseNeeded ? 4 : 3;
+            const idx = step === 1 ? 1 : step === 2 ? 2
+                : step === 'choose' ? 3 : (_awsSsoChooseNeeded ? 4 : 3);
+            label.textContent = 'Step ' + idx + ' of ' + total;
+        }
         awsSsoClearErrors();
     }
 
@@ -1406,6 +1466,9 @@
         if (!startUrl) { awsSsoShowError(1, 'Enter your Identity Center portal URL'); return; }
         const btn = document.getElementById('awsSsoStartBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+        // A fresh login invalidates any account/role choice from a previous one.
+        _awsSsoChosen = null;
+        _awsSsoChooseNeeded = false;
         awsSsoClearErrors();
         try {
             const res = await fetch('/api/auth/aws/start', {
@@ -1466,17 +1529,115 @@
             }
             if (d.status === 'complete') {
                 awsSsoStopPoll();
-                awsSsoShowStep(3);
-                awsSsoFillTargets(null);
-                // Login just landed server-side — pull the session so the step-3 identity line
-                // can show who signed in (the poll response carries no identity fields).
-                loadAwsSsoStatus();
+                // The login landed server-side. Ask what accounts/roles it exposed: offer the
+                // chooser when there is a real choice, else fall straight through to the target.
+                await awsSsoAfterLogin(d);
             }
             // status === "pending" -> keep polling
         } catch (e) {
             awsSsoStopPoll();
             awsSsoShowError(2, 'AWS SSO polling failed: ' + e.message);
         }
+    }
+
+    // Runs once the device flow reports complete. Fetches the account/role list and either shows the
+    // chooser (when more than one account or role exists) or skips silently to the S3 target step —
+    // the single-choice path behaves exactly as before this feature.
+    async function awsSsoAfterLogin(pollResult) {
+        let accounts = [];
+        try {
+            const res = await fetch('/api/auth/aws/accounts');
+            const d = await res.json().catch(() => ({}));
+            if (res.ok && d.ok !== false && Array.isArray(d.accounts)) accounts = d.accounts;
+        } catch (e) { /* fall through to the single-choice path below */ }
+        _awsSsoAccounts = accounts;
+        const roleCount = accounts.reduce(function (n, a) {
+            return n + ((a && a.roles && a.roles.length) || 0);
+        }, 0);
+        // A choice exists when there is more than one account, or more than one role to pick from.
+        _awsSsoChooseNeeded = accounts.length > 1 || roleCount > 1;
+        if (!_awsSsoChooseNeeded) {
+            awsSsoShowStep(3);
+            awsSsoFillTargets(null);
+            // Login just landed server-side — pull the session so the step-3 identity line
+            // can show who signed in (the poll response carries no identity fields).
+            loadAwsSsoStatus();
+            return;
+        }
+        awsSsoRenderAccountChoices(accounts, pollResult);
+        awsSsoShowStep('choose');
+    }
+
+    // Fills the two dropdowns of the chooser. The server's auto-pick (the pinned/configured account,
+    // else the first) is PRE-SELECTED — never auto-submitted — so the user confirms or changes it.
+    function awsSsoRenderAccountChoices(accounts, pollResult) {
+        const acctSel = document.getElementById('awsSsoAccountSelect');
+        const roleSel = document.getElementById('awsSsoRoleSelect');
+        const countEl = document.getElementById('awsSsoAccountCount');
+        if (!acctSel || !roleSel) return;
+        const preferredAccount = (pollResult && pollResult.accountId) || '';
+        acctSel.innerHTML = accounts.map(function (a) {
+            const label = a.accountName ? a.accountName + ' (' + a.accountId + ')' : a.accountId;
+            const sel = (a.accountId === preferredAccount) ? ' selected' : '';
+            return '<option value="' + esc(a.accountId) + '"' + sel + '>' + esc(label) + '</option>';
+        }).join('');
+        // If the server's pick is not in the list (should not happen), the browser selects the
+        // first option by default, which the role fill below then matches.
+        const current = acctSel.value || preferredAccount;
+        awsSsoFillRoles(current, (pollResult && pollResult.roleName) || '');
+        if (countEl) {
+            const n = accounts.length;
+            countEl.textContent = 'You have access to ' + n + ' AWS account' + (n === 1 ? '' : 's')
+                + '. If this list looks wrong, close this and sign in again.';
+        }
+    }
+
+    // Repopulates the role dropdown for the selected account, pre-selecting `preferredRole` when it
+    // is available (else the account's first role).
+    function awsSsoFillRoles(accountId, preferredRole) {
+        const roleSel = document.getElementById('awsSsoRoleSelect');
+        if (!roleSel) return;
+        const account = (_awsSsoAccounts || []).filter(function (a) {
+            return a.accountId === accountId;
+        })[0];
+        const roles = (account && account.roles) || [];
+        if (!roles.length) {
+            roleSel.innerHTML = '<option value="">No roles available in this account</option>';
+            roleSel.disabled = true;
+            return;
+        }
+        roleSel.disabled = false;
+        const pick = roles.indexOf(preferredRole) >= 0 ? preferredRole : roles[0];
+        roleSel.innerHTML = roles.map(function (r) {
+            return '<option value="' + esc(r) + '"' + (r === pick ? ' selected' : '') + '>' + esc(r) + '</option>';
+        }).join('');
+    }
+
+    function awsSsoOnAccountChange() {
+        const acctSel = document.getElementById('awsSsoAccountSelect');
+        if (acctSel) awsSsoFillRoles(acctSel.value, '');
+    }
+
+    // Chooser -> target: record the picked pair (the /connect call carries it) and move on. The
+    // identity line reflects the choice immediately, before the server adopts it at connect.
+    function awsSsoChooseContinue() {
+        const acctSel = document.getElementById('awsSsoAccountSelect');
+        const roleSel = document.getElementById('awsSsoRoleSelect');
+        const accountId = (acctSel && acctSel.value) || '';
+        const roleName = (roleSel && roleSel.value) || '';
+        if (!accountId || !roleName) {
+            awsSsoShowError('choose', 'Pick an account and a role with at least one available role.');
+            return;
+        }
+        const account = (_awsSsoAccounts || []).filter(function (a) { return a.accountId === accountId; })[0];
+        _awsSsoChosen = {
+            accountId: accountId,
+            accountName: account ? account.accountName : null,
+            roleName: roleName
+        };
+        awsSsoShowStep(3);
+        awsSsoFillTargets(_awsSsoSession);
+        loadAwsSsoStatus();
     }
 
     // Step 3: dry-run the read/upload/write probe without committing. Leaves step 3 and the
@@ -1490,11 +1651,17 @@
         const btn = document.getElementById('awsSsoTestBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
         awsSsoClearErrors();
+        // Sign the dry-run with the same account/role the connect call will use.
+        const payload = { bucket: bucket, region: region };
+        if (_awsSsoChosen && _awsSsoChosen.accountId && _awsSsoChosen.roleName) {
+            payload.accountId = _awsSsoChosen.accountId;
+            payload.roleName = _awsSsoChosen.roleName;
+        }
         try {
             const res = await fetch('/api/auth/aws/test-bucket', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bucket: bucket, region: region })
+                body: JSON.stringify(payload)
             });
             const d = await res.json().catch(() => ({}));
             // A failed probe is a normal reply ({ok:false} + breakdown), not a transport error.
@@ -1521,11 +1688,17 @@
         const btn = document.getElementById('awsSsoConnectBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
         awsSsoClearErrors();
+        // The pair the user confirmed in the chooser (absent when the login exposed no choice).
+        const payload = { bucket: bucket, region: region, displayName: displayName };
+        if (_awsSsoChosen && _awsSsoChosen.accountId && _awsSsoChosen.roleName) {
+            payload.accountId = _awsSsoChosen.accountId;
+            payload.roleName = _awsSsoChosen.roleName;
+        }
         try {
             const res = await fetch('/api/auth/aws/connect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bucket: bucket, region: region, displayName: displayName })
+                body: JSON.stringify(payload)
             });
             const d = await res.json().catch(() => ({}));
             if (!res.ok || d.ok === false) {
@@ -1550,6 +1723,9 @@
                 region: d.region || region,
                 capabilities: d.capabilities || { read: true, upload: true, write: true }
             };
+            // The server now holds the chosen account/role as this session's identity, so the
+            // client-side pick is no longer needed to render it.
+            _awsSsoChosen = null;
             setAwsSsoPill(_awsSsoSession);
             awsSsoFillTargets(_awsSsoSession);
             // Every home-page data call was 401ing before this first connect, so reload the
@@ -1575,6 +1751,9 @@
             await fetch('/api/auth/aws/logout', { method: 'POST' });
         } catch (e) { /* clear the UI regardless */ }
         _awsSsoSession = null;
+        _awsSsoAccounts = null;
+        _awsSsoChosen = null;
+        _awsSsoChooseNeeded = false;
         setAwsSsoPill(null);
         awsSsoFillTargets(null);
         awsSsoShowStep(1);

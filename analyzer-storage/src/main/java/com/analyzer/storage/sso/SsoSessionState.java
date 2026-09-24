@@ -1,5 +1,7 @@
 package com.analyzer.storage.sso;
 
+import java.util.List;
+
 /**
  * All mutable AWS SSO state belonging to exactly one browser session.
  *
@@ -43,6 +45,29 @@ public final class SsoSessionState {
     private volatile TokenState tokens;
     private volatile SsoIdentity identity;
     private volatile boolean loggedIn;
+
+    /**
+     * Every (account, roles) pair the completed login exposed, so the UI can offer the choice the
+     * flow deliberately does not make for the user. Populated at poll-complete from
+     * {@code sso:ListAccounts} plus one {@code sso:ListAccountRoles} per account; empty before then.
+     * Contains no token material — account ids, account names and role names only.
+     */
+    private volatile List<AccountChoice> accountChoices = List.of();
+
+    /**
+     * The Identity Store coordinates ({@code sub}/{@code identity_store_id}) decoded from the
+     * id_token at poll time. Kept so a <em>later</em> chosen account can re-run the display-name
+     * lookup with that account's credentials. Both fields may be null; neither is a secret.
+     */
+    private volatile IdTokenClaims idTokenClaims;
+
+    /**
+     * A per-login requested target from {@code /start} (a per-user pre-selection supplied by the
+     * UI), or nulls when the caller supplied none. The login's auto-pick prefers this over the
+     * deployment-wide {@code app.storage.sso.account-id} property, and the user's chooser over both.
+     */
+    private volatile String requestedAccountId;
+    private volatile String requestedRoleName;
 
     /** The verified S3 target for this user, set only by a successful {@code /connect} probe. */
     private volatile String bucket;
@@ -115,6 +140,40 @@ public final class SsoSessionState {
         this.loggedIn = loggedIn;
     }
 
+    /** The (account, roles) choices this login exposed; empty until the device flow completes. */
+    public List<AccountChoice> accountChoices() {
+        return accountChoices;
+    }
+
+    public void accountChoices(List<AccountChoice> accountChoices) {
+        this.accountChoices = accountChoices == null ? List.of() : List.copyOf(accountChoices);
+    }
+
+    /** The Identity Store coordinates from the id_token, or null when none were decoded. */
+    public IdTokenClaims idTokenClaims() {
+        return idTokenClaims;
+    }
+
+    public void idTokenClaims(IdTokenClaims idTokenClaims) {
+        this.idTokenClaims = idTokenClaims;
+    }
+
+    /** A per-login requested account from {@code /start}, or null when the caller supplied none. */
+    public String requestedAccountId() {
+        return requestedAccountId;
+    }
+
+    /** A per-login requested role from {@code /start}, or null when the caller supplied none. */
+    public String requestedRoleName() {
+        return requestedRoleName;
+    }
+
+    /** Records the optional per-login pre-selection the auto-pick should prefer. */
+    public void requestedTarget(String accountId, String roleName) {
+        this.requestedAccountId = accountId == null || accountId.isBlank() ? null : accountId.trim();
+        this.requestedRoleName = roleName == null || roleName.isBlank() ? null : roleName.trim();
+    }
+
     public String bucket() {
         return bucket;
     }
@@ -150,6 +209,10 @@ public final class SsoSessionState {
             tokens = null;
             identity = null;
             loggedIn = false;
+            accountChoices = List.of();
+            idTokenClaims = null;
+            requestedAccountId = null;
+            requestedRoleName = null;
             bucket = null;
             region = null;
             capabilities = null;
@@ -169,5 +232,27 @@ public final class SsoSessionState {
 
     /** Live tokens with their absolute expiry, so refresh is a clock comparison. */
     public record TokenState(String accessToken, String refreshToken, long expiresAtEpochMs) {
+    }
+
+    /**
+     * One selectable AWS account and the permission-set roles it exposes to this login.
+     *
+     * @param accountId   the 12-digit AWS account id (also the audit rollup key when no email claim
+     *                    exists); never null once the flow has listed accounts
+     * @param accountName a human name for the account, or null when AWS supplied none
+     * @param roles       the role names available in this account; empty when the per-account role
+     *                    listing failed (visible, but not connectable)
+     */
+    public record AccountChoice(String accountId, String accountName, List<String> roles) {
+    }
+
+    /**
+     * The Identity Store coordinates decoded from the id_token — the inputs to a display-name
+     * lookup, kept so a chosen account can re-run it. Not secret.
+     *
+     * @param userId  the Identity Store UserId ({@code sub}), or null
+     * @param storeId the IdentityStoreId named by the token, or null
+     */
+    public record IdTokenClaims(String userId, String storeId) {
     }
 }

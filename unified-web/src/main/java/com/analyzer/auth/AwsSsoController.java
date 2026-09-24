@@ -39,12 +39,16 @@ import java.util.Map;
  *
  * <p><b>Endpoint shapes (for the front end):</b>
  * <pre>
- * POST /api/auth/aws/start   { "startUrl": "https://d-xxxx.awsapps.com/start" }
+ * POST /api/auth/aws/start   { "startUrl": "https://d-xxxx.awsapps.com/start",
+ *                              "accountId"?: "...", "roleName"?: "..." }   (the last two optional)
  *   -> { started:true, verificationUri, verificationUriComplete, userCode,
  *        intervalSeconds, expiresAt }
  * POST /api/auth/aws/poll
  *   -> { status:"pending"|"complete"|"expired"|"none", accountId?, accountName?, roleName? }
- * POST /api/auth/aws/connect { "bucket": "...", "region": "...", "displayName": "..." }  (all optional)
+ * GET  /api/auth/aws/accounts
+ *   -> { ok:true, accounts:[ { accountId, accountName, roles:[...] }, ... ] }
+ * POST /api/auth/aws/connect { "bucket": "...", "region": "...", "displayName": "...",
+ *                              "accountId"?: "...", "roleName"?: "..." }  (all optional)
  *   -> success: { ok:true, bucket, region, name, email, displayName, accountId, accountName,
  *                 roleName, account, role, capabilities:{ read, upload, write } }
  *   -> failure: { ok:false, error, capabilities:{ read, upload, write } }
@@ -99,12 +103,19 @@ public class AwsSsoController {
     @PostMapping("/start")
     public Map<String, Object> start(@RequestBody Map<String, String> body, HttpServletRequest req) {
         String startUrl = body == null ? null : body.get("startUrl");
+        // Optional per-login pre-targeting: when supplied, the auto-pick prefers this account/role
+        // over the deployment default (app.storage.sso.account-id). Both are optional and validated
+        // only at connect time against the account list the login actually exposes.
+        String requestedAccountId = body == null ? null : body.get("accountId");
+        String requestedRoleName = body == null ? null : body.get("roleName");
         try {
             // Create the session (and its registry entry) first, so every later call finds state
             // under the same id even if the browser never sent a JSESSIONID cookie.
             HttpSession session = req.getSession(true);
             SsoSessionState state = registry.getOrCreate(session.getId());
             AwsSsoLoginService.DeviceFlowStart start = loginService.startLogin(state, startUrl);
+            // startLogin clears the state, so the request must be recorded AFTER it.
+            state.requestedTarget(requestedAccountId, requestedRoleName);
             session.setAttribute(SESSION_START_URL, startUrl == null ? "" : startUrl.trim());
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("started", true);
@@ -143,6 +154,39 @@ public class AwsSsoController {
     }
 
     /**
+     * The accounts and roles this session's completed login exposed, for the modal's chooser step.
+     *
+     * <pre>
+     * GET /api/auth/aws/accounts
+     *   -> { ok:true, accounts:[ { accountId, accountName, roles:[...] }, ... ] }
+     * </pre>
+     *
+     * <p>Reads the list captured at poll-complete (no AWS round trip here, and no token material).
+     * The list is empty before the device flow completes; a caller that has not logged in gets
+     * {@code {ok:false}}. An account whose role listing failed appears with an empty {@code roles}
+     * array — visible, but not selectable.
+     */
+    @GetMapping("/accounts")
+    public Map<String, Object> accounts(HttpServletRequest req) {
+        SsoSessionState state = registry.get(sessionId(req));
+        if (state == null || !state.loggedIn()) {
+            return error("Log in with AWS SSO before choosing an account.");
+        }
+        java.util.List<Map<String, Object>> accounts = new java.util.ArrayList<>();
+        for (SsoSessionState.AccountChoice c : state.accountChoices()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("accountId", c.accountId());
+            row.put("accountName", c.accountName());
+            row.put("roles", c.roles());
+            accounts.add(row);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("accounts", accounts);
+        return out;
+    }
+
+    /**
      * Step 3: verify and, only if fully verified, build this user's S3 stores against the connected
      * bucket/region.
      *
@@ -168,6 +212,12 @@ public class AwsSsoController {
         String bucket = body == null ? null : body.get("bucket");
         String region = body == null ? null : body.get("region");
         String displayName = body == null ? null : body.get("displayName");
+        // Optional explicit choice from the modal's account/role step: when both are present, switch
+        // this session to that pair (validated against the account list the login exposed) before
+        // anything is built, so the capability probe and every later S3 call sign as the chosen role.
+        // Absent -> the login's auto-pick (configured account, else first) stands, as before.
+        Map<String, Object> chooseError = applyChosenPair(state, body);
+        if (chooseError != null) return chooseError;
         // A user-chosen display name — the always-available fallback when AWS provides no real
         // identity — is applied BEFORE the swap builds, so the CONNECT audit event the swapper
         // publishes carries it and every later read of this identity shows it. Blank leaves any
@@ -237,6 +287,10 @@ public class AwsSsoController {
         }
         String bucket = body == null ? null : body.get("bucket");
         String region = body == null ? null : body.get("region");
+        // Honour the chooser's pair here too: the dry-run must sign as the account/role the user is
+        // about to connect with, not the login's auto-pick.
+        Map<String, Object> chooseError = applyChosenPair(state, body);
+        if (chooseError != null) return chooseError;
         try {
             SsoStoreSwapper.Capabilities caps =
                     storeSwapper.testCapabilities(state.sessionId(), bucket, region);
@@ -307,6 +361,32 @@ public class AwsSsoController {
             session.removeAttribute(SESSION_START_URL);
         }
         return success();
+    }
+
+    /**
+     * Applies an optional {@code (accountId, roleName)} pair from a request body to this session's
+     * identity — the modal chooser's explicit choice, shared by {@code /connect} and {@code /test-bucket}.
+     *
+     * <p>Returns {@code null} when the body carries no usable pair (nothing to do: the login's
+     * auto-pick stands) or when the pair was applied; returns an {@code {ok:false, error}} map when
+     * the pair is invalid, for the caller to return verbatim.
+     */
+    private Map<String, Object> applyChosenPair(SsoSessionState state, Map<String, String> body) {
+        String accountId = body == null ? null : body.get("accountId");
+        String roleName = body == null ? null : body.get("roleName");
+        if (accountId == null || accountId.isBlank() || roleName == null || roleName.isBlank()) {
+            return null;
+        }
+        try {
+            SsoIdentity chosen = loginService.chooseIdentity(state, accountId.trim(), roleName.trim());
+            if (chosen != null) state.identity(chosen);
+            return null;
+        } catch (IllegalArgumentException e) {
+            return error(e.getMessage());
+        } catch (RuntimeException e) {
+            log.warn("[aws-sso] choosing account/role failed ({})", e.getClass().getSimpleName());
+            return error("Could not use the chosen AWS account/role: " + e.getMessage());
+        }
     }
 
     /** The caller's session id, or {@code null} when the request has no session. */

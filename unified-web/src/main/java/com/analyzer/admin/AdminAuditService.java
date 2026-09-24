@@ -218,8 +218,10 @@ public class AdminAuditService {
         if (blankToNull(live.displayName()) != null) return;
 
         state.identity(live.withDisplayName(remembered));
-        log.info("[admin-audit] applied the stored display name to this login's session identity "
-                + "(account {})", accountId);
+        // The one identity-source line for a login AWS could not name at all: the source is the
+        // remembered display name. Never a value.
+        log.info("[aws-sso] identity source: backfill (a stored display name was applied to this "
+                + "login's session)");
     }
 
     /**

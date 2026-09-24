@@ -84,6 +84,18 @@
             <artifactId>ssooidc</artifactId>
         </dependency>
         <!--
+            STS: one `GetCallerIdentity` per login, signed with the user's just-minted role
+            credentials. Identity Center puts the signed-in person's email in the role-session name,
+            which GetCallerIdentity returns as `<principalId>:<role-session-name>` in UserId — a
+            self-managed per-user identity that needs no IAM grant of its own (every principal may
+            call it) and no admin setup. Version comes from the SDK BOM imported above, like every
+            other AWS module, so it cannot land a second SDK version on the classpath.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sts</artifactId>
+        </dependency>
+        <!--
             Identity Store: resolves the human behind an Identity Center login when the OIDC
             id_token carries only a `sub`. DescribeUser(UserId) turns that opaque id into a
             UserName/DisplayName/Emails. The `ssoadmin` module is needed only to discover the
