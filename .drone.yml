@@ -3,39 +3,16 @@ kind: pipeline
 type: kubernetes
 name: default
 
-platform:
-  os: linux
-
-# Modeled on the amp-platform deploy pattern:
-#   build -> publish image to GHCR -> Helm deploy to Kanopy (staging on push, prod on tag)
+# Modeled on the devprod-urp working pipeline (same Drone/Kanopy infra):
+#   test -> publish image to GHCR -> drone-helm:v3 deploy to Kanopy
+# staging deploys on every push to main; prod on version tags.
 
 steps:
-# Testcases disabled for now — this step only verifies the code compiles.
-# To re-enable: change the command to `mvn -B -no-transfer-progress test`
 - name: test
   pull: if-not-exists
   image: maven:3.9-eclipse-temurin-17
   commands:
   - mvn -B -no-transfer-progress package -DskipTests -q
-
-- name: slack-start
-  pull: if-not-exists
-  failure: ignore
-  image: plugins/slack
-  settings:
-    channel: amp-analyzer
-    template: "*Staging*: building (<{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}>) by {{build.author}} from `{{build.branch}}`\n"
-  environment:
-    SLACK_WEBHOOK:
-      from_secret: slack_webhook
-  when:
-    branch:
-    - main
-    event:
-    - push
-    status:
-    - success
-    - failure
 
 - name: build+publish-main-branch
   pull: if-not-exists
@@ -75,16 +52,25 @@ steps:
 
 - name: deploy-staging
   pull: if-not-exists
-  image: alpine/k8s:1.30.4
-  commands:
-  - echo "staging token length: $${#STAGING_KUBERNETES_TOKEN}"
-  - kubectl config set-cluster staging --server=https://api.staging.corp.mongodb.com
-  - kubectl config set-credentials deployer --token="$(printf "%s" "$${STAGING_KUBERNETES_TOKEN}" | tr -d "[:space:]")" </dev/null
-  - kubectl config set-context staging --cluster=staging --user=deployer --namespace=amp-delivery
-  - kubectl config use-context staging
-  - kubectl auth can-i list pods -n amp-delivery </dev/null
-  - timeout 120 helm repo add mongodb https://10gen.github.io/helm-charts || true
-  - helm upgrade --install amp-analyzer mongodb/web-app --namespace amp-delivery --version 4.35.0 -f ./environments/staging.yml --set image.repository=ghcr.io/modernization-factory/amp-analyzer --set image.tag=git-${DRONE_COMMIT_SHA:0:7} --wait --timeout 10m0s
+  image: quay.io/mongodb/drone-helm:v3
+  settings:
+    namespace: amp-delivery
+    release: amp-analyzer
+    tiller_ns: amp-delivery
+    api_server: https://api.staging.corp.mongodb.com
+    add_repos:
+    - mongodb=https://10gen.github.io/helm-charts
+    chart: mongodb/web-app
+    chart_version: 4.31.0
+    kubernetes_token:
+      from_secret: staging_kubernetes_token
+    prefix: staging
+    values_files:
+    - ./environments/staging.yml
+    string_values:
+    - image.tag=git-${DRONE_COMMIT_SHA:0:7}
+    - image.repository=ghcr.io/modernization-factory/amp-analyzer
+    wait_for_upgrade: true
   when:
     branch:
     - main
@@ -93,33 +79,25 @@ steps:
 
 - name: deploy-prod
   pull: if-not-exists
-  image: alpine/k8s:1.30.4
-  commands:
-  - echo "prod token length: $${#PROD_KUBERNETES_TOKEN}"
-  - kubectl config set-cluster prod --server=https://api.prod.corp.mongodb.com
-  - kubectl config set-credentials deployer --token="$(printf "%s" "$${PROD_KUBERNETES_TOKEN}" | tr -d "[:space:]")" </dev/null
-  - kubectl config set-context prod --cluster=prod --user=deployer --namespace=amp-delivery
-  - kubectl config use-context prod
-  - kubectl auth can-i list pods -n amp-delivery </dev/null
-  - timeout 120 helm repo add mongodb https://10gen.github.io/helm-charts || true
-  - helm upgrade --install amp-analyzer mongodb/web-app --namespace amp-delivery --version 4.35.0 -f ./environments/prod.yml --set image.repository=ghcr.io/modernization-factory/amp-analyzer --set image.tag=${DRONE_TAG} --wait --timeout 10m0s
+  image: quay.io/mongodb/drone-helm:v3
+  settings:
+    namespace: amp-delivery
+    release: amp-analyzer
+    tiller_ns: amp-delivery
+    api_server: https://api.prod.corp.mongodb.com
+    add_repos:
+    - mongodb=https://10gen.github.io/helm-charts
+    chart: mongodb/web-app
+    chart_version: 4.31.0
+    kubernetes_token:
+      from_secret: prod_kubernetes_token
+    prefix: prod
+    values_files:
+    - ./environments/prod.yml
+    string_values:
+    - image.tag=${DRONE_TAG}
+    - image.repository=ghcr.io/modernization-factory/amp-analyzer
+    wait_for_upgrade: true
   when:
     event:
     - tag
-
-- name: slack-finish
-  pull: if-not-exists
-  failure: ignore
-  image: plugins/slack
-  settings:
-    channel: amp-analyzer
-    template: "{{#success build.status}}\n  ✅ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> deployed in {{since build.started}}\n{{else}}\n  ❌ <{{build.link}}|${DRONE_REPO}#{{truncate build.commit 8}}> failed {{build.link}}\n{{/success}}\n"
-  environment:
-    SLACK_WEBHOOK:
-      from_secret: slack_webhook
-  when:
-    status:
-    - success
-    - failure
-
-...
