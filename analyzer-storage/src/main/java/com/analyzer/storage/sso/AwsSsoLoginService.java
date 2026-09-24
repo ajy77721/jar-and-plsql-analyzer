@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sso.SsoClient;
 import software.amazon.awssdk.services.sso.model.AccountInfo;
@@ -113,6 +115,12 @@ public class AwsSsoLoginService {
     private final Region region;
     private final ApplicationEventPublisher events;
     private final AwsIdentityStoreLookup identityLookup;
+    /**
+     * Lazy so the identity lookup can sign with the <em>user's</em> credentials without a bean
+     * cycle: {@link SsoCredentialsResolver} depends on this service, so this service can only hold
+     * a provider for the resolver, not the resolver itself.
+     */
+    private final ObjectProvider<SsoCredentialsResolver> credentialsResolver;
 
     /**
      * @param regionProperty the Identity Center / IAM region the OIDC and SSO endpoints live in.
@@ -123,9 +131,11 @@ public class AwsSsoLoginService {
     public AwsSsoLoginService(
             @Value("${app.storage.sso.region:${app.storage.s3.region:us-east-1}}") String regionProperty,
             ApplicationEventPublisher events,
-            AwsIdentityStoreLookup identityLookup) {
+            AwsIdentityStoreLookup identityLookup,
+            ObjectProvider<SsoCredentialsResolver> credentialsResolver) {
         this.events = events;
         this.identityLookup = identityLookup;
+        this.credentialsResolver = credentialsResolver;
         this.region = Region.of((regionProperty == null || regionProperty.isBlank())
                 ? "us-east-1" : regionProperty.trim());
         // Built once: both clients are thread-safe and stateless, and rebuilding one per call would
@@ -224,7 +234,7 @@ public class AwsSsoLoginService {
                         .deviceCode(flow.deviceCode()));
                 storeTokens(state, token);
                 state.pendingFlow(null);
-                SsoIdentity id = resolveIdentity(token.accessToken(), token.idToken());
+                SsoIdentity id = resolveIdentity(state, token.accessToken(), token.idToken());
                 state.identity(id);
                 state.loggedIn(true);
                 log.info("[aws-sso] login complete — account {} role {}", id.accountId(), id.roleName());
@@ -336,8 +346,14 @@ public class AwsSsoLoginService {
         }
     }
 
-    /** Resolves identity from a fresh access token: first account, then a PowerUser/Administrator role. */
-    private SsoIdentity resolveIdentity(String accessToken, String idToken) {
+    /**
+     * Resolves identity from a fresh access token: first account, then a PowerUser/Administrator role.
+     *
+     * <p>{@code state} is the just-authenticated user's own session state; it is used to mint that
+     * user's role credentials for the Identity Store display-name lookup below, so the lookup does
+     * not need ambient credentials on the pod.
+     */
+    private SsoIdentity resolveIdentity(SsoSessionState state, String accessToken, String idToken) {
         List<AccountInfo> accounts = sso.listAccounts(b -> b.accessToken(accessToken)).accountList();
         if (accounts.isEmpty()) {
             throw new IllegalStateException(
@@ -365,8 +381,16 @@ public class AwsSsoLoginService {
         // for Identity Center is the Identity Store UserId) into a person. Best-effort — an empty
         // result just leaves the identity anonymous as before.
         if (name == null || email == null) {
+            // The lookup runs inside this user's own poll request, and the access token above was
+            // just issued to them: mint their role credentials and sign the Identity Store call with
+            // them. On a pod with no ambient credentials this is the only chain that can work;
+            // a null here (minting failed) degrades to the default chain inside the lookup.
+            SsoCredentialsResolver resolver = credentialsResolver.getIfAvailable();
+            AwsCredentialsProvider userCredentials = resolver == null ? null
+                    : resolver.resolveFor(state == null ? null : state.sessionId(),
+                            accessToken, account.accountId(), role.roleName());
             AwsIdentityStoreLookup.ResolvedIdentity resolved = identityLookup
-                    .lookup(claims.userId(), claims.storeId())
+                    .lookup(claims.userId(), claims.storeId(), userCredentials)
                     .orElse(null);
             if (resolved != null) {
                 name = firstNonBlank(name, resolved.name());

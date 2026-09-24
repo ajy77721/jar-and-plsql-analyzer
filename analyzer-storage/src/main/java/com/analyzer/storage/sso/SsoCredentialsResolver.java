@@ -121,6 +121,54 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
     }
 
     /**
+     * Credentials for a user who has <b>just</b> been authenticated by the device flow but whose
+     * state is not yet marked {@code loggedIn} — the window in which {@link AwsSsoLoginService}
+     * resolves the display identity through Identity Store.
+     *
+     * <p>{@link #resolveCredentials()} cannot help here: it deliberately refuses to mint for a state
+     * that is not logged in. This method is handed the freshly issued access token plus the
+     * account/role the login settled on, mints the same short-lived role credentials, and caches
+     * them under {@code sessionId} so the very next S3 call — after {@code loggedIn} is set — reuses
+     * them instead of asking AWS again.
+     *
+     * <p>Returns {@code null} (never throws) when any input is missing or {@code GetRoleCredentials}
+     * fails, so the caller falls back to the default chain exactly as before. No credential value is
+     * ever logged.
+     */
+    public AwsCredentialsProvider resolveFor(String sessionId, String accessToken,
+                                             String accountId, String roleName) {
+        if (accessToken == null || accessToken.isBlank()
+                || accountId == null || accountId.isBlank()
+                || roleName == null || roleName.isBlank()) {
+            return null;
+        }
+        try {
+            RoleCredentials role = login.ssoClient().getRoleCredentials(b -> b
+                    .accessToken(accessToken)
+                    .accountId(accountId)
+                    .roleName(roleName)).roleCredentials();
+            if (role == null || role.accessKeyId() == null || role.secretAccessKey() == null) {
+                log.warn("[aws-sso] GetRoleCredentials returned no usable credentials for the identity lookup; using the default chain");
+                return null;
+            }
+            AwsSessionCredentials minted = AwsSessionCredentials.create(
+                    role.accessKeyId(), role.secretAccessKey(), role.sessionToken());
+            long expiresAt = role.expiration() != null
+                    ? role.expiration()
+                    : System.currentTimeMillis() + DEFAULT_CREDENTIAL_LIFETIME_MS;
+            if (sessionId != null) {
+                cache.put(sessionId, new Cached(minted, expiresAt));
+            }
+            return () -> minted;
+        } catch (RuntimeException e) {
+            // Class name only: the request carries the freshly issued access token.
+            log.warn("[aws-sso] GetRoleCredentials failed ({}) during the identity lookup; using the default AWS chain",
+                    e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
      * Snapshots the current request's user and credentials for hand-off to a background job, or
      * {@code null} when the thread has no SSO-bound session or no credentials could be obtained.
      *
