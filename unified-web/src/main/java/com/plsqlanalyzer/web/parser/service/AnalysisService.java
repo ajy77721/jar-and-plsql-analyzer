@@ -8,6 +8,7 @@ import com.plsqlanalyzer.config.ConnectionConfig;
 import com.plsqlanalyzer.config.EnvironmentConfig;
 import com.plsqlanalyzer.config.PlsqlConfig;
 import com.plsqlanalyzer.web.parser.model.AnalysisInfo;
+import com.analyzer.usercfg.UserConnectionStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -51,6 +52,12 @@ public class AnalysisService {
     private final ArtifactStore store;
     private final com.analyzer.storage.AnalysisRepository repository;
     private final com.plsqlanalyzer.web.controller.detail.ObjectResolutionService objectResolutionService;
+    /**
+     * The caller's private connection store. Consulted FIRST when an analysis names a connection,
+     * so a user's own connection of that name shadows the shared global one; a null result (the
+     * user has none, or this is a background thread with no session) falls back to the global config.
+     */
+    private final UserConnectionStore userConnectionStore;
 
     public AnalysisService(@Value("${app.data-dir.base:data}") String dataDir,
                            AnalysisReaderFactory readerFactory,
@@ -60,7 +67,8 @@ public class AnalysisService {
                            @Qualifier("parserArtifactStore") ArtifactStore store,
                            com.analyzer.storage.AnalysisRepository repository,
                            com.plsqlanalyzer.web.controller.detail.ObjectResolutionService objectResolutionService,
-                           @Qualifier("plsqlConfigFilePath") Path plsqlConfigFilePath) {
+                           @Qualifier("plsqlConfigFilePath") Path plsqlConfigFilePath,
+                           UserConnectionStore userConnectionStore) {
         // The one place a local root is still built from the property, and deliberately the only
         // one: FlowAnalysisMain is an external entry point given --output-dir as a String and
         // writing through java.io, and buildEnvConfigFile must land beside that output on LOCAL
@@ -76,6 +84,7 @@ public class AnalysisService {
         this.repository = repository;
         this.objectResolutionService = objectResolutionService;
         this.configDir = plsqlConfigFilePath != null ? plsqlConfigFilePath.getParent() : null;
+        this.userConnectionStore = userConnectionStore;
     }
 
     /**
@@ -498,7 +507,16 @@ public class AnalysisService {
         String resolvedJdbcUrl = null;
         String resolvedConnName = null;
         EnvironmentConfig envConfig = null;
+        // The base TLS material paths resolve against for the hand-off YAML. Normally the config
+        // directory; for a user-private connection it is the directory its certs were fetched into.
+        Path tlsBaseDir = configDir;
+        // Which connection drives this run, when the caller named one. The user's PRIVATE store is
+        // consulted first; only if they have no such connection does the shared global config win.
+        ConnectionConfig privateConn = null;
         if (project != null && !project.isBlank() && environment != null && !environment.isBlank()) {
+            if (connName != null && !connName.isBlank()) {
+                privateConn = userConnectionStore.findForCurrentUser(connName);
+            }
             envConfig = plsqlConfig.resolveEnvironment(project, environment);
             // Real bug found live: when project/environment don't resolve to a configured entry
             // (e.g. a typo, or a project simply missing from plsql-config.yaml), envConfig stayed
@@ -509,13 +527,15 @@ public class AnalysisService {
             // that global file's legacy fallback section, three retries deep, before failing.
             // Resolution must be strict: project+environment (and, if given, connName) select
             // ONE specific connection or the request fails outright — it must never silently
-            // substitute a different project/environment/connection.
-            if (envConfig == null) {
+            // substitute a different project/environment/connection. A user-private connection of
+            // the requested name satisfies the request on its own, so it is exempt from the
+            // global-config lookup checks below.
+            if (envConfig == null && privateConn == null) {
                 throw new IllegalArgumentException("No configured environment for project='" + project
                         + "', environment='" + environment + "' — check plsql-config.yaml. "
                         + "Refusing to fall back to an unrelated default connection.");
             }
-            if (connName != null && !connName.isBlank()) {
+            if (envConfig != null && privateConn == null && connName != null && !connName.isBlank()) {
                 boolean connFound = envConfig.getConnections().stream()
                         .anyMatch(c -> connName.equalsIgnoreCase(c.getName()));
                 if (!connFound) {
@@ -525,8 +545,30 @@ public class AnalysisService {
                 }
             }
         }
+        if (privateConn != null) {
+            // Materialize the user connection's TLS artifacts into a stable directory under the
+            // analysis tree, because the hand-off YAML is written to disk and consumed by a later
+            // parser job: temp files would be gone by then, and the parser needs real paths.
+            ConnectionConfig dialConn = privateConn;
+            if (privateConn.isTlsEnabled()) {
+                try {
+                    String identity = userConnectionStore.currentIdentityKey();
+                    Path certDir = flowOutputDir.resolve("users")
+                            .resolve(identity != null ? identity : "anon");
+                    dialConn = userConnectionStore.materializeCertsPersistent(privateConn, certDir);
+                    tlsBaseDir = certDir;
+                } catch (Exception ex) {
+                    org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
+                        .warn("[AnalysisService] could not materialize private TLS material for '{}': {}",
+                              connName, ex.getMessage());
+                }
+            }
+            envConfig = singleConnectionEnv(dialConn, environment);
+        }
         if (envConfig != null) {
-            resolvedJdbcUrl = envConfig.getJdbcUrl();
+            resolvedJdbcUrl = (privateConn != null && privateConn.isTlsEnabled() && tlsBaseDir != null)
+                    ? envConfig.getConnections().get(0).getJdbcUrl(tlsBaseDir)
+                    : envConfig.getJdbcUrl();
             // Build env config — written to outputDir so ParserValidationExecutor can find it
             // even after a server restart (temp files are deleted on JVM exit).
             // Actual resultDir may not exist yet; we write the config after createDirectories.
@@ -600,7 +642,7 @@ public class AnalysisService {
         // Write env config into resultDir so it survives server restarts and ParserValidationExecutor
         // can use it (it probes the same local path — see ParserAnalysisExecutor).
         if (envConfig != null) {
-            Path persistedConfig = buildEnvConfigFile(envConfig, project, environment, resultDir);
+            Path persistedConfig = buildEnvConfigFile(envConfig, project, environment, resultDir, tlsBaseDir);
             if (persistedConfig != null) effectiveConfigPath = persistedConfig.toString();
         }
 
@@ -680,6 +722,17 @@ public class AnalysisService {
     }
 
     /**
+     * Wraps one resolved connection as a single-connection {@link EnvironmentConfig} so the rest of
+     * the hand-off (env-config YAML generation, db-type and jdbc-url resolution) needs no knowledge
+     * of whether the connection came from the shared global config or the caller's private store.
+     */
+    private static EnvironmentConfig singleConnectionEnv(ConnectionConfig conn, String envName) {
+        EnvironmentConfig env = new EnvironmentConfig(envName, null);
+        env.getConnections().add(conn);
+        return env;
+    }
+
+    /**
      * Write an env-scoped YAML config into the analysis output directory so it persists
      * across server restarts and ParserValidationExecutor can use it as a follow-up job.
      * Falls back to a temp file if outputDir is null or not yet created.
@@ -696,17 +749,20 @@ public class AnalysisService {
      * are ordinary data and belong in the store.
      */
     private Path buildEnvConfigFile(EnvironmentConfig envConfig, String project, String environment,
-                                     Path outputDir) {
+                                     Path outputDir, Path tlsBaseDir) {
         try {
+            // The base the connection's relative TLS paths resolve against: the config directory
+            // normally, or the directory a user-private connection's certs were materialized into.
+            Path baseDir = tlsBaseDir != null ? tlsBaseDir : configDir;
             // The connection that drives this environment: its db_type decides the driver, and its
             // TLS settings decide whether the parser must be handed SSL properties too. Same
             // selection rule as the db_type line below (the first configured connection).
             ConnectionConfig activeConn = envConfig.getConnections().isEmpty()
                     ? null : envConfig.getConnections().get(0);
             boolean tlsEnabled = activeConn != null && activeConn.isTlsEnabled()
-                    && configDir != null;
+                    && baseDir != null;
 
-            String jdbcUrl = tlsEnabled ? activeConn.getJdbcUrl(configDir) : envConfig.getJdbcUrl();
+            String jdbcUrl = tlsEnabled ? activeConn.getJdbcUrl(baseDir) : envConfig.getJdbcUrl();
             if (jdbcUrl == null || jdbcUrl.isBlank()) {
                 org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
                     .warn("[AnalysisService] No jdbcUrl for {}/{} — falling back to global config", project, environment);
@@ -725,7 +781,7 @@ public class AnalysisService {
             // string→string map; NONE when TLS is disabled so the file stays byte-identical to
             // pre-TLS output for existing configs.
             if (tlsEnabled) {
-                java.util.Properties ssl = activeConn.buildSslProperties(configDir);
+                java.util.Properties ssl = activeConn.buildSslProperties(baseDir);
                 if (ssl != null && !ssl.isEmpty()) {
                     sb.append("ssl_properties:\n");
                     // Sorted for a deterministic, diff-friendly file.

@@ -682,11 +682,54 @@ PA.api = {
         return res.json();
     },
 
+    // ---- Connections: scope helpers ----
+    /**
+     * True when a raw connections payload is the per-user grouped shape
+     * `{shared:[...], mine:[...]}` rather than the legacy plain array/list.
+     */
+    _isGroupedConnections(raw) {
+        return !!raw && !Array.isArray(raw) && typeof raw === 'object'
+            && (Array.isArray(raw.shared) || Array.isArray(raw.mine));
+    },
+
+    /**
+     * Normalize a connections payload into a flat array where every entry carries a `scope` of
+     * 'user' (private, "My connections") or 'shared' (team). Handles BOTH shapes:
+     *  - `{shared:[...], mine:[...]}` — the current backend contract (`mine` → 'user');
+     *  - a plain array/list — the older backend, treated wholly as 'shared' for backward compat.
+     * Entries are shallow-copied so the caller never mutates the raw payload (a server-masked
+     * password stays masked; the UI only sends a real password once the user re-enters it).
+     */
+    _normalizeConnections(raw) {
+        if (Array.isArray(raw)) {
+            return raw.map(c => Object.assign({}, c, { scope: (c && c.scope) ? c.scope : 'shared' }));
+        }
+        if (this._isGroupedConnections(raw)) {
+            const out = [];
+            (raw.mine || []).forEach(c => out.push(Object.assign({}, c, { scope: 'user' })));
+            (raw.shared || []).forEach(c => out.push(Object.assign({}, c, { scope: 'shared' })));
+            return out;
+        }
+        return [];
+    },
+
     // ---- Config CRUD ----
     async listProjects() {
         const res = await fetch('/api/plsql/config/projects');
         if (!res.ok) return PA.apiFail(res);
-        return res.json();
+        const projects = await res.json();
+        // A project embeds each environment's connections. Normalize them so the setup modal sees a
+        // flat list tagged with scope whether the server sent the grouped {shared, mine} shape or
+        // the legacy plain array. `_connScoped` records whether the payload already carried scopes
+        // (so callers can skip a redundant per-environment connections fetch).
+        if (Array.isArray(projects)) {
+            projects.forEach(p => ((p && p.environments) || []).forEach(e => {
+                if (!e) return;
+                e._connScoped = this._isGroupedConnections(e.connections);
+                e.connections = this._normalizeConnections(e.connections);
+            }));
+        }
+        return projects;
     },
 
     async createProject(project) {
@@ -747,10 +790,20 @@ PA.api = {
         return res.json();
     },
 
+    /**
+     * GET connections for an environment. The backend now returns the per-user grouped shape
+     * `{shared:[...], mine:[...]}`; the legacy plain-array response is still accepted (treated as
+     * all `shared`). Returns the grouped shape with every entry tagged with its `scope`.
+     */
     async listConnections(projectName, envName) {
         const res = await fetch(`/api/plsql/config/projects/${encodeURIComponent(projectName)}/environments/${encodeURIComponent(envName)}/connections`);
         if (!res.ok) return PA.apiFail(res);
-        return res.json();
+        const raw = await res.json();
+        const flat = this._normalizeConnections(raw);
+        return {
+            shared: flat.filter(c => c.scope !== 'user'),
+            mine: flat.filter(c => c.scope === 'user')
+        };
     },
 
     async testConnection(conn) {
@@ -788,28 +841,47 @@ PA.api = {
         return res.json();
     },
 
-    async addConnection(projectName, envName, conn) {
+    /**
+     * Create a connection. `scope` ('user' | 'shared') is sent in the body so the server routes the
+     * save to the right store; it defaults to the conn's own scope, then to 'user' (the UI default
+     * when the user picks nothing).
+     */
+    async addConnection(projectName, envName, conn, scope) {
+        const body = Object.assign({}, conn, { scope: scope || conn.scope || 'user' });
         const res = await fetch(`/api/plsql/config/projects/${encodeURIComponent(projectName)}/environments/${encodeURIComponent(envName)}/connections`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(conn)
+            body: JSON.stringify(body)
         });
         if (!res.ok) return PA.apiFail(res);
         return res.json();
     },
 
-    async updateConnection(projectName, envName, connName, conn) {
+    /**
+     * Update a connection. `scope` is sent in the body: the scope the connection lives in (kept
+     * unless the user changed the toggle), which also tells the server which store to update.
+     */
+    async updateConnection(projectName, envName, connName, conn, scope) {
+        const body = Object.assign({}, conn, { scope: scope || conn.scope || 'user' });
         const res = await fetch(`/api/plsql/config/projects/${encodeURIComponent(projectName)}/environments/${encodeURIComponent(envName)}/connections/${encodeURIComponent(connName)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(conn)
+            body: JSON.stringify(body)
         });
         if (!res.ok) return PA.apiFail(res);
         return res.json();
     },
 
-    async deleteConnection(projectName, envName, connName) {
-        const res = await fetch(`/api/plsql/config/projects/${encodeURIComponent(projectName)}/environments/${encodeURIComponent(envName)}/connections/${encodeURIComponent(connName)}`, { method: 'DELETE' });
+    /**
+     * Delete a connection from the given scope ('user' | 'shared') — the scope of the listing the
+     * connection came from. Sent as a JSON body; defaults to 'shared' (legacy behaviour).
+     */
+    async deleteConnection(projectName, envName, connName, scope) {
+        const res = await fetch(`/api/plsql/config/projects/${encodeURIComponent(projectName)}/environments/${encodeURIComponent(envName)}/connections/${encodeURIComponent(connName)}`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: scope || 'shared' })
+        });
         if (!res.ok) return PA.apiFail(res);
         return res.json();
     },

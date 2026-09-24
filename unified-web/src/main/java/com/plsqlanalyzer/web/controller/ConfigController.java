@@ -1,6 +1,7 @@
 package com.plsqlanalyzer.web.controller;
 
 import com.plsqlanalyzer.config.*;
+import com.analyzer.usercfg.UserConnectionStore;
 import com.plsqlanalyzer.web.config.ConfigDirService;
 import java.sql.DriverManager;
 import org.slf4j.Logger;
@@ -46,18 +47,55 @@ public class ConfigController {
     private final PlsqlConfig config;
     private final Path configFilePath;
     private final ConfigDirService configDirService;
+    /** The current user's private connection store; see {@link UserConnectionStore}. */
+    private final UserConnectionStore userConnections;
 
     public ConfigController(PlsqlConfig config,
                             @Qualifier("plsqlConfigFilePath") Path configFilePath,
-                            ConfigDirService configDirService) {
+                            ConfigDirService configDirService,
+                            UserConnectionStore userConnections) {
         this.config = config;
         this.configFilePath = configFilePath;
         this.configDirService = configDirService;
+        this.userConnections = userConnections;
     }
 
     @GetMapping
     public ResponseEntity<PlsqlConfig> getConfig() {
         return ResponseEntity.ok(config);
+    }
+
+    /** Every connection in the global config, flattened across projects and environments. */
+    private List<ConnectionConfig> sharedConnections() {
+        List<ConnectionConfig> shared = new ArrayList<>();
+        for (ProjectConfig project : config.getProjects()) {
+            if (project.getEnvironments() == null) continue;
+            for (EnvironmentConfig env : project.getEnvironments()) {
+                if (env.getConnections() != null) shared.addAll(env.getConnections());
+            }
+        }
+        return shared;
+    }
+
+    /**
+     * The unified connection listing the connection UI renders:
+     * <pre>{"shared": [ConnectionConfig...], "mine": [ConnectionConfig...]}</pre>
+     *
+     * <p>{@code shared} is every connection from the global {@link PlsqlConfig}, flattened across
+     * projects and environments — exactly the connections that existed before per-user storage, so
+     * its behaviour is unchanged. {@code mine} is the calling user's own decrypted connection list.
+     * Both are serialised through the HTTP mapper, which masks every password (see
+     * {@code HttpSecretMaskingConfig}), so the decrypted secrets never leave the server.
+     *
+     * <p>An unauthenticated caller gets an empty {@code mine} rather than an error, so the page can
+     * still render the shared half.
+     */
+    @GetMapping("/connections")
+    public ResponseEntity<Map<String, Object>> listAllConnections() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("shared", sharedConnections());
+        out.put("mine", userConnections.listForCurrentUser());
+        return ResponseEntity.ok(out);
     }
 
     /** Serve plsql-export-config.json for the frontend Excel export. */
@@ -211,28 +249,48 @@ public class ConfigController {
 
     // ── Connections CRUD (SQL Developer-style, inside an environment) ──
 
+    /**
+     * The connection listing the setup UI reads. Returns the per-user grouped shape
+     * {@code {"shared":[ConnectionConfig...], "mine":[ConnectionConfig...]}}: {@code shared} is this
+     * environment's connections from the global config (unchanged behaviour), {@code mine} is the
+     * calling user's own private list. Both halves are masked on the way out by
+     * {@code HttpSecretMaskingConfig}, so no password is ever serialised.
+     */
     @GetMapping("/projects/{projectName}/environments/{envName}/connections")
     public ResponseEntity<?> listConnections(@PathVariable String projectName,
                                              @PathVariable String envName) {
         EnvironmentConfig env = resolveEnv(projectName, envName);
         if (env == null) return ResponseEntity.notFound().build();
-        return ResponseEntity.ok(env.getConnections());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("shared", env.getConnections());
+        out.put("mine", userConnections.listForCurrentUser());
+        return ResponseEntity.ok(out);
     }
 
     @PostMapping("/projects/{projectName}/environments/{envName}/connections/test")
     public ResponseEntity<?> testConnection(@PathVariable String projectName,
                                             @PathVariable String envName,
                                             @RequestBody ConnectionConfig conn) {
-        ResponseEntity<?> result = doTest(conn);
+        // A connection may live in either scope; user first, then the shared/global config. The
+        // scope also decides where the test result (lastTestedAt, discovered schemas) is recorded.
+        String scope = scopeForTest(conn);
+        if ("user".equals(scope)) conn = mergeStoredUserSecrets(conn);
+        ResponseEntity<?> result = doTestForScope(conn, scope);
         // The body is a DETACHED copy, so a successful test here would otherwise leave no trace.
         // Record the test time on the STORED connection (matched by name) so the setup modal can
         // rank recently-tested connections; best-effort — an unknown name or a failed test is a no-op.
         if (result.getBody() instanceof Map<?, ?> body && Boolean.TRUE.equals(body.get("success"))) {
-            EnvironmentConfig env = resolveEnv(projectName, envName);
-            ConnectionConfig stored = env != null ? env.findConnection(conn.getName()) : null;
-            if (stored != null) {
-                stored.setLastTestedAt(System.currentTimeMillis());
-                save();
+            if ("user".equals(scope) && userConnections.availableForCurrentUser()) {
+                if (userConnections.existsForCurrentUser(conn.getName())) {
+                    userConnections.saveForCurrentUser(conn);
+                }
+            } else {
+                EnvironmentConfig env = resolveEnv(projectName, envName);
+                ConnectionConfig stored = env != null ? env.findConnection(conn.getName()) : null;
+                if (stored != null) {
+                    stored.setLastTestedAt(System.currentTimeMillis());
+                    save();
+                }
             }
         }
         return result;
@@ -242,17 +300,28 @@ public class ConfigController {
     public ResponseEntity<?> addConnection(@PathVariable String projectName,
                                            @PathVariable String envName,
                                            @RequestBody ConnectionConfig conn) {
+        // New saves default to the caller's PRIVATE store when they are signed in (scope defaults to
+        // "user"); an explicit "scope":"shared" keeps the historical global-config behaviour.
+        String scope = resolveWriteScope(conn, true);
+        if (scope == null) return userScopeUnavailable();
+
+        if (scope.equals("user")) {
+            ResponseEntity<?> invalid = validateConnectionForSave(conn);
+            if (invalid != null) return invalid;
+            if (userConnections.existsForCurrentUser(conn.getName())) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Connection '" + conn.getName() + "' already exists"));
+            }
+            // A save is only reachable after a passing test, so stamp "last tested" now.
+            conn.setLastTestedAt(System.currentTimeMillis());
+            userConnections.saveForCurrentUser(conn);
+            log.info("Added private connection {} for the current user", conn.getName());
+            return ResponseEntity.ok(conn);
+        }
+
         EnvironmentConfig env = resolveEnv(projectName, envName);
         if (env == null) return ResponseEntity.notFound().build();
-        if (conn.getName() == null || conn.getName().isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Connection name is required"));
-        }
-        if (conn.getUsername() == null || conn.getUsername().isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Username is required"));
-        }
-        if (!conn.isTested()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Connection must be tested successfully before saving. Use the Test button first."));
-        }
+        ResponseEntity<?> invalid = validateConnectionForSave(conn);
+        if (invalid != null) return invalid;
         if (env.findConnection(conn.getName()) != null) {
             return ResponseEntity.badRequest().body(Map.of("error", "Connection '" + conn.getName() + "' already exists"));
         }
@@ -270,18 +339,52 @@ public class ConfigController {
                                               @PathVariable String envName,
                                               @PathVariable String connName,
                                               @RequestBody ConnectionConfig updated) {
+        // Which store holds this connection: an explicit scope wins, otherwise it is whichever
+        // scope currently has a connection by this name (private first).
+        String scope = resolveUpdateScope(connName, updated);
+        if (scope == null) return userScopeUnavailable();
+        if (!updated.isTested()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Connection must be tested successfully before saving."));
+        }
+
+        if (scope.equals("user")) {
+            ConnectionConfig existing = userConnections.findForCurrentUser(connName);
+            if (existing == null) return ResponseEntity.notFound().build();
+            copyEditableFields(existing, updated);
+            existing.setTested(true);
+            // Same reasoning as addConnection: the save gate guarantees a fresh passing test, so
+            // this update marks the connection as the most recently tested one.
+            existing.setLastTestedAt(System.currentTimeMillis());
+            // A rename is a delete of the old key plus a save of the new one, or both would remain.
+            if (!connName.equalsIgnoreCase(existing.getName())) {
+                userConnections.deleteForCurrentUser(connName);
+            }
+            userConnections.saveForCurrentUser(existing);
+            log.info("Updated private connection {} for the current user", existing.getName());
+            return ResponseEntity.ok(existing);
+        }
+
         EnvironmentConfig env = resolveEnv(projectName, envName);
         if (env == null) return ResponseEntity.notFound().build();
         ConnectionConfig existing = env.findConnection(connName);
         if (existing == null) return ResponseEntity.notFound().build();
-        if (!updated.isTested()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Connection must be tested successfully before saving."));
-        }
+        copyEditableFields(existing, updated);
+        existing.setTested(true);
+        existing.setLastTestedAt(System.currentTimeMillis());
+        save();
+        log.info("Updated connection {} in {}/{}", existing.getName(), projectName, envName);
+        return ResponseEntity.ok(existing);
+    }
+
+    /**
+     * Field-by-field merge of an edit onto a stored connection. This endpoint copies across
+     * explicitly (it does NOT replace the object), so every field omitted here would silently be
+     * dropped on save — TLS fields especially. Blank secret fields mean "unchanged": the editor
+     * cannot pre-fill a masked password, so an untouched form submits an empty string.
+     */
+    private static void copyEditableFields(ConnectionConfig existing, ConnectionConfig updated) {
         if (updated.getName() != null && !updated.getName().isBlank()) existing.setName(updated.getName());
         if (updated.getUsername() != null) existing.setUsername(updated.getUsername());
-        // Blank means "unchanged": the editor can no longer pre-fill the password (see
-        // HttpSecretMaskingConfig), so an untouched form submits an empty string. An empty password
-        // is not a value anyone can legitimately save, so treating it as a no-op is safe.
         if (updated.getPassword() != null && !updated.getPassword().isBlank()) {
             existing.setPassword(updated.getPassword());
         }
@@ -295,33 +398,38 @@ public class ConfigController {
         if (updated.getCustomUrl() != null) existing.setCustomUrl(updated.getCustomUrl());
         if (updated.getDescription() != null) existing.setDescription(updated.getDescription());
         if (updated.getSchemasRaw() != null) existing.setSchemas(updated.getSchemasRaw());
-        // TLS fields must be carried across explicitly: this endpoint copies field-by-field (it
-        // does NOT replace the object), so anything omitted here would silently be dropped on save.
+        if (updated.getDbType() != null && !updated.getDbType().isBlank()) existing.setDbType(updated.getDbType());
         if (updated.getSslMode() != null) existing.setSslMode(updated.getSslMode());
         if (updated.getHostnameValidation() != null) existing.setHostnameValidation(updated.getHostnameValidation());
         if (updated.getTrustCertPath() != null) existing.setTrustCertPath(updated.getTrustCertPath());
         if (updated.getClientCertPath() != null) existing.setClientCertPath(updated.getClientCertPath());
         if (updated.getClientKeyPath() != null) existing.setClientKeyPath(updated.getClientKeyPath());
         if (updated.getTruststorePath() != null) existing.setTruststorePath(updated.getTruststorePath());
-        // Blank means "unchanged", mirroring the password handling above (the editor cannot
-        // pre-fill a secret, so an untouched form submits an empty string).
         if (updated.getTruststorePassword() != null && !updated.getTruststorePassword().isBlank()) {
             existing.setTruststorePassword(updated.getTruststorePassword());
         }
         if (updated.getWalletPath() != null) existing.setWalletPath(updated.getWalletPath());
-        existing.setTested(true);
-        // Same reasoning as addConnection: the save gate guarantees a fresh passing test, so this
-        // update marks the connection as the most recently tested one.
-        existing.setLastTestedAt(System.currentTimeMillis());
-        save();
-        log.info("Updated connection {} in {}/{}", existing.getName(), projectName, envName);
-        return ResponseEntity.ok(existing);
     }
 
     @DeleteMapping("/projects/{projectName}/environments/{envName}/connections/{connName}")
     public ResponseEntity<?> deleteConnection(@PathVariable String projectName,
                                               @PathVariable String envName,
-                                              @PathVariable String connName) {
+                                              @PathVariable String connName,
+                                              @RequestParam(name = "scope", required = false) String scopeParam,
+                                              @RequestBody(required = false) Map<String, String> body) {
+        // Scope may arrive as ?scope= or in a JSON body (the UI sends a body); either wins over the
+        // inferred default. Inference deletes from whichever scope actually has it, private first.
+        String scope = UserConnectionStore.normalizedScope(scopeParam);
+        if (scope == null && body != null) scope = UserConnectionStore.normalizedScope(body.get("scope"));
+        if (scope == null) {
+            scope = userConnections.existsForCurrentUser(connName) ? "user" : "shared";
+        }
+        if (scope.equals("user")) {
+            if (!userConnections.deleteForCurrentUser(connName)) return ResponseEntity.notFound().build();
+            log.info("Deleted private connection {} for the current user", connName);
+            return ResponseEntity.ok(Map.of("deleted", connName));
+        }
+
         EnvironmentConfig env = resolveEnv(projectName, envName);
         if (env == null) return ResponseEntity.notFound().build();
         ConnectionConfig existing = env.findConnection(connName);
@@ -336,7 +444,12 @@ public class ConfigController {
 
     @PostMapping("/test-connection")
     public ResponseEntity<?> testAnyConnection(@RequestBody ConnectionConfig conn) {
-        return doTest(conn);
+        // Resolve the connection from EITHER scope before dialling: a user-store connection needs
+        // its stored secrets (the form cannot pre-fill a masked password) and its certificate files
+        // fetched out of the user's prefix into real local files.
+        String scope = scopeForTest(conn);
+        if ("user".equals(scope)) conn = mergeStoredUserSecrets(conn);
+        return doTestForScope(conn, scope);
     }
 
     /**
@@ -402,6 +515,22 @@ public class ConfigController {
             if (bytes.length > MAX_CERT_BYTES) {
                 return ResponseEntity.badRequest().body(Map.of("ok", false,
                         "error", "Certificate exceeds the " + (MAX_CERT_BYTES / (1024 * 1024)) + " MB limit"));
+            }
+
+            // An explicit scope=user routes the file into the caller's own store prefix
+            // (users/<key>/certs/...); absent/shared keeps the historical local config-dir certs
+            // tree. A private connection's TLS fields then hold the same relative spelling
+            // (certs/<connection>/<file>) and are resolved against the user prefix at dial time.
+            String scope = UserConnectionStore.normalizedScope(body.get("scope"));
+            if ("user".equals(scope)) {
+                if (!userConnections.availableForCurrentUser()) {
+                    return ResponseEntity.badRequest().body(Map.of("ok", false,
+                            "error", "Sign in with AWS SSO to store a certificate for a private connection"));
+                }
+                String relativePath = userConnections.storeCertificateForCurrentUser(connectionName, filename, bytes);
+                // Log the name only — never the certificate/key/token contents.
+                log.info("Stored private certificate '{}' for connection '{}'", filename, connectionName);
+                return ResponseEntity.ok(Map.of("ok", true, "path", relativePath, "scope", "user"));
             }
 
             Path certsRoot = configDir().resolve("certs");
@@ -474,7 +603,7 @@ public class ConfigController {
         }
         List<String> schemasBefore = conn.getSchemasRaw();
         Long testedAtBefore = conn.getLastTestedAt();
-        ResponseEntity<?> result = doTest(conn);
+        ResponseEntity<?> result = doTest(conn, configDir());
         // doTest() mutates `conn` (a live, config-attached object here) with freshly discovered
         // schemas and a fresh lastTestedAt — persist that so it survives a restart, not just this
         // JVM's lifetime.
@@ -519,6 +648,106 @@ public class ConfigController {
         return project.findEnvironment(envName);
     }
 
+    // ── connection-scope resolution (private user store vs shared global config) ──
+
+    /**
+     * Where a NEW save goes. An explicit {@code "user"}/{@code "shared"} scope wins; absent, a
+     * signed-in caller saves privately ({@code defaultUser}) and an unauthenticated one — the
+     * pre-SSO local workflow — keeps writing the global config. Returns {@code null} only when a
+     * private save was explicitly requested with no session to own it.
+     */
+    private String resolveWriteScope(ConnectionConfig conn, boolean defaultUser) {
+        String explicit = UserConnectionStore.normalizedScope(conn != null ? conn.getScope() : null);
+        if ("shared".equals(explicit)) return "shared";
+        if ("user".equals(explicit)) return userConnections.availableForCurrentUser() ? "user" : null;
+        if (defaultUser && userConnections.availableForCurrentUser()) return "user";
+        return "shared";
+    }
+
+    /**
+     * Where an EXISTING connection lives. An explicit scope wins; absent, whichever scope currently
+     * holds a connection by that name — the private store is checked first.
+     */
+    private String resolveUpdateScope(String connName, ConnectionConfig updated) {
+        String explicit = UserConnectionStore.normalizedScope(updated != null ? updated.getScope() : null);
+        if ("shared".equals(explicit)) return "shared";
+        if ("user".equals(explicit)) return userConnections.availableForCurrentUser() ? "user" : null;
+        return userConnections.existsForCurrentUser(connName) ? "user" : "shared";
+    }
+
+    /** Which scope to dial a test against: explicit if given, else by-name in the private store. */
+    private String scopeForTest(ConnectionConfig conn) {
+        String explicit = UserConnectionStore.normalizedScope(conn != null ? conn.getScope() : null);
+        if (explicit != null) {
+            return ("user".equals(explicit) && userConnections.availableForCurrentUser()) ? "user" : explicit;
+        }
+        if (userConnections.availableForCurrentUser() && conn != null && conn.getName() != null
+                && userConnections.existsForCurrentUser(conn.getName())) {
+            return "user";
+        }
+        return "shared";
+    }
+
+    /**
+     * Fills a blank secret/TLS path in a test body from the caller's stored connection. The editor
+     * cannot pre-fill a masked password or a truststore password, so an untouched edit form submits
+     * empty strings; testing those verbatim would fail a connection that is perfectly valid.
+     */
+    private ConnectionConfig mergeStoredUserSecrets(ConnectionConfig conn) {
+        ConnectionConfig stored = userConnections.findForCurrentUser(conn.getName());
+        if (stored == null) return conn;
+        if (isBlank(conn.getPassword())) conn.setPassword(stored.getPassword());
+        if (isBlank(conn.getTruststorePassword())) conn.setTruststorePassword(stored.getTruststorePassword());
+        // Cert paths point into the user's store prefix; reuse the stored spelling when omitted.
+        if (isBlank(conn.getTrustCertPath())) conn.setTrustCertPath(stored.getTrustCertPath());
+        if (isBlank(conn.getClientCertPath())) conn.setClientCertPath(stored.getClientCertPath());
+        if (isBlank(conn.getClientKeyPath())) conn.setClientKeyPath(stored.getClientKeyPath());
+        if (isBlank(conn.getTruststorePath())) conn.setTruststorePath(stored.getTruststorePath());
+        if (isBlank(conn.getWalletPath())) conn.setWalletPath(stored.getWalletPath());
+        return conn;
+    }
+
+    /**
+     * Dials a test against the right scope. A user-store connection has its certificates and wallet
+     * fetched out of {@code users/<key>/certs/...} into a temp directory first — the JDBC drivers
+     * need real files — and the temp copies are deleted afterwards.
+     */
+    private ResponseEntity<?> doTestForScope(ConnectionConfig conn, String scope) {
+        if ("user".equals(scope) && userConnections.availableForCurrentUser()) {
+            try (UserConnectionStore.MaterializedCerts materialized =
+                         userConnections.materializeCertsForDial(conn)) {
+                Path base = materialized.baseDir() != null ? materialized.baseDir() : configDir();
+                return doTest(materialized.connection(), base);
+            } catch (RuntimeException e) {
+                log.warn("Connection test could not load private TLS material: {}", e.getMessage());
+                return ResponseEntity.ok(Map.of("success", false, "message", e.getMessage()));
+            }
+        }
+        return doTest(conn, configDir());
+    }
+
+    private static ResponseEntity<?> userScopeUnavailable() {
+        return ResponseEntity.badRequest().body(Map.of("error",
+                "Private (user) connections require an AWS SSO session — sign in first, "
+                        + "or save with \"scope\":\"shared\""));
+    }
+
+    private static ResponseEntity<?> validateConnectionForSave(ConnectionConfig conn) {
+        if (conn.getName() == null || conn.getName().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Connection name is required"));
+        }
+        if (conn.getUsername() == null || conn.getUsername().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Username is required"));
+        }
+        if (!conn.isTested()) {
+            return ResponseEntity.badRequest().body(Map.of("error",
+                    "Connection must be tested successfully before saving. Use the Test button first."));
+        }
+        return null;
+    }
+
+    private static boolean isBlank(String s) { return s == null || s.isBlank(); }
+
     /**
      * The app's config directory — the parent of {@code plsql-config.yaml}. This is the base
      * against which {@link ConnectionConfig#buildSslProperties(java.nio.file.Path)} and
@@ -530,8 +759,7 @@ public class ConfigController {
         return parent != null ? parent : Path.of(".");
     }
 
-    private ResponseEntity<?> doTest(ConnectionConfig conn) {
-        Path configDir = configDir();
+    private ResponseEntity<?> doTest(ConnectionConfig conn, Path configDir) {
         // Build the URL with the config dir so TLS-only URL rewrites (e.g. Oracle TCPS / wallet
         // service URLs) are exercised by the test, not just by runtime connections.
         String jdbcUrl = conn.getJdbcUrl(configDir);

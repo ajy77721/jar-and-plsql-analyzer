@@ -1,8 +1,18 @@
 package com.plsqlanalyzer.config;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
 
 public class ConnectionConfig {
+    /**
+     * Request-only routing hint: {@code "user"} (this caller's private connection store) or
+     * {@code "shared"} (the global plsql-config.yaml). It is never persisted — null is omitted
+     * from both the REST and the YAML serialisation — so it carries no state and cannot leak
+     * between the two scopes. Absent means "let the endpoint decide" (new saves default to the
+     * user's own store, existing behaviour for the shared/global path is preserved by scope=shared).
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String scope;
     private String name;
     private String username;
     private String password;
@@ -204,6 +214,10 @@ public class ConnectionConfig {
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+
+    /** Request-only "user" | "shared" routing hint; never persisted. */
+    public String getScope() { return scope; }
+    public void setScope(String scope) { this.scope = scope; }
 
     public String getUsername() { return username; }
     public void setUsername(String username) { this.username = username; }
