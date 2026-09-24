@@ -94,19 +94,27 @@ public class PromptConfigService {
     /** Dump default prompts into the store (if missing) and point PromptTemplates there. */
     @PostConstruct
     public void init() {
-        // ONE listing tells us which of the ~14 templates are already seeded. The alternative is
-        // an exists() per template — 14 HEADs on every boot against object storage.
-        Set<ArtifactKey> present = existingTemplates();
-        for (String name : KNOWN_TEMPLATES) {
-            ArtifactKey key = templateKey(name);
-            if (present.contains(key)) continue;
-            String def = classpathDefault(name);
-            if (def.isEmpty()) continue;
-            try (OutputStream out = openWrite(key)) {
-                out.write(def.getBytes(StandardCharsets.UTF_8));
-            } catch (IOException e) {
-                log.warn("Prompt seed of {} failed: {}", key, e.getMessage());
+        // Startup MUST survive an unreachable store: on a fresh deployment nobody is logged in
+        // yet, so the routing store's S3 calls fail (no pod credentials — per-user tokens arrive
+        // only after a human signs in). The templates still work: classpath defaults are served
+        // until the store becomes reachable and seeding succeeds on a later boot.
+        try {
+            // ONE listing tells us which of the ~14 templates are already seeded. The alternative is
+            // an exists() per template — 14 HEADs on every boot against object storage.
+            Set<ArtifactKey> present = existingTemplates();
+            for (String name : KNOWN_TEMPLATES) {
+                ArtifactKey key = templateKey(name);
+                if (present.contains(key)) continue;
+                String def = classpathDefault(name);
+                if (def.isEmpty()) continue;
+                try (OutputStream out = openWrite(key)) {
+                    out.write(def.getBytes(StandardCharsets.UTF_8));
+                } catch (IOException | RuntimeException e) {
+                    log.warn("Prompt seed of {} failed: {}", key, e.getMessage());
+                }
             }
+        } catch (RuntimeException e) {
+            log.warn("Prompt seeding skipped — store unreachable at startup: {}", e.getMessage());
         }
         pointTemplatesToDataDir();
         log.info("PromptConfigService: prompts store = {} (seeded {} templates)",
