@@ -254,6 +254,7 @@ PA.config = {
                         </div>
                     </div>
                     <div style="display:flex;gap:4px;align-items:center">
+                        ${this._connTlsBadgeHtml(c)}
                         <span class="cfg-conn-type-badge">${this._esc(c.connectionType || 'SERVICE_NAME')}</span>
                         ${c.role && c.role !== 'DEFAULT' ? '<span class="cfg-conn-role-badge">' + this._esc(c.role) + '</span>' : ''}
                         <button class="btn btn-sm" style="padding:0 6px;font-size:10px"
@@ -262,6 +263,40 @@ PA.config = {
                         <button class="cfg-del" onclick="event.stopPropagation();PA.config.deleteConn('${this._esc(c.name)}', '${scope}')" title="Delete">&#10005;</button>
                     </div>
                 </div>`;
+    },
+
+    /**
+     * At-a-glance TLS status chip for one connection row, so a misconfigured/expiring TLS setup is
+     * visible without opening the editor:
+     *  - the SSL mode, conventionally coloured: NONE grey, REQUIRED orange (encrypted but the server
+     *    is not verified), VERIFY_CA / VERIFY_FULL green (the chain — and for FULL the hostname — is
+     *    actually checked);
+     *  - a folder marker when any certificate/wallet/truststore path is set on the connection;
+     *  - a red warning when the last recorded test reported a near-expiry certificate
+     *    (`certExpiryWarning`, set server-side only for a configured PEM trust/client cert). The
+     *    listing carries that flag only when the backend persisted it, so it is rendered only for a
+     *    tested connection (`lastTestedAt` present) and silently skipped otherwise.
+     * Every value is a fixed enum or boolean, never free text, but the mode is escaped anyway.
+     */
+    _connTlsBadgeHtml(c) {
+        const mode = (c.sslMode || 'NONE').toUpperCase();
+        const color = mode === 'NONE' ? 'var(--text-muted)'
+            : (mode === 'REQUIRED' ? '#d9822b' : 'var(--green)');
+        const bg = mode === 'NONE' ? 'var(--badge-gray-bg)'
+            : (mode === 'REQUIRED' ? 'rgba(217,130,43,0.16)' : 'var(--badge-green-bg)');
+        let html = `<span style="font-size:9px;font-weight:700;letter-spacing:0.4px;padding:1px 5px;border-radius:999px;color:${color};background:${bg}"
+                title="TLS mode: ${this._esc(mode)}">${this._esc(mode)}</span>`;
+        const hasCert = Object.keys(this._TLS_CERTS).some(k => {
+            const v = c[this._TLS_CERTS[k].prop];
+            return !!(v && String(v).trim());
+        });
+        if (hasCert) {
+            html += '<span style="font-size:11px" title="Certificate / wallet uploaded">&#128193;</span>';
+        }
+        if (c.lastTestedAt && c.certExpiryWarning === true) {
+            html += '<span style="font-size:11px;color:var(--red)" title="Last test: TLS certificate nearing expiry">&#9888;</span>';
+        }
+        return html;
     },
 
     /** A segmented-control option (radio) for the connection's scope. */
@@ -557,9 +592,15 @@ PA.config = {
             }
         }
 
+        // The upload must target the SAME store the connection itself lives in: the response's
+        // relative `path` is written back into the connection's *_path field and resolved against
+        // that store's prefix when the connection is dialled. `_scopeValue()` is the scope radio
+        // currently selected in the form (preset from the connection being edited, 'user' for a new
+        // one), so a cert uploaded while editing a shared connection still lands in the shared tree.
+        const scope = this._scopeValue();
         if (statusEl) statusEl.textContent = 'Uploading…';
         try {
-            const res = await PA.api.uploadCert(connName, filename, content);
+            const res = await PA.api.uploadCert(connName, filename, content, scope);
             if (res && res.ok && res.path) {
                 const pathInput = document.getElementById(m.pathId);
                 if (pathInput) pathInput.value = res.path;

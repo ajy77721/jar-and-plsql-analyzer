@@ -831,11 +831,22 @@ PA.api = {
 
     // Upload a TLS certificate/wallet for a connection.
     // content: PEM text for .pem, base64 for .zip/.jks → { ok:true, path:"certs/{name}/{filename}" }
-    async uploadCert(connectionName, filename, content) {
+    //
+    // `scope` ('user' | 'shared') tells the server WHICH STORE the artifact belongs to, so the file
+    // must follow the connection it is attached to: a private connection's cert lands under the
+    // caller's own prefix (`users/<identity-key>/certs/<conn>/...`) and a shared one under the
+    // config-dir `certs/<conn>/...` tree. The returned `path` is the relative spelling that goes
+    // straight into the connection's `trustCertPath`/`walletPath`/... field, and it is resolved
+    // against that same prefix at dial time — mismatched scope would leave the saved connection
+    // pointing at a cert the test/runtime can never find. Omitted scope keeps the server's
+    // historical shared-dir behaviour.
+    async uploadCert(connectionName, filename, content, scope) {
+        const body = { filename, content };
+        if (scope) body.scope = scope;
         const res = await fetch(`/api/plsql/config/certs/${encodeURIComponent(connectionName)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename, content })
+            body: JSON.stringify(body)
         });
         if (!res.ok) return PA.apiFail(res);
         return res.json();
