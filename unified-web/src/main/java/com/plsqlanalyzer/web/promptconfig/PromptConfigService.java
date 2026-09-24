@@ -68,6 +68,17 @@ public class PromptConfigService {
     private final Path dataDir;
     private final ArtifactStore store;
 
+    /**
+     * Whether the built-in templates have been dumped into the store yet.
+     *
+     * <p>Seeding is deferred to the first request that actually asks for a template. At startup
+     * nobody is logged in, so the routing store's S3 call would run with no per-user credentials
+     * and fail; and a boot path must never depend on the store being reachable. The volatile flag
+     * plus double-checked locking in {@link #ensureSeeded()} makes "first use seeds exactly once"
+     * cheap on every subsequent call.
+     */
+    private volatile boolean seeded = false;
+
     /** {@code prompts/} — the seeded, editable template store, relative to the data root. */
     private static final String PROMPTS_ROOT = "prompts";
     /** {@code prompt-analysis/} — per-analysis overrides, relative to the data root. */
@@ -91,16 +102,36 @@ public class PromptConfigService {
 
     private OutputStream openWrite(ArtifactKey key) throws IOException { return store.write(key); }
 
-    /** Dump default prompts into the store (if missing) and point PromptTemplates there. */
+    /**
+     * Startup does LOCAL work only — no store call, no network, no credentials.
+     *
+     * <p>On a fresh deployment nobody is logged in yet, so the routing store's S3 calls would fail
+     * (no per-user tokens and no default chain). PromptTemplates is pointed at the store here (a
+     * pure reference swap, no I/O), but the built-in prompts are not written: the classpath
+     * defaults keep serving, and the first authenticated request that asks for a template triggers
+     * {@link #ensureSeeded()} — which now runs with that user's credentials.
+     */
     @PostConstruct
     public void init() {
-        // Startup MUST survive an unreachable store: on a fresh deployment nobody is logged in
-        // yet, so the routing store's S3 calls fail (no pod credentials — per-user tokens arrive
-        // only after a human signs in). The templates still work: classpath defaults are served
-        // until the store becomes reachable and seeding succeeds on a later boot.
+        pointTemplatesToDataDir();
+        seeded = false;
+        log.info("PromptConfigService: prompts store = {} (seeding deferred to first use)",
+                PROMPTS_ROOT);
+    }
+
+    /**
+     * Dumps the built-in default prompts into the store (only the missing ones) exactly once.
+     *
+     * <p>Called from the first point a template is actually requested — a listing, an effective
+     * lookup, a save or a reset — so it only ever runs inside an authenticated request. Never
+     * throws: an unreachable store must not turn a prompt read into a 500, and the classpath
+     * defaults remain the answer until a later call succeeds.
+     */
+    private synchronized void ensureSeeded() {
+        if (seeded) return;                       // fast path, no lock after the first successful seed
         try {
             // ONE listing tells us which of the ~14 templates are already seeded. The alternative is
-            // an exists() per template — 14 HEADs on every boot against object storage.
+            // an exists() per template — 14 HEADs on every call against object storage.
             Set<ArtifactKey> present = existingTemplates();
             for (String name : KNOWN_TEMPLATES) {
                 ArtifactKey key = templateKey(name);
@@ -113,12 +144,13 @@ public class PromptConfigService {
                     log.warn("Prompt seed of {} failed: {}", key, e.getMessage());
                 }
             }
+            seeded = true;
         } catch (RuntimeException e) {
-            log.warn("Prompt seeding skipped — store unreachable at startup: {}", e.getMessage());
+            // Leave seeded=false so a later request (with credentials, and possibly a reachable
+            // store) retries instead of the app serving classpath defaults until the next restart.
+            log.warn("Prompt seeding skipped — store unavailable: {}", e.getMessage());
         }
         pointTemplatesToDataDir();
-        log.info("PromptConfigService: prompts store = {} (seeded {} templates)",
-                PROMPTS_ROOT, KNOWN_TEMPLATES.size());
     }
 
     /** Keys of the templates that already exist in the store, in one round trip. */
@@ -145,7 +177,7 @@ public class PromptConfigService {
     public boolean isKnownTemplate(String name) { return name != null && KNOWN_TEMPLATES.contains(name); }
 
     public List<Map<String, Object>> listTemplates() {
-        pointTemplatesToDataDir();
+        ensureSeeded();
         // ONE listing for the whole set, instead of two exists() per template inside the loop.
         Set<ArtifactKey> present = existingTemplates();
         List<Map<String, Object>> out = new ArrayList<>();
@@ -168,6 +200,7 @@ public class PromptConfigService {
     /** Permanent save — writes into the data-folder store, used by all future analyses. */
     public void saveTemplate(String name, String text) {
         requireKnown(name);
+        ensureSeeded();
         writeText(templateKey(name), text == null ? "" : text, "save template " + name);
         pointTemplatesToDataDir(); // clears PromptTemplates cache
     }
@@ -175,12 +208,14 @@ public class PromptConfigService {
     /** Reset a template back to the built-in default (re-seeds the stored copy). */
     public void resetTemplate(String name) {
         requireKnown(name);
+        ensureSeeded();
         writeText(templateKey(name), classpathDefault(name), "reset template " + name);
         pointTemplatesToDataDir();
     }
 
     /** Effective template text: per-analysis override → stored template → classpath default. */
     public String effectiveTemplate(String name, String analysisName) {
+        ensureSeeded();
         if (analysisName != null && !analysisName.isBlank()) {
             Map<String, String> tmpl = analysisTemplates(analysisName);
             String o = tmpl.get(name);

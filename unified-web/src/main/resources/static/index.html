@@ -442,8 +442,14 @@
         </div>
     </div>
 
-    <div class="footer">Unified Analyzer v1.0 &mdash; <span id="footerPort"></span></div>
+    <div class="footer">Unified Analyzer v1.0 &mdash; <span id="footerPort"></span> &mdash; <span id="dataRegionInfo">data region: loading…</span></div>
     <script>document.getElementById('footerPort').textContent = 'Port ' + location.port;</script>
+    <script>
+      fetch('/api/auth/aws/session').then(r => r.ok ? r.json() : null).then(d => {
+        const el = document.getElementById('dataRegionInfo');
+        if (el && d) el.textContent = 'data: s3://' + (d.bucket || '?') + ' (' + (d.region || '?') + ')';
+      }).catch(() => {});
+    </script>
 
     <script>
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }

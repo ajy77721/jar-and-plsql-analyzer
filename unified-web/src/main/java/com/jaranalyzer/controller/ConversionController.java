@@ -8,7 +8,6 @@ import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.log.LineBufferTail;
 import com.analyzer.storage.log.LogTailBody;
 import com.plsqlanalyzer.web.service.ClaudeProcessRunner;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -95,9 +94,30 @@ public class ConversionController {
         this.store              = store;
     }
 
-    @PostConstruct
-    void init() {
-        loadPersistedJobs();
+    /**
+     * Whether the persisted job history has been read from the store yet.
+     *
+     * <p>The load is deferred to the first request that touches the job map. At startup nobody is
+     * logged in, so the routing store's S3 call would run with no per-user credentials — and a boot
+     * path must never depend on the store being reachable. The volatile flag plus double-checked
+     * locking makes "first use loads exactly once" cheap on every later request.
+     */
+    private volatile boolean jobsLoaded = false;
+
+    /**
+     * Reads the persisted jobs from the store exactly once, on first use.
+     *
+     * <p>Only ever runs inside an authenticated request, so the store call signs with that user's
+     * credentials instead of failing at boot. Never throws: {@link #loadPersistedJobs()} already
+     * swallows an unreachable backend, and the in-memory map stays the answer.
+     */
+    private void ensureJobsLoaded() {
+        if (jobsLoaded) return;                   // fast path, no lock after the first load
+        synchronized (this) {
+            if (jobsLoaded) return;
+            loadPersistedJobs();
+            jobsLoaded = true;
+        }
     }
 
     // ── Claude availability ───────────────────────────────────────────────────
@@ -113,6 +133,7 @@ public class ConversionController {
 
     @GetMapping("/jobs")
     public List<Map<String, Object>> listJobs() {
+        ensureJobsLoaded();
         List<Map<String, Object>> result = new ArrayList<>();
         jobs.values().stream()
             .sorted(Comparator.comparing(j -> -j.startedAt))
@@ -129,6 +150,7 @@ public class ConversionController {
      */
     @GetMapping("/jobs/{jobId}")
     public ResponseEntity<Map<String, Object>> jobStatus(@PathVariable String jobId) {
+        ensureJobsLoaded();
         JobState s = jobs.get(jobId);
         if (s == null) return ResponseEntity.notFound().build();
         return ResponseEntity.ok(s.toMap(true));
@@ -154,6 +176,7 @@ public class ConversionController {
             @PathVariable String jobId,
             @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
 
+        ensureJobsLoaded();
         JobState s = jobs.get(jobId);
         if (s == null) return ResponseEntity.notFound().build();
 
@@ -200,6 +223,7 @@ public class ConversionController {
                                               @RequestParam(required = false) Integer limit,
                                               @RequestParam(required = false) String level,
                                               @RequestParam(required = false) String q) {
+        ensureJobsLoaded();
         JobState s = jobs.get(jobId);
         if (s == null) return ResponseEntity.notFound().build();
         // The progress log is never evicted, so lines ever appended == lines retained.
@@ -222,6 +246,7 @@ public class ConversionController {
                                                @RequestParam(required = false) Integer limit,
                                                @RequestParam(required = false) String level,
                                                @RequestParam(required = false) String q) {
+        ensureJobsLoaded();
         JobState s = jobs.get(jobId);
         if (s == null) return ResponseEntity.notFound().build();
         // Snapshot both together: liveAppended must not advance between reading the list and
@@ -248,6 +273,7 @@ public class ConversionController {
      */
     @GetMapping(value = "/jobs/{jobId}/instruction", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> jobInstruction(@PathVariable String jobId) {
+        ensureJobsLoaded();
         JobState s = jobs.get(jobId);
         if (s == null) return ResponseEntity.notFound().build();
         if (s.instructionMd == null || s.instructionMd.isEmpty()) {
@@ -293,6 +319,7 @@ public class ConversionController {
 
     @GetMapping("/jobs/{jobId}/report")
     public ResponseEntity<Map<String, Object>> jobReport(@PathVariable String jobId) {
+        ensureJobsLoaded();
         JobState s = jobs.get(jobId);
         if (s == null) return ResponseEntity.notFound().build();
         if (s.reportPath == null || s.reportPath.isBlank())
@@ -333,6 +360,7 @@ public class ConversionController {
     // ── Internal ──────────────────────────────────────────────────────────────
 
     private Map<String, Object> startJob(String action, ConversionRequest req) {
+        ensureJobsLoaded();
         String jobId = String.valueOf(counter.getAndIncrement());
         JobState state = new JobState(jobId, action, req);
         jobs.put(jobId, state);
