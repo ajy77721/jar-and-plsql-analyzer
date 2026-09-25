@@ -1,5 +1,7 @@
 package com.plsqlanalyzer.web.parser.service;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -41,6 +43,13 @@ public class AnalysisService {
     private final Path configDir;
     /** Schema-resolver cache prefix: {data}/cache, addressed as a store key. */
     private static final ArtifactKey CACHE_ROOT_KEY = ArtifactKey.of("cache");
+
+    /**
+     * Shared mapper for the header reads. {@link ObjectMapper} is thread-safe once configured, and
+     * the listing reads headers on several threads at once — a per-call mapper (which this used to
+     * build) both costs a serialiser construction per analysis and shares nothing.
+     */
+    private static final ObjectMapper READ_HEADER_MAPPER = new ObjectMapper();
 
     @Value("${app.parser-config-path:config/plsql-config.yaml}")
     private String configPath;
@@ -139,15 +148,29 @@ public class AnalysisService {
      *
      * <p>Same order, same {@link #buildInfo}, same skip-on-unreadable behaviour as before: an
      * analysis caught mid-write drops out of the list rather than failing the whole screen.
+     *
+     * <p>Two things are deliberately different from that original. The per-analysis document read is
+     * the <em>header</em> only — see {@link #readIndexHeader} — and the rows are built concurrently
+     * rather than one after another, so the screen's latency is one round trip plus a parse instead
+     * of a sum over every analysis in the store. Neither changes a field of the response.
      */
     public List<AnalysisInfo> listAnalyses() throws IOException {
-        List<AnalysisInfo> results = new ArrayList<>();
-        for (com.analyzer.storage.repo.AnalysisRef ref
-                : repository.analyses(com.analyzer.storage.repo.AnalysisQuery.Dataset.PLSQL_ANALYSES)) {
+        List<com.analyzer.storage.repo.AnalysisRef> refs =
+                repository.analyses(com.analyzer.storage.repo.AnalysisQuery.Dataset.PLSQL_ANALYSES);
+        // Concurrently, because each row is an independent round trip to the store: the listing
+        // wants one small document per analysis, and paying for them back-to-back is what made the
+        // screen's latency the sum of every analysis ever run. Order is preserved by the map.
+        List<AnalysisInfo> built = com.analyzer.storage.ShallowTree.parallelMap(refs, ref -> {
             try {
-                AnalysisInfo info = buildInfo(ref.name(), ref.index());
-                if (info != null) results.add(info);
-            } catch (IOException ignored) {}
+                return buildInfo(ref.name(), ref.index());
+            } catch (IOException unreadable) {
+                // Caught mid-write: drop the row rather than failing the whole screen.
+                return null;
+            }
+        });
+        List<AnalysisInfo> results = new ArrayList<>(built.size());
+        for (AnalysisInfo info : built) {
+            if (info != null) results.add(info);
         }
         return results;
     }
@@ -863,13 +886,58 @@ public class AnalysisService {
 
     // --- helpers ---
 
+    /** The one root field the listing needs whole: the history row's {@code errorCount} counts it. */
+    private static final String ERRORS_FIELD = "errors";
+
+    /**
+     * Root scalars of an analysis index document, read over the streaming parser.
+     *
+     * <p>{@code api/index.json} is the analysis's <em>summary</em>, and the listing renders only the
+     * ~20 scalars at its root. It nonetheless also carries a {@code nodes[]} array — one entry per
+     * procedure, measured at 53% of the document on this project's largest analysis — plus cycle and
+     * statement summaries that no listing column reads. Materialising the whole document per
+     * analysis was the listing's dominant cost, so every nested value is stepped over
+     * ({@code JsonParser#skipChildren}) instead of parsed, and only {@code errors} is kept.
+     *
+     * <p>The interpretation downstream is untouched: the same {@code textOrDefault} /
+     * {@code intOrDefault} / {@code longOrDefault} helpers read this node, and a field skipped here
+     * is absent from it in exactly the way a field the writer never emitted is absent. Scalar types
+     * are preserved (a number stays a number), so {@code intOrDefault}'s {@code isNumber()} test and
+     * {@code textOrDefault}'s {@code asText()} see what they saw before.
+     */
+    private JsonNode readIndexHeader(ArtifactKey indexKey) throws IOException {
+        ObjectNode scalars = READ_HEADER_MAPPER.createObjectNode();
+        try (InputStream in = openRead(indexKey);
+             JsonParser p = READ_HEADER_MAPPER.getFactory().createParser(in)) {
+            if (p.nextToken() == JsonToken.START_OBJECT) {
+                while (p.nextToken() != JsonToken.END_OBJECT) {
+                    String field = p.currentName();
+                    JsonToken value = p.nextToken();
+                    if (value == null) break;
+                    if (value.isScalarValue()) {
+                        switch (value) {
+                            case VALUE_STRING -> scalars.put(field, p.getText());
+                            case VALUE_NUMBER_INT -> scalars.put(field, p.getLongValue());
+                            case VALUE_NUMBER_FLOAT -> scalars.put(field, p.getDoubleValue());
+                            case VALUE_TRUE -> scalars.put(field, true);
+                            case VALUE_FALSE -> scalars.put(field, false);
+                            case VALUE_NULL -> scalars.putNull(field);
+                            default -> { }
+                        }
+                    } else if (value == JsonToken.START_ARRAY && ERRORS_FIELD.equals(field)) {
+                        scalars.set(field, READ_HEADER_MAPPER.readTree(p));
+                    } else {
+                        p.skipChildren();
+                    }
+                }
+            }
+        }
+        return scalars;
+    }
+
     /** @param indexKey the {@code .../<OBJECT>/api/index.json} key that identifies the analysis */
     private AnalysisInfo buildInfo(String name, ArtifactKey indexKey) throws IOException {
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        JsonNode root;
-        try (InputStream in = openRead(indexKey)) {
-            root = mapper.readTree(in);
-        }
+        JsonNode root = readIndexHeader(indexKey);
 
         AnalysisInfo info = new AnalysisInfo();
         info.setName(name);
