@@ -226,7 +226,16 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
             SsoIdentity identity = state.identity();
             if (token == null || identity == null
                     || identity.accountId() == null || identity.roleName() == null) {
-                return null;
+                // The SSO session has lapsed (the refresh-token grant failed / tokens gone) — this
+                // used to return null, which silently downgraded every store call to the default
+                // chain: on a pod with no ambient credentials that meant a multi-second credential
+                // timeout PER READ (a 115-node detail view crawled at ~2.5s/read = ~2 minutes).
+                // A logged-in user whose session died must be told to sign in again — end the
+                // session and surface it as 401 (the UI's handler opens the login modal).
+                log.warn("[aws-sso] session {} has no usable SSO token — ending it and requiring re-login",
+                        sessionId.substring(0, Math.min(8, sessionId.length())) + "…");
+                registry.end(sessionId);
+                throw new NotAuthenticatedException();
             }
             try {
                 RoleCredentials role = login.ssoClient().getRoleCredentials(b -> b
@@ -234,8 +243,9 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
                         .accountId(identity.accountId())
                         .roleName(identity.roleName())).roleCredentials();
                 if (role == null || role.accessKeyId() == null || role.secretAccessKey() == null) {
-                    log.warn("[aws-sso] GetRoleCredentials returned no usable credentials; using the default chain");
-                    return null;
+                    log.warn("[aws-sso] GetRoleCredentials returned no usable credentials — ending the session and requiring re-login");
+                    registry.end(sessionId);
+                    throw new NotAuthenticatedException();
                 }
                 AwsSessionCredentials minted = AwsSessionCredentials.create(
                         role.accessKeyId(), role.secretAccessKey(), role.sessionToken());
@@ -246,13 +256,16 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
                 log.info("[aws-sso] minted S3 role credentials for account {} role {}",
                         identity.accountId(), identity.roleName());
                 return minted;
+            } catch (NotAuthenticatedException e) {
+                throw e;
             } catch (RuntimeException e) {
                 // Class name only: the SDK exception may carry the request, and the request carries
                 // the bearer token.
-                log.warn("[aws-sso] GetRoleCredentials failed ({}); using the default AWS chain",
+                log.warn("[aws-sso] GetRoleCredentials failed ({}); ending the session and requiring re-login",
                         e.getClass().getSimpleName());
                 cache.remove(sessionId);
-                return null;
+                registry.end(sessionId);
+                throw new NotAuthenticatedException();
             }
         }
     }
