@@ -1052,8 +1052,14 @@ public class PersistenceService {
      * are objects, not files, so the filesystem walk below finds nothing and the dashboard shows
      * an empty list even though every analysis uploaded correctly.
      *
-     * <p>ONE {@code statPrefix} call covers the whole tree. Walking per-JAR with exists()/size()
-     * would be 9 metadata round trips each — ~12.5 s at 50 analyses over S3 versus ~140 ms here.
+     * <p><b>The scan is shallow and the reads are concurrent.</b> One listing per candidate
+     * directory under {@code keyRoot()} finds every analysis root, and the {@code _header.json}
+     * sidecar each row needs is read on {@code ShallowTree}'s pool rather than one after another.
+     * The recursive {@code statPrefix} this replaced answered the same question by returning every
+     * object in the tree — endpoint documents, class trees and sources included — so its payload
+     * grew with what each analysis <em>produced</em>, not with how many analyses exist. Walking
+     * per-JAR with exists()/size() is still the wrong shape for the opposite reason: 9 metadata
+     * round trips each, ~12.5 s at 50 analyses over S3.
      */
     private List<Map<String, Object>> listJarsFromStore() {
         List<Map<String, Object>> result = new ArrayList<>();
@@ -1069,67 +1075,81 @@ public class PersistenceService {
             // completed and was directly readable by id. `listJarIds()` (below) already derives
             // this correctly from `paths.keyRoot()`; mirrored here instead of re-deriving it.
             String[] root = paths.keyRoot();
-            int depth = root.length;
             com.analyzer.storage.ArtifactKey jarsRoot = com.analyzer.storage.ArtifactKey.of(root);
-            var all = store.statPrefix(jarsRoot);
 
-            // Group keys by the analysis id (the segment right under keyRoot()).
-            Map<String, List<com.analyzer.storage.ArtifactKey>> byId = new LinkedHashMap<>();
-            for (var k : all.keySet()) {
-                var segs = k.segments();
-                if (segs.size() < depth + 2) continue;      // <keyRoot>/<id>/<file> at minimum
-                byId.computeIfAbsent(segs.get(depth), x -> new ArrayList<>()).add(k);
-            }
+            // Shallow: one listing per candidate directory directly under keyRoot(), never a scan of
+            // everything each analysis wrote. An analysis root is recognised by its own
+            // analysis.json / analysis_corrected.json, so the walk descends at most one level and
+            // stops — endpoint documents, class trees and sources are never enumerated. Same set of
+            // ids and same order (key order) as the grouping this replaced.
+            List<com.analyzer.storage.ShallowTree.Found> found = com.analyzer.storage.ShallowTree
+                    .findTargets(store, jarsRoot, 1, (dir, children) ->
+                            com.analyzer.storage.ShallowTree.hasFile(children, "analysis.json")
+                                    || com.analyzer.storage.ShallowTree.hasFile(children, "analysis_corrected.json")
+                                    ? com.analyzer.storage.ShallowTree.Decision.RECORD
+                                    : com.analyzer.storage.ShallowTree.Decision.SKIP);
 
-            for (var e : byId.entrySet()) {
-                String id = e.getKey();
-                boolean hasAnalysis = e.getValue().stream().anyMatch(k ->
-                        k.leaf().equals("analysis.json") || k.leaf().equals("analysis_corrected.json"));
-                if (!hasAnalysis) continue;                 // same filter as listJarRoots()
-
-                com.analyzer.storage.ArtifactKey headerKey = paths.headerKey(id);
-                Map<String, Object> entry = null;
-                if (all.containsKey(headerKey)) {
-                    try (InputStream in = store.read(headerKey)) {
-                        @SuppressWarnings("unchecked")
-                        Map<String, Object> h = objectMapper.readValue(in, LinkedHashMap.class);
-                        entry = h;
-                    } catch (Exception ex) {
-                        log.debug("Unreadable header for {}: {}", id, ex.getMessage());
-                    }
-                }
-                if (entry == null) {
-                    // No sidecar (analysis written by an older build, or the sidecar was lost).
-                    // Recover it by streaming the header fields out of the analysis file and
-                    // writing the sidecar back, so this costs the full parse only once. Skipping
-                    // instead would silently drop the JAR from the dashboard.
-                    for (var src : List.of(paths.correctedKey(id), paths.analysisKey(id))) {
-                        if (!all.containsKey(src)) continue;
-                        try {
-                            entry = readHeaderOnly(src);
-                        } catch (IOException ex) {
-                            log.debug("Unreadable analysis for {}: {}", id, ex.getMessage());
-                        }
-                        if (entry != null) break;
-                    }
-                    if (entry == null) continue;            // nothing listable here
-                    try (OutputStream out = openWrite(headerKey)) {
-                        objectMapper.writeValue(out, entry);
-                    } catch (IOException ignore) { /* cache miss next time, not fatal */ }
-                }
-                entry.putIfAbsent("analysisMode",
-                        all.containsKey(paths.correctedKey(id)) ? "CORRECTED" : "STATIC");
-                entry.put("id", id);
-                entry.putIfAbsent("jarName", id + (paths instanceof WarDataPaths ? ".war" : ".jar"));
-                entry.put("hasPerJarConfig", all.containsKey(paths.domainConfigKey(id)));
-                entry.put("hasConnections", all.containsKey(paths.connectionsKey(id)));
-                entry.putIfAbsent("claudeStatus", "IDLE");
-                result.add(entry);
+            // The per-analysis header read is an independent round trip each; run them together.
+            List<Map<String, Object>> rows = com.analyzer.storage.ShallowTree.parallelMap(found,
+                    f -> listOneJar(f.dir().leaf(), f));
+            for (Map<String, Object> row : rows) {
+                if (row != null) result.add(row);
             }
         } catch (Exception e) {
             log.warn("Store-backed listJars failed: {}", e.toString());
         }
         return result;
+    }
+
+    /**
+     * One JAR's dashboard row, built from its own shallow listing.
+     *
+     * <p>{@code found} carries the direct children of {@code <keyRoot>/<id>/}, which is where every
+     * key this row needs lives — the {@code _header.json} sidecar, the two analysis documents and the
+     * per-JAR config — so deciding what is present costs no round trip beyond the listing the walk
+     * already made.
+     *
+     * @return the row, or null when the directory holds nothing listable
+     */
+    private Map<String, Object> listOneJar(String id, com.analyzer.storage.ShallowTree.Found found) {
+        com.analyzer.storage.ArtifactKey headerKey = paths.headerKey(id);
+        Map<String, Object> entry = null;
+        if (found.has("_header.json")) {
+            try (InputStream in = store.read(headerKey)) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> h = objectMapper.readValue(in, LinkedHashMap.class);
+                entry = h;
+            } catch (Exception ex) {
+                log.debug("Unreadable header for {}: {}", id, ex.getMessage());
+            }
+        }
+        if (entry == null) {
+            // No sidecar (analysis written by an older build, or the sidecar was lost).
+            // Recover it by streaming the header fields out of the analysis file and
+            // writing the sidecar back, so this costs the full parse only once. Skipping
+            // instead would silently drop the JAR from the dashboard.
+            for (var src : List.of(paths.correctedKey(id), paths.analysisKey(id))) {
+                if (!found.has(src.leaf())) continue;
+                try {
+                    entry = readHeaderOnly(src);
+                } catch (IOException ex) {
+                    log.debug("Unreadable analysis for {}: {}", id, ex.getMessage());
+                }
+                if (entry != null) break;
+            }
+            if (entry == null) return null;            // nothing listable here
+            try (OutputStream out = openWrite(headerKey)) {
+                objectMapper.writeValue(out, entry);
+            } catch (IOException ignore) { /* cache miss next time, not fatal */ }
+        }
+        entry.putIfAbsent("analysisMode",
+                found.has("analysis_corrected.json") ? "CORRECTED" : "STATIC");
+        entry.put("id", id);
+        entry.putIfAbsent("jarName", id + (paths instanceof WarDataPaths ? ".war" : ".jar"));
+        entry.put("hasPerJarConfig", found.has("domain-config.json"));
+        entry.put("hasConnections", found.has("connections.json"));
+        entry.putIfAbsent("claudeStatus", "IDLE");
+        return entry;
     }
 
     /**

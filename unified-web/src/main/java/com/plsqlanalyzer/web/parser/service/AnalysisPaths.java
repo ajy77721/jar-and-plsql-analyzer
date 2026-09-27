@@ -131,6 +131,16 @@ public final class AnalysisPaths {
     /** Parser output subtree: {@code {root}/plsql-parse}. */
     public static final String PARSE_ROOT = "plsql-parse";
 
+    /**
+     * Deepest an analysis can sit below {@link #PARSE_ROOT}, in path segments.
+     *
+     * <p>{@link #name} emits at most {@code DBTYPE/PROJECT/ENV/OBJECT} and drops the empty ones, so
+     * the depth actually <em>varies</em> — a context-free analysis lands one segment down, a fully
+     * scoped one four. A shallow discovery walk ({@code ShallowTree}) needs the bound to know when
+     * to stop looking; assuming a fixed depth would miss the shallow layouts.
+     */
+    public static final int MAX_NAME_SEGMENTS = 4;
+
     /** Claude sidecar subtree: {@code {root}/plsql} (see DirPropertyResolver's plsql.data-dir). */
     public static final String CLAUDE_ROOT = "plsql";
 

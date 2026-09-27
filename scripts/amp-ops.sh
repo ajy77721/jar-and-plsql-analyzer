@@ -6,6 +6,7 @@
 #   amp-ops.sh follow              stream the app log live
 #   amp-ops.sh tree [path]         show the pod's /data folder structure (default /data)
 #   amp-ops.sh clean-logs [days]   delete rolled log files older than N days (default 7; keeps the live log)
+#   amp-ops.sh clear-cache         empty the pod's artifact cache ({data}/cache/store); prints freed bytes
 #   amp-ops.sh health              pod status, restarts, readiness, recent events, disk usage
 #   amp-ops.sh restart             restart the deployment (new rollout)
 #
@@ -39,6 +40,18 @@ case "$1" in
     echo "Deleting rolled log archives older than $DAYS day(s) in $MODE pod $POD:"
     $K -n $NS exec "${POD:-NO_POD}" -c amp-analyzer -- sh -c \
       "find \${DATA_DIR:-/data}/logs -name '*.gz' -mtime +$DAYS -print -delete 2>/dev/null; find \${DATA_DIR:-/data}/logs -name '*.log.*' -mtime +$DAYS -print -delete 2>/dev/null" || echo "nothing to clean"
+    ;;
+  clear-cache)
+    # The cache is {app.data-dir}/cache/store/, a read-through mirror of the configured store —
+    # safe to empty at any time; the next read of any artifact refetches and re-mirrors it.
+    $K -n $NS exec "${POD:-NO_POD}" -c amp-analyzer -- sh -c '
+      DIR="${DATA_DIR:-/data}/cache/store"
+      if [ ! -d "$DIR" ]; then echo "No cache dir at $DIR (nothing to clear)."; exit 0; fi
+      BEFORE=$(du -sk "$DIR" 2>/dev/null | cut -f1); BEFORE=${BEFORE:-0}
+      find "$DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+      AFTER=$(du -sk "$DIR" 2>/dev/null | cut -f1); AFTER=${AFTER:-0}
+      echo "Cleared $DIR: freed $(( (BEFORE - AFTER) * 1024 )) bytes (${BEFORE} KiB -> ${AFTER} KiB)"
+    '
     ;;
   health)
     echo "═══ amp-analyzer health ($MODE) ═══"

@@ -3,6 +3,7 @@ package com.analyzer.repo;
 import com.analyzer.storage.AnalysisRepository;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.ShallowTree;
 import com.analyzer.storage.repo.AnalysisQuery;
 import com.analyzer.storage.repo.AnalysisRef;
 import com.analyzer.storage.repo.RowStream;
@@ -22,9 +23,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -100,38 +99,49 @@ public class ArtifactScanRepository implements AnalysisRepository {
     /**
      * Every PL/SQL analysis in the store, newest first.
      *
-     * <p>ONE {@code statPrefix} call for the whole tree, then an mtime sort. Both halves are moved
-     * verbatim from {@code AnalysisService}: the directory walk they replaced probed
-     * {@code Files.isRegularFile} per candidate directory, ~10 µs locally but ~25 ms per HEAD on
-     * object storage — minutes for a few thousand analyses.
+     * <p><b>The listing is shallow.</b> It asks the tree for analysis directories only — a
+     * depth-bounded, level-parallel walk of one shallow listing per <em>directory</em>
+     * ({@link ShallowTree}), stopping at each analysis root — instead of one recursive scan that
+     * returned every object in the tree (every per-node document, statement and source file) and
+     * then filtered the keys client-side. Same set of analyses, same order, same skip-on-mid-write
+     * behaviour: a directory whose {@code api/index.json} is absent is not listable yet, so it drops
+     * out rather than failing the screen.
      *
-     * <p>An unreadable listing is logged and answered with an empty list rather than thrown,
-     * because that is what the picker did before and a history screen that 500s because one
-     * analysis is mid-write is worse than one that shows the rest.
+     * <p>The per-analysis {@code lastModified} — an object-store HEAD each — is issued concurrently
+     * on the same pool; it is what the newest-first sort reads, and it was previously N sequential
+     * round trips.
+     *
+     * <p>An unreadable listing is logged and answered with an empty list rather than thrown, because
+     * that is what the picker did before and a history screen that 500s because one analysis is
+     * mid-write is worse than one that shows the rest.
      */
     @Override
     public List<AnalysisRef> analyses(AnalysisQuery.Dataset dataset) throws IOException {
         if (dataset != AnalysisQuery.Dataset.PLSQL_ANALYSES) {
             throw new IllegalArgumentException("analyses() does not serve " + dataset);
         }
-        Map<String, ArtifactKey> byName = new LinkedHashMap<>();
+        List<ArtifactKey> dirs;
         try {
-            for (ArtifactKey k : parserStore.statPrefix(ArtifactKey.of(AnalysisPaths.PARSE_ROOT)).keySet()) {
-                List<String> segs = k.segments();
-                int n = segs.size();
-                if (n >= 4 && "index.json".equals(segs.get(n - 1)) && "api".equals(segs.get(n - 2))) {
-                    byName.put(AnalysisPaths.nameOfKey(k.parent().parent()), k);
-                }
-            }
+            dirs = ShallowTree.findTargets(parserStore, ArtifactKey.of(AnalysisPaths.PARSE_ROOT),
+                    AnalysisPaths.MAX_NAME_SEGMENTS, (dir, children) -> {
+                        if (!ShallowTree.hasDir(children, "api")) {
+                            return ShallowTree.Decision.DESCEND;
+                        }
+                        // Inside an analysis (or one caught mid-write): its api/index.json IS the
+                        // answer, and never a reason to look further down.
+                        return parserStore.exists(dir.resolve("api", "index.json"))
+                                ? ShallowTree.Decision.RECORD
+                                : ShallowTree.Decision.SKIP;
+                    }).stream().map(ShallowTree.Found::dir).toList();
         } catch (IOException e) {
             log.warn("[repo] listing PL/SQL analyses failed: {}", e.getMessage());
             return List.of();
         }
 
-        List<AnalysisRef> refs = new ArrayList<>(byName.size());
-        for (Map.Entry<String, ArtifactKey> e : byName.entrySet()) {
-            refs.add(new AnalysisRef(e.getKey(), e.getValue(), parserStore.lastModified(e.getValue())));
-        }
+        List<ArtifactKey> indexKeys = dirs.stream().map(d -> d.resolve("api", "index.json")).toList();
+        List<AnalysisRef> refs = ShallowTree.parallelMap(indexKeys, index ->
+                new AnalysisRef(AnalysisPaths.nameOfKey(index.parent().parent()), index,
+                        parserStore.lastModified(index)));
         // Newest first. The timestamp used to be the directory mtime; object stores have no
         // directories, so the index.json mtime stands in — it is written last in every run, so the
         // ordering is the same.
