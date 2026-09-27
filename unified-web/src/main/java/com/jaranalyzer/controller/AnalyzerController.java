@@ -471,7 +471,9 @@ public class AnalyzerController {
 
     @GetMapping
     public List<Map<String, Object>> listJars() {
-        List<Map<String, Object>> jars = persistenceService.listJars();
+        // Strict: a store failure must surface as an error (mapped by ApiExceptionAdvice), never as
+        // a 200 [] that the screen renders as "no analyses".
+        List<Map<String, Object>> jars = persistenceService.listJarsStrict();
         // Enrich each JAR with Claude session status
         for (Map<String, Object> jar : jars) {
             String jarName = (String) jar.get("jarName");

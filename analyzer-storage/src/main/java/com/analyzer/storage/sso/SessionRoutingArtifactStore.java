@@ -4,6 +4,7 @@ import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.LocalHandle;
+import com.analyzer.storage.RequestScopedArtifactStore;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -44,7 +45,7 @@ import java.util.stream.Stream;
  * beyond the single call — because the resolution is a map lookup and a volatile read, and caching a
  * per-thread delegate would pin a user's target across a reconnect.
  */
-public final class SessionRoutingArtifactStore implements ArtifactStore {
+public final class SessionRoutingArtifactStore implements RequestScopedArtifactStore {
 
     /** Which registered half of a user's built stores this façade fronts. */
     private final String name;
@@ -107,6 +108,27 @@ public final class SessionRoutingArtifactStore implements ArtifactStore {
      */
     public CapturedStores captureCurrent() {
         return swapper.captureCurrent();
+    }
+
+    /**
+     * The session id this thread resolves to, re-installable on a pool worker, so a fan-out of store
+     * calls routes every worker as the requesting user rather than falling through to
+     * {@link #defaultStore} on threads that have no request context of their own.
+     *
+     * <p>Only the session id is carried, not credentials or a resolved store: on a worker the same
+     * {@code registry -> swapper} lookup the request thread would have done then runs, so the worker
+     * gets exactly the user's store — and, for a user who is logged in but has not connected a bucket
+     * yet, exactly the same {@code defaultStore} fallback with the same user-signed credentials. The
+     * id is opaque and server-generated and never rendered; no credential material crosses threads.
+     *
+     * <p>A thread with no session (a background job, a CLI) returns {@link Scope#NONE}, so those paths
+     * keep the shared default target unchanged.
+     */
+    @Override
+    public Scope captureScope() {
+        String sessionId = currentSession.currentSessionId();
+        if (sessionId == null) return Scope.NONE;
+        return () -> currentSession.propagate(sessionId);
     }
 
     // ── pure delegation — no other behaviour lives here ────────────────────────

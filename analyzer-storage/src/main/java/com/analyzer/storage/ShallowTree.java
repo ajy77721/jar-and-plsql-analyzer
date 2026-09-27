@@ -1,5 +1,7 @@
 package com.analyzer.storage;
 
+import com.analyzer.storage.RequestScopedArtifactStore.Scope;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -126,14 +128,26 @@ public final class ShallowTree {
      * were previously paid one after another; running them concurrently is what turns a listing's
      * latency from "one round trip per analysis" into "one round trip, rounded up".
      *
+     * <p>{@code store} is the store {@code fn} reads through. It is captured <b>here, on the calling
+     * thread</b>, so every worker task runs inside the caller's routing scope — see
+     * {@link RequestScopedArtifactStore}. Without that capture the reads would resolve on threads
+     * with no request context, route to the shared default store, and (with no ambient pod
+     * credentials) fail into an empty result. Pass the same store {@code fn} itself uses.
+     *
      * <p>The result is a fresh, mutable list — callers sort it (the analyses listing is newest-first,
      * which is a property of the sort, not of the walk's order).
      */
-    public static <I, O> List<O> parallelMap(List<I> input, IoFunction<I, O> fn) throws IOException {
+    public static <I, O> List<O> parallelMap(ArtifactStore store, List<I> input,
+                                             IoFunction<I, O> fn) throws IOException {
         if (input.isEmpty()) return new ArrayList<>();
+        Scope scope = scopeOf(store);
         List<Future<O>> futures = new ArrayList<>(input.size());
         for (I in : input) {
-            futures.add(POOL.submit(() -> fn.apply(in)));
+            futures.add(POOL.submit(() -> {
+                try (AutoCloseable ctx = scope.install()) {
+                    return fn.apply(in);
+                }
+            }));
         }
         List<O> out = new ArrayList<>(futures.size());
         for (Future<O> f : futures) {
@@ -180,6 +194,11 @@ public final class ShallowTree {
      * <p>Ordered by key, so a listing screen's row order cannot depend on which concurrent listing
      * happened to finish first.
      *
+     * <p>The store's request scope is captured on the calling thread and installed on every pool
+     * task (both the listing and the {@code rule}'s own {@code exists}/{@code list} calls), so a
+     * walk driven by a logged-in user routes each worker as that user instead of falling through to
+     * the shared default target. See {@link RequestScopedArtifactStore}.
+     *
      * @param maxDepth deepest target depth relative to {@code root} (the root itself is depth 0)
      */
     public static List<Found> findTargets(ArtifactStore store,
@@ -188,6 +207,7 @@ public final class ShallowTree {
                                           DirRule rule) throws IOException {
         List<Found> targets = new ArrayList<>();
         List<ArtifactKey> frontier = List.of(root);
+        Scope scope = scopeOf(store);
 
         // depth 0 is the root; a target is one level or more below it, so the deepest directory that
         // still has to be listed is maxDepth.
@@ -195,11 +215,13 @@ public final class ShallowTree {
             List<Future<Listing>> futures = new ArrayList<>(frontier.size());
             for (ArtifactKey dir : frontier) {
                 futures.add(POOL.submit(() -> {
-                    List<ArtifactEntry> children = new ArrayList<>();
-                    try (Stream<ArtifactEntry> s = store.list(dir, false)) {
-                        s.forEach(children::add);
+                    try (AutoCloseable ctx = scope.install()) {
+                        List<ArtifactEntry> children = new ArrayList<>();
+                        try (Stream<ArtifactEntry> s = store.list(dir, false)) {
+                            s.forEach(children::add);
+                        }
+                        return new Listing(dir, children, rule.decide(dir, children));
                     }
-                    return new Listing(dir, children, rule.decide(dir, children));
                 }));
             }
 
@@ -222,6 +244,17 @@ public final class ShallowTree {
     }
 
     private record Listing(ArtifactKey dir, List<ArtifactEntry> children, Decision decision) {
+    }
+
+    /**
+     * The caller's routing scope for {@code store}, or a no-op scope for a store that does not
+     * depend on thread-bound request context (local, MongoDB, in-memory). Captured on the calling
+     * thread, before any task is submitted.
+     */
+    private static Scope scopeOf(ArtifactStore store) {
+        return store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope()
+                : Scope.NONE;
     }
 
     private static Listing await(Future<Listing> f) throws IOException {

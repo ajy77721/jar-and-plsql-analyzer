@@ -1062,41 +1062,68 @@ public class PersistenceService {
      * round trips each, ~12.5 s at 50 analyses over S3.
      */
     private List<Map<String, Object>> listJarsFromStore() {
-        List<Map<String, Object>> result = new ArrayList<>();
         try {
-            // Real bug, found live: this used to hardcode `ArtifactKey.of("jar")` and always group
-            // by `segs.get(1)` — correct ONLY for the plain JAR bean, whose keyRoot() is a single
-            // segment ("jar"). WarDataPaths overrides keyRoot() to `{"jar","war"}` (WAR artifacts
-            // live at jar/war/<warName>/..., 4 segments deep, per its own doc comment: "Without
-            // this, WAR artifacts land in the JAR namespace"). Scanning "jar" and grouping by
-            // index 1 therefore collapsed every WAR analysis into one bogus group keyed by the
-            // literal string "war", and the real warName (segs.get(2)) was never read — the WAR
-            // list screen always showed empty ("No JARs analyzed yet") even though every upload
-            // completed and was directly readable by id. `listJarIds()` (below) already derives
-            // this correctly from `paths.keyRoot()`; mirrored here instead of re-deriving it.
-            String[] root = paths.keyRoot();
-            com.analyzer.storage.ArtifactKey jarsRoot = com.analyzer.storage.ArtifactKey.of(root);
-
-            // Shallow: one listing per candidate directory directly under keyRoot(), never a scan of
-            // everything each analysis wrote. An analysis root is recognised by its own
-            // analysis.json / analysis_corrected.json, so the walk descends at most one level and
-            // stops — endpoint documents, class trees and sources are never enumerated. Same set of
-            // ids and same order (key order) as the grouping this replaced.
-            List<com.analyzer.storage.ShallowTree.Found> found = com.analyzer.storage.ShallowTree
-                    .findTargets(store, jarsRoot, 1, (dir, children) ->
-                            com.analyzer.storage.ShallowTree.hasFile(children, "analysis.json")
-                                    || com.analyzer.storage.ShallowTree.hasFile(children, "analysis_corrected.json")
-                                    ? com.analyzer.storage.ShallowTree.Decision.RECORD
-                                    : com.analyzer.storage.ShallowTree.Decision.SKIP);
-
-            // The per-analysis header read is an independent round trip each; run them together.
-            List<Map<String, Object>> rows = com.analyzer.storage.ShallowTree.parallelMap(found,
-                    f -> listOneJar(f.dir().leaf(), f));
-            for (Map<String, Object> row : rows) {
-                if (row != null) result.add(row);
-            }
+            return scanJarsFromStore();
         } catch (Exception e) {
+            // A storage failure is not "no analyses": the caller (and the operator reading the log)
+            // must be able to tell them apart. The lenient entry point stays empty-on-error for the
+            // internal callers that prefer a degraded screen; the HTTP listing uses listJarsStrict.
             log.warn("Store-backed listJars failed: {}", e.toString());
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * The scan {@link #listJarsFromStore()} wraps: shallow discovery plus a concurrent header read
+     * per analysis. Throws when the store cannot be reached, so a caller that must not confuse
+     * "unreachable" with "empty" can say so.
+     *
+     * <p>The store's request scope is captured on this thread by {@code ShallowTree} before its
+     * workers start, so each pool thread routes as the requesting user rather than falling through
+     * to the shared default target — which on a pod with no ambient credentials failed with an
+     * {@code SdkClientException} and produced an empty list for a user whose data was right there.
+     */
+    private List<Map<String, Object>> scanJarsFromStore() throws Exception {
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        // Real bug, found live: this used to hardcode `ArtifactKey.of("jar")` and always group
+        // by `segs.get(1)` — correct ONLY for the plain JAR bean, whose keyRoot() is a single
+        // segment ("jar"). WarDataPaths overrides keyRoot() to `{"jar","war"}` (WAR artifacts
+        // live at jar/war/<warName>/..., 4 segments deep, per its own doc comment: "Without
+        // this, WAR artifacts land in the JAR namespace"). Scanning "jar" and grouping by
+        // index 1 therefore collapsed every WAR analysis into one bogus group keyed by the
+        // literal string "war", and the real warName (segs.get(2)) was never read — the WAR
+        // list screen always showed empty ("No JARs analyzed yet") even though every upload
+        // completed and was directly readable by id. `listJarIds()` (below) already derives
+        // this correctly from `paths.keyRoot()`; mirrored here instead of re-deriving it.
+        String[] root = paths.keyRoot();
+        com.analyzer.storage.ArtifactKey jarsRoot = com.analyzer.storage.ArtifactKey.of(root);
+
+        // Shallow: one listing per candidate directory directly under keyRoot(), never a scan of
+        // everything each analysis wrote. An analysis root is recognised by its own
+        // analysis.json / analysis_corrected.json, so the walk descends at most one level and
+        // stops — endpoint documents, class trees and sources are never enumerated. Same set of
+        // ids and same order (key order) as the grouping this replaced.
+        //
+        // Real bug, found live alongside the routing fault: a directory WITHOUT an analysis.json
+        // used to be SKIPped. That is every directory at the root level — an analysis lives at
+        // jar/<id>/analysis.json, one level below the `jar` walk root — so the walk pruned the very
+        // directories it needed to look inside and listed nothing even against a reachable store.
+        // The rule must be RECORD at an analysis root and DESCEND otherwise; the depth bound (1)
+        // is what stops the descent, so a non-analysis directory costs one listing and no more.
+        List<com.analyzer.storage.ShallowTree.Found> found = com.analyzer.storage.ShallowTree
+                .findTargets(store, jarsRoot, 1, (dir, children) ->
+                        com.analyzer.storage.ShallowTree.hasFile(children, "analysis.json")
+                                || com.analyzer.storage.ShallowTree.hasFile(children, "analysis_corrected.json")
+                                ? com.analyzer.storage.ShallowTree.Decision.RECORD
+                                : com.analyzer.storage.ShallowTree.Decision.DESCEND);
+
+        // The per-analysis header read is an independent round trip each; run them together, on the
+        // requesting user's routing (the store is passed so ShallowTree captures the scope).
+        List<Map<String, Object>> rows = com.analyzer.storage.ShallowTree.parallelMap(store, found,
+                f -> listOneJar(f.dir().leaf(), f));
+        for (Map<String, Object> row : rows) {
+            if (row != null) result.add(row);
         }
         return result;
     }
@@ -1159,6 +1186,26 @@ public class PersistenceService {
      */
     public List<Map<String, Object>> listJars() {
         return listJarsFromStore();
+    }
+
+    /**
+     * The same listing, but a storage failure <b>propagates</b> instead of answering empty.
+     *
+     * <p>Used by the {@code GET /api/jar/jars} and {@code GET /api/war/wars} endpoints so a browser
+     * can never mistake "the store could not be read" for "you have no analyses": the failure is
+     * raised as {@link StorageListingException} and mapped to a non-2xx body by the web layer. The
+     * lenient {@link #listJars()} remains for internal callers that want a degraded screen.
+     */
+    public List<Map<String, Object>> listJarsStrict() {
+        try {
+            return scanJarsFromStore();
+        } catch (StorageListingException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("Store-backed listJars failed: {}", e.toString());
+            throw new StorageListingException(
+                    "Listing analyses from the artifact store failed: " + e, e);
+        }
     }
 
     private Map<String, Object> readHeaderOnly(com.analyzer.storage.ArtifactKey key)

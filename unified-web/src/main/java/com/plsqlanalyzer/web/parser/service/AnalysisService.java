@@ -160,7 +160,7 @@ public class AnalysisService {
         // Concurrently, because each row is an independent round trip to the store: the listing
         // wants one small document per analysis, and paying for them back-to-back is what made the
         // screen's latency the sum of every analysis ever run. Order is preserved by the map.
-        List<AnalysisInfo> built = com.analyzer.storage.ShallowTree.parallelMap(refs, ref -> {
+        List<AnalysisInfo> built = com.analyzer.storage.ShallowTree.parallelMap(store, refs, ref -> {
             try {
                 return buildInfo(ref.name(), ref.index());
             } catch (IOException unreadable) {

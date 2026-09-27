@@ -234,7 +234,8 @@ public class WarAnalyzerController {
 
     @GetMapping
     public List<Map<String, Object>> listWars() {
-        List<Map<String, Object>> wars = warPersistenceService.listJars();
+        // Strict, like the JAR listing: a store failure is an error, not an empty WAR list.
+        List<Map<String, Object>> wars = warPersistenceService.listJarsStrict();
         for (Map<String, Object> war : wars) {
             String warName = (String) war.get("jarName");
             if (warName != null) {

@@ -51,14 +51,51 @@ public class CurrentHttpSession {
     private volatile Method currentRequestAttributes;
 
     /**
+     * A session id propagated onto a pooled worker thread by a fan-out (see
+     * {@code RequestScopedArtifactStore}). A request thread never sets it, so on the request path
+     * this is empty and the reflective lookup below answers as before.
+     */
+    private static final ThreadLocal<String> PROPAGATED = new ThreadLocal<>();
+
+    /**
      * The current thread's {@code HttpSession} id, or {@code null} when the thread is not serving a
      * request with a session.
      *
      * <p>Deliberately uses {@code getSession(false)}: creating a session as a side effect of an S3
      * read would defeat the "a request with no session-bound state routes to the default store"
      * rule, so a request that has not opted into an SSO flow must not have one conjured for it here.
+     *
+     * <p>A session id propagated onto this thread by a fan-out (see {@link #propagate}) wins: the
+     * worker is serving the request that propagated it, so it must answer as that request's session
+     * rather than as the context-free thread its pool slot happens to be.
      */
     public String currentSessionId() {
+        String propagated = PROPAGATED.get();
+        if (propagated != null) return propagated;
+        return requestBoundSessionId();
+    }
+
+    /**
+     * Binds {@code sessionId} to the current thread so that {@link #currentSessionId()} answers with
+     * it, and returns a handle whose {@code close()} unbinds it. A nested install restores whatever
+     * was bound before, so one fan-out cannot leak its session into the next on a shared worker.
+     *
+     * <p>Intended to be called by a pool worker for the duration of one task, with a session id the
+     * request thread already resolved. A {@code null}/blank id installs nothing (the no-session
+     * fallback must stay exactly as it was), and the returned handle is always safe to close.
+     */
+    public AutoCloseable propagate(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return () -> { };
+        String previous = PROPAGATED.get();
+        PROPAGATED.set(sessionId);
+        return () -> {
+            if (previous == null) PROPAGATED.remove();
+            else PROPAGATED.set(previous);
+        };
+    }
+
+    /** The thread's real request-bound session id, ignoring any propagated override. */
+    private String requestBoundSessionId() {
         try {
             Object attributes = currentRequestAttributes();
             if (attributes == null) return null;

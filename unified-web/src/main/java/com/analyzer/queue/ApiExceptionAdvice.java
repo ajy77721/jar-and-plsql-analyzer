@@ -1,6 +1,7 @@
 package com.analyzer.queue;
 
 import com.analyzer.storage.sso.NotAuthenticatedException;
+import com.jaranalyzer.service.StorageListingException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -37,5 +38,19 @@ public class ApiExceptionAdvice {
         body.put("ok", false);
         body.put("error", NotAuthenticatedException.MESSAGE);
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(body);
+    }
+
+    /**
+     * Maps a listing that could not read the artifact store to HTTP 503 with the same
+     * {@code {ok:false,error}} shape the UI already understands, instead of a 200 {@code []} the
+     * screen would render as "no analyses". 503 (not 500) because the store being unreachable is a
+     * transient backend condition, not a defect in the request.
+     */
+    @ExceptionHandler(StorageListingException.class)
+    public ResponseEntity<Map<String, Object>> onStorageListing(StorageListingException e) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ok", false);
+        body.put("error", e.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
     }
 }

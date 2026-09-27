@@ -90,7 +90,7 @@ import java.util.stream.Stream;
  * and handing callers a shared cache file they might mutate is not worth the saved download.
  * Ranged reads are cached only when the whole artifact already is.
  */
-public final class CachingArtifactStore implements ArtifactStore {
+public final class CachingArtifactStore implements RequestScopedArtifactStore {
 
     private static final Logger log = LoggerFactory.getLogger(CachingArtifactStore.class);
 
@@ -156,6 +156,19 @@ public final class CachingArtifactStore implements ArtifactStore {
     /** The store this cache wraps — reads fall through to it on a miss, mutations always do. */
     public ArtifactStore delegate() {
         return delegate;
+    }
+
+    /**
+     * The cache wraps the per-user router, so a fan-out must capture the routing scope from the
+     * router inside — capturing from the cache itself would carry nothing. A wrapped store that has
+     * no request-scoped routing (local, MongoDB) yields {@link Scope#NONE}, leaving those paths
+     * exactly as they were.
+     */
+    @Override
+    public Scope captureScope() {
+        return delegate instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope()
+                : Scope.NONE;
     }
 
     /** This feature's cache directory, {@code {app.data-dir}/cache/store/{storeName}/}. */

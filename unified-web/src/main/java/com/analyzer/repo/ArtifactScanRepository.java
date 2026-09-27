@@ -139,7 +139,7 @@ public class ArtifactScanRepository implements AnalysisRepository {
         }
 
         List<ArtifactKey> indexKeys = dirs.stream().map(d -> d.resolve("api", "index.json")).toList();
-        List<AnalysisRef> refs = ShallowTree.parallelMap(indexKeys, index ->
+        List<AnalysisRef> refs = ShallowTree.parallelMap(parserStore, indexKeys, index ->
                 new AnalysisRef(AnalysisPaths.nameOfKey(index.parent().parent()), index,
                         parserStore.lastModified(index)));
         // Newest first. The timestamp used to be the directory mtime; object stores have no
