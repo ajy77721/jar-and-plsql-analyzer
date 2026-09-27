@@ -84,7 +84,9 @@ public final class InMemoryArtifactStore implements ArtifactStore {
         byte[] b = objects.get(key.toString());
         if (b == null) throw new java.io.FileNotFoundException("No such artifact: " + key);
         int from = (int) Math.min(offset, b.length);
-        int len = (int) Math.min(length, b.length - (long) from);
+        // A negative length means "to end of object", matching the interface contract and the
+        // other backends; treating it as zero silently returned an empty stream.
+        int len = length < 0 ? b.length - from : (int) Math.min(length, b.length - (long) from);
         return new ByteArrayInputStream(b, from, Math.max(len, 0));
     }
 

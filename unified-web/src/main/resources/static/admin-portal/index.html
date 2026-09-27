@@ -265,6 +265,7 @@
     <header class="top">
         <h1>AMP Admin Portal</h1>
         <span class="spacer"></span>
+        <button id="cache-clear-btn" class="btn small" type="button">Clear cache</button>
         <button id="refresh-btn" class="btn small" type="button">Refresh</button>
         <button id="logout-btn" class="btn small" type="button">Log out</button>
     </header>
@@ -1106,6 +1107,28 @@
             await api('/api/admin/audit/clear', { method: 'POST' });
             toast('Audit history cleared.');
             loadAudit(true);
+        } catch (e) {
+            if (e && e.message !== 'forbidden') toast(e.message, true);
+        }
+    });
+
+    /* ── clear cache ───────────────────────────────────────────────────────── */
+
+    function formatBytes(n) {
+        if (n === null || n === undefined || isNaN(n)) return '0 B';
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+        return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    $('cache-clear-btn').addEventListener('click', async function () {
+        if (!window.confirm('Clear the on-disk artifact cache?\n\n'
+                + 'Cached artifacts are deleted from local disk. The store is untouched — every '
+                + 'artifact refetches and re-mirrors on its next read. This cannot be undone.')) return;
+        try {
+            var res = await api('/api/admin/cache/clear', { method: 'POST' });
+            toast('Cache cleared — freed ' + formatBytes(res && res.freedBytes) + '.');
         } catch (e) {
             if (e && e.message !== 'forbidden') toast(e.message, true);
         }

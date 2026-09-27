@@ -44,6 +44,10 @@ import java.nio.file.Path;
  * app.storage.mongodb.sweep.enabled=true
  * app.storage.mongodb.sweep.interval-ms=900000   # 15 minutes
  * app.storage.mongodb.sweep.min-age-ms=3600000   # 1 hour; must exceed the longest single write
+ *
+ * # disk read-through cache (on by default; wraps BOTH routed stores):
+ * app.cache.disk.enabled=true
+ * app.cache.disk.max-mb=2048                     # LRU-by-last-access cap under {data}/cache/store
  * </pre>
  *
  * <p>Two properties, because they are two capabilities (PLAN-00): {@code ArtifactStore} is a blob
@@ -95,11 +99,14 @@ public class StorageConfig {
             @Value("${app.storage.mongodb.inline-threshold:0}") int inlineThreshold,
             @Value("${app.storage.hybrid.big-threshold:0}") long hybridBigThreshold,
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
-            @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind) {
+            @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind,
+            @Value("${app.cache.disk.enabled:true}") boolean cacheEnabled,
+            @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb) {
         return buildAndRegister("parser", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
                 ssoSessionRegistry, currentHttpSession,
                 modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
-                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
+                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
+                cacheEnabled, cacheMaxMb);
     }
 
     /**
@@ -132,11 +139,14 @@ public class StorageConfig {
             @Value("${app.storage.mongodb.inline-threshold:0}") int inlineThreshold,
             @Value("${app.storage.hybrid.big-threshold:0}") long hybridBigThreshold,
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
-            @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind) {
+            @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind,
+            @Value("${app.cache.disk.enabled:true}") boolean cacheEnabled,
+            @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb) {
         return buildAndRegister("jar", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
                 ssoSessionRegistry, currentHttpSession,
                 modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
-                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
+                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
+                cacheEnabled, cacheMaxMb);
     }
 
     /**
@@ -147,6 +157,11 @@ public class StorageConfig {
      * bucket, so there is nothing for a connect to change. Registering the builder here (rather than
      * duplicating the mode/prefix/threshold logic in {@code SsoStoreSwapper}) keeps the knowledge of
      * how a store is constructed in exactly one place.
+     *
+     * <p>The disk cache wraps the <b>outermost</b> store — for S3/HYBRID that is the per-session
+     * router, so one cache serves a feature uniformly whether a request resolves to a user's own
+     * store or the startup store. The cache sits above routing, so every read and write the router
+     * would have served goes through it. See {@link CachingArtifactStore}.
      */
     private ArtifactStore buildAndRegister(
             String name, com.analyzer.storage.mongo.MongoConnection mongoConnection,
@@ -155,7 +170,7 @@ public class StorageConfig {
             String modeProp, String dataDir, String bucket, String prefix, String region,
             String endpoint, String mongoUri, String mongoDatabase, String mongoPrefix,
             int inlineThreshold, long hybridBigThreshold, String s3AlwaysPaths,
-            boolean s3WriteBehind) {
+            boolean s3WriteBehind, boolean cacheEnabled, long cacheMaxMb) {
         // The startup store: what a request with no session-bound state reads and writes through,
         // signed with the credential resolver (which answers the default chain when there is no
         // session). See SessionRoutingArtifactStore for the routing rule.
@@ -163,22 +178,34 @@ public class StorageConfig {
                 dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase, mongoPrefix,
                 inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
         StorageMode mode = StorageMode.parse(modeProp);
-        if (mode != StorageMode.S3 && mode != StorageMode.HYBRID) {
-            return store;
+        ArtifactStore effective = store;
+        if (mode == StorageMode.S3 || mode == StorageMode.HYBRID) {
+            // Register how to build THIS bean's store for an arbitrary bucket/region, using the
+            // per-user credential provider the swapper passes in, so a connect changes where the
+            // bytes go (and who signs for them) and nothing else. The builder calls
+            // buildArtifactStore directly (not buildAndRegister), so it neither re-registers nor
+            // recurses.
+            ssoStoreSwapper.register(name, (newBucket, newRegion, credentials) ->
+                    buildArtifactStore(mongoConnection, credentials, modeProp, dataDir,
+                            newBucket, prefix, newRegion, endpoint, mongoUri, mongoDatabase, mongoPrefix,
+                            inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind));
+            // The bean handed to consumers is the per-session router, not the startup store: it
+            // forwards to the calling user's own store once they have connected, and to `store` only
+            // when the request has no session-bound state.
+            effective = new SessionRoutingArtifactStore(name, store, ssoStoreSwapper,
+                    ssoSessionRegistry, currentHttpSession);
         }
-        // Register how to build THIS bean's store for an arbitrary bucket/region, using the
-        // per-user credential provider the swapper passes in, so a connect changes where the bytes
-        // go (and who signs for them) and nothing else. The builder calls buildArtifactStore
-        // directly (not buildAndRegister), so it neither re-registers nor recurses.
-        ssoStoreSwapper.register(name, (newBucket, newRegion, credentials) ->
-                buildArtifactStore(mongoConnection, credentials, modeProp, dataDir,
-                        newBucket, prefix, newRegion, endpoint, mongoUri, mongoDatabase, mongoPrefix,
-                        inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind));
-        // The bean handed to consumers is the per-session router, not the startup store: it forwards
-        // to the calling user's own store once they have connected, and to `store` only when the
-        // request has no session-bound state.
-        return new SessionRoutingArtifactStore(name, store, ssoStoreSwapper,
-                ssoSessionRegistry, currentHttpSession);
+        if (!cacheEnabled) {
+            log.info("[storage] {}: disk cache disabled (app.cache.disk.enabled=false)", name);
+            return effective;
+        }
+        // {app.data-dir}/cache/store/ — local disk only, never heap. One shared root; the store name
+        // is the first segment, so parser and jar entries never collide.
+        Path cacheRoot = Path.of(dataDir).resolve("cache").resolve("store");
+        long maxBytes = cacheMaxMb <= 0 ? -1 : cacheMaxMb * 1024L * 1024L;
+        log.info("[storage] {}: disk cache at {} (max {} MB, 24h revalidation)",
+                name, cacheRoot.resolve(name), cacheMaxMb);
+        return new CachingArtifactStore(name, effective, cacheRoot, maxBytes);
     }
 
     /**
@@ -311,5 +338,19 @@ public class StorageConfig {
                         ? "queries answered by scanning today's JSON artifacts"
                         : "queries answered from MongoDB indexes");
         return mode;
+    }
+
+    /**
+     * The operator handle onto the disk cache, so the admin portal and the ops script can report
+     * and clear it without knowing where either store put it.
+     *
+     * <p>The path is {@code {app.data-dir}/cache/store/} — the same root {@link CachingArtifactStore}
+     * derives — computed here once from the already-resolved {@code app.data-dir.base}. A single bean
+     * rather than one per feature because clearing the cache is a deployment-wide action and both
+     * features share the root.
+     */
+    @Bean
+    public DiskCacheAdmin diskCacheAdmin(@Value("${app.data-dir.base:data}") String dataDir) {
+        return new DiskCacheAdmin(Path.of(dataDir).resolve("cache").resolve("store"));
     }
 }

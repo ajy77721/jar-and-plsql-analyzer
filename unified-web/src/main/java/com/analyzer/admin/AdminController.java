@@ -2,6 +2,7 @@ package com.analyzer.admin;
 
 import com.analyzer.admin.AdminAuditService.AuditEntry;
 import com.analyzer.admin.AdminAuditService.UserRollup;
+import com.analyzer.storage.DiskCacheAdmin;
 import com.analyzer.storage.sso.ActiveUserInfo;
 import com.analyzer.storage.sso.AwsSsoLoginService;
 import com.analyzer.storage.sso.SsoIdentity;
@@ -92,6 +93,8 @@ public class AdminController {
     private final PlsqlConfig plsqlConfig;
     private final com.plsqlanalyzer.web.parser.service.AnalysisService parserAnalysisService;
     private final com.jaranalyzer.service.PersistenceService jarPersistenceService;
+    /** The on-disk artifact cache, so the portal can report and empty it. */
+    private final DiskCacheAdmin diskCache;
     private final String username;
     private final String password;
 
@@ -113,6 +116,7 @@ public class AdminController {
                            com.plsqlanalyzer.web.parser.service.AnalysisService parserAnalysisService,
                            @Qualifier("jarPersistenceService")
                            com.jaranalyzer.service.PersistenceService jarPersistenceService,
+                           DiskCacheAdmin diskCache,
                            // Env-var fallback (APP_ADMIN_USERNAME/PASSWORD) lets Kanopy inject
                            // real credentials via envSecrets without code changes; the property
                            // defaults are for local dev only and must not reach production.
@@ -124,6 +128,7 @@ public class AdminController {
         this.plsqlConfig = plsqlConfig;
         this.parserAnalysisService = parserAnalysisService;
         this.jarPersistenceService = jarPersistenceService;
+        this.diskCache = diskCache;
         this.username = username;
         this.password = password;
     }
@@ -787,6 +792,26 @@ public class AdminController {
         log.info("[admin] audit history cleared");
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", true);
+        return ResponseEntity.ok(out);
+    }
+
+    /**
+     * Empties the on-disk artifact cache ({@code {app.data-dir}/cache/store/}) and reports the
+     * bytes freed. The cache is a pure read-through mirror of the configured store, so clearing it
+     * is always safe — the next read of any artifact simply refetches and re-mirrors. This is the
+     * lever for "the cache looks wrong / is filling the disk" without a restart.
+     */
+    @PostMapping("/cache/clear")
+    public ResponseEntity<Map<String, Object>> clearCache(
+            @RequestHeader(value = KEY_HEADER, required = false) String key) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        long freed = diskCache.clear();
+        log.info("[admin] artifact cache cleared ({} bytes freed)", freed);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("freedBytes", freed);
         return ResponseEntity.ok(out);
     }
 
