@@ -1079,6 +1079,9 @@ public class DependencyCrawler {
                     if (!writer.sourceExists(fileName)) {
                         writer.writeSourceFile(fileName, source);
                     }
+                    // Record the REAL name (.prc/.fnc), so the node/index sourceFile matches the
+                    // artifact exactly and a future read needs no extension probing.
+                    writer.recordSourceFile(node.getSchema(), pkgName, objName, fileName);
                 }
             }
         } catch (Exception e) {

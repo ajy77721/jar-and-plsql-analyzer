@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ShallowTree;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +30,11 @@ class NodeScanFacetReader {
         }
     }
 
+    /** Reads every node document concurrently, in input order. See {@link ShallowTree#parallelMap}. */
+    private List<JsonNode> readAll(List<ArtifactKey> nodeFiles) throws IOException {
+        return ShallowTree.parallelMap(r.store(), nodeFiles, this::readTree);
+    }
+
     JsonNode getJoins(String name) throws IOException {
         ObjectMapper mapper = r.mapper;
         String key = r.cacheKey(name, "joins");
@@ -40,8 +46,7 @@ class NodeScanFacetReader {
 
         Map<String, ObjectNode> joinMap = new LinkedHashMap<>();
         {
-            for (ArtifactKey nodeFile : nodeFiles) {
-                JsonNode node = readTree(nodeFile);
+            for (JsonNode node : readAll(nodeFiles)) {
                 String nodeId = textOrNull(node, "nodeId");
                 String nodeName = textOrNull(node, "name");
                 String sourceFile = textOrNull(node, "sourceFile");
@@ -121,8 +126,7 @@ class NodeScanFacetReader {
 
         Map<String, ObjectNode> cursorMap = new LinkedHashMap<>();
         {
-            for (ArtifactKey nodeFile : nodeFiles) {
-                JsonNode node = readTree(nodeFile);
+            for (JsonNode node : readAll(nodeFiles)) {
                 String nodeId = textOrNull(node, "nodeId");
                 String nodeName = textOrNull(node, "name");
                 String sourceFile = textOrNull(node, "sourceFile");

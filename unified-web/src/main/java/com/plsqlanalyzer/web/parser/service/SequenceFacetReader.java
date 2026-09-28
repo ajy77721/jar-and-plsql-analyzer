@@ -6,10 +6,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ShallowTree;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.*;
 
@@ -29,6 +31,11 @@ class SequenceFacetReader {
         }
     }
 
+    /** Reads every node document concurrently, in input order. See {@link ShallowTree#parallelMap}. */
+    private List<JsonNode> readAll(List<ArtifactKey> nodeFiles) throws IOException {
+        return ShallowTree.parallelMap(r.store(), nodeFiles, this::readTree);
+    }
+
     JsonNode getSequences(String name) throws IOException {
         ObjectMapper mapper = r.mapper;
         String key = r.cacheKey(name, "sequences");
@@ -38,18 +45,22 @@ class SequenceFacetReader {
         List<ArtifactKey> nodeFiles = r.collectNodeFiles(name);
         if (nodeFiles.isEmpty()) return mapper.createArrayNode();
 
+        List<JsonNode> nodes = readAll(nodeFiles);
+
         Map<String, ObjectNode> seqMap = new LinkedHashMap<>();
         Map<String, String[]> srcCache = new HashMap<>();  // sourceFile -> source lines
+        // Built once, on first need, and only if some node actually carries a sourceFile: one LIST
+        // of sources/ replaces every per-source exact→.sql→.prc HEAD probe in this view.
+        AtomicReference<Map<String, ArtifactKey>> indexRef = new AtomicReference<>();
         {
-            for (ArtifactKey nodeFile : nodeFiles) {
-                JsonNode node = readTree(nodeFile);
+            for (JsonNode node : nodes) {
                 String nodeId = textOrNull(node, "nodeId");
                 String nodeName = textOrNull(node, "name");
                 String sourceFile = textOrNull(node, "sourceFile");
                 JsonNode sequences = node.get("sequences");
                 if (sequences == null || !sequences.isArray()) continue;
 
-                String[] srcLines = loadSourceLines(name, sourceFile, srcCache);
+                String[] srcLines = loadSourceLines(name, sourceFile, srcCache, indexRef);
 
                 for (JsonNode seq : sequences) {
                     String seqName = textOrNull(seq, "name");
@@ -126,8 +137,7 @@ class SequenceFacetReader {
         if (cached != null) return cached;
 
         ArrayNode result = mapper.createArrayNode();
-        for (ArtifactKey nodeFile : r.collectNodeFiles(name)) {
-            JsonNode node = readTree(nodeFile);
+        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
             JsonNode dyn = node.get("dynamicSql");
             if (dyn == null || !dyn.isArray()) continue;
             String nodeId = textOrNull(node, "nodeId");
@@ -153,12 +163,18 @@ class SequenceFacetReader {
     }
 
     /** Load + cache source lines for a file; returns null if unavailable. */
-    private String[] loadSourceLines(String name, String sourceFile, Map<String, String[]> cache) {
+    private String[] loadSourceLines(String name, String sourceFile, Map<String, String[]> cache,
+                                     AtomicReference<Map<String, ArtifactKey>> indexRef) {
         if (sourceFile == null || sourceFile.isBlank()) return null;
         if (cache.containsKey(sourceFile)) return cache.get(sourceFile);
         String[] lines = null;
         try {
-            String src = r.getSource(name, sourceFile);
+            Map<String, ArtifactKey> index = indexRef.get();
+            if (index == null) {
+                index = r.sourceKeyIndex(name);
+                indexRef.set(index);
+            }
+            String src = r.getSourceFromIndex(index, sourceFile);
             if (src != null && !src.isEmpty()) lines = src.split("\n", -1);
         } catch (Exception e) {
             /* source unavailable (e.g. encrypted) — fall back to stored lines */

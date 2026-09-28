@@ -141,7 +141,8 @@ public class AnalysisViewStore {
     public JsonNode read(String name, String view) {
         try {
             ArtifactKey k = key(name, view);
-            if (!store.exists(k)) return null;
+            // No exists() first: lastModified already returns -1 for an absent key, so an absent
+            // (or masked) sidecar fails the freshness check below without a separate HEAD.
             if (store.lastModified(k) < store.lastModified(indexKey(name))) return null;
             try (InputStream in = store.read(k)) {
                 JsonNode doc = mapper.readTree(in);

@@ -39,6 +39,19 @@ public class ChunkedFlowWriter {
     private final Map<String, String> progressMap = new LinkedHashMap<>();
     private List<Map<String, Object>> discoveredTriggers = new ArrayList<>();
 
+    /**
+     * The source artifact name actually written for a node, keyed by node identity — so the
+     * index/node-detail {@code sourceFile} records the extension the artifact really has
+     * ({@code .prc} for a standalone PROCEDURE, {@code .fnc} for a FUNCTION) instead of always
+     * assuming {@code .sql}. Without this, every source read had to probe the extension variants
+     * (exact → .sql → .prc → …) because the recorded name and the stored name disagreed.
+     *
+     * <p>Populated by {@link #recordSourceFile} from the crawler's own source write, which is the
+     * only code that knows the extension it chose. A node with no entry falls back to the legacy
+     * {@code .sql} name — the same value this writer produced before.
+     */
+    private final Map<String, String> writtenSourceFileNames = new HashMap<>();
+
     /** MID-026 (§177) — the fallback for a node id missing from {@code nodeMetrics}, matching the
      *  original mutation-based code's own implicit default (an unset {@code FlowNode} field reads
      *  as {@code 0}/an empty map). */
@@ -2254,12 +2267,31 @@ public class ChunkedFlowWriter {
     }
 
     private String buildSourceFileName(String schemaIn, String pkg, String objIn) {
+        String recorded = writtenSourceFileNames.get(sourceIdentity(schemaIn, pkg, objIn));
+        if (recorded != null) return recorded;
         String schema = schemaIn != null ? schemaIn : "UNKNOWN";
         String obj = objIn != null ? objIn : "UNKNOWN";
         if (pkg != null && !pkg.isEmpty()) {
             return schema + "." + pkg + "." + obj + ".sql";
         }
         return schema + "." + obj + ".sql";
+    }
+
+    /**
+     * Records the exact artifact file name written for a node's source, so the node/index
+     * {@code sourceFile} matches it. The key is the node identity the writer itself builds the name
+     * from, so the lookup in {@link #buildSourceFileName} is exact.
+     */
+    public void recordSourceFile(String schema, String pkg, String obj, String fileName) {
+        if (fileName != null) {
+            writtenSourceFileNames.put(sourceIdentity(schema, pkg, obj), fileName);
+        }
+    }
+
+    private static String sourceIdentity(String schema, String pkg, String obj) {
+        return (schema != null ? schema : "UNKNOWN") + "|"
+                + (pkg != null ? pkg : "") + "|"
+                + (obj != null ? obj : "UNKNOWN");
     }
 
     private String safeFileName(String nodeId) {

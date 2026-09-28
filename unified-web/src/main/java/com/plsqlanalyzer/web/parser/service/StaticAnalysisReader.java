@@ -158,6 +158,20 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         return coreFile.collectNodeFiles(name);
     }
 
+    /**
+     * One listing of the analysis's {@code sources/} directory, keyed by leaf name — built once per
+     * view computation so a node-scan resolves every node's {@code sourceFile} with zero per-source
+     * storage ops. See {@link CoreFileReader#sourceKeyIndex(String)}.
+     */
+    Map<String, ArtifactKey> sourceKeyIndex(String name) throws IOException {
+        return coreFile.sourceKeyIndex(name);
+    }
+
+    /** Source text resolved against a prebuilt {@link #sourceKeyIndex} listing; null when absent. */
+    String getSourceFromIndex(Map<String, ArtifactKey> index, String fileName) throws IOException {
+        return coreFile.getSourceFromIndex(index, fileName);
+    }
+
     @Override
     public JsonNode getJoins(String name) throws IOException {
         return nodeScanFacet.getJoins(name);
