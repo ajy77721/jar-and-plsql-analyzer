@@ -126,7 +126,14 @@ public final class SessionRoutingArtifactStore implements RequestScopedArtifactS
      */
     @Override
     public Scope captureScope() {
-        String sessionId = currentSession.currentSessionId();
+        // A job context installed on this thread (a queue worker, or the login warm-up sweep's
+        // coordinator/workers) has no request context, so request discovery would answer null and
+        // the fan-out would fall through to the shared default target — which on a pod with no
+        // ambient credentials fails. Carrying the job snapshot's session id onto the pool workers
+        // lets each resolve the capture's user store and credentials from the registry. See
+        // SsoJobContext#sessionId().
+        String jobSession = SsoJobContext.sessionId();
+        String sessionId = jobSession != null ? jobSession : currentSession.currentSessionId();
         if (sessionId == null) return Scope.NONE;
         return () -> currentSession.propagate(sessionId);
     }

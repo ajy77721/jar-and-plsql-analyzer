@@ -3,6 +3,9 @@ package com.plsqlanalyzer.web.parser.service;
 import com.analyzer.storage.AnalysisRepository;
 import com.analyzer.storage.repo.AnalysisQuery;
 import com.analyzer.storage.repo.AnalysisRef;
+import com.analyzer.storage.sso.CapturedCredentials;
+import com.analyzer.storage.sso.CapturedStores;
+import com.analyzer.storage.sso.SsoJobContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -20,6 +23,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Eagerly precomputes every analysis's precomputed view summaries, so the <em>first</em> reader of
@@ -59,6 +63,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * {@code ParserAnalysisExecutor} at the completion point warms it within seconds, on-thread, with
  * the credentials that created it. The sweep is then the backfill for everything older.
  *
+ * <h2>Warming with the first logged-in user</h2>
+ *
+ * <p>The boot/periodic sweep has no principal of its own on a pod with no ambient credentials, so the
+ * first login is what finally gives the sweep a way to sign. {@link #triggerLoginSweep} takes the
+ * just-logged-in session's captured credentials (and stores, when connected) and installs them via
+ * {@code SsoJobContext} around one sweep — the same mechanism a queue job uses — so the whole corpus
+ * is precomputed in the background while nobody is waiting. It runs at most once per pod per sweep
+ * interval and never blocks the login response.
+ *
+ * <p>The same sweep also warms the JAR decompile cache through {@link DecompileWarmUpService} (each
+ * class otherwise costs CFR 8–21s on a cold first click) — best-effort and unable to fail the sidecar
+ * half.
+ *
  * <h2>Cost</h2>
  *
  * <p>Two worker threads at most, and a single coordinator. It is background warmth, not a request
@@ -75,8 +92,14 @@ public class SidecarWarmUpService {
     private final AnalysisViewStore views;
     private final AnalysisService analysisService;
 
+    /** Warms the JAR decompile cache too; {@code null} in fixtures that only exercise sidecars. */
+    private final DecompileWarmUpService decompileWarmUp;
+
     /** Whether the boot + periodic sweep runs. The completion hook is not gated by this. */
     private final boolean enabled;
+
+    /** Whether a completed login may trigger the sweep with the user's own credentials. */
+    private final boolean onLogin;
 
     private final int intervalHours;
 
@@ -95,6 +118,9 @@ public class SidecarWarmUpService {
     /** One sweep at a time; a tick that arrives mid-sweep is skipped, not queued. */
     private final AtomicBoolean running = new AtomicBoolean();
 
+    /** When the last login-triggered sweep STARTED, or 0 when none ever has. */
+    private final AtomicLong lastLoginSweepAt = new AtomicLong();
+
     /** Counts from the most recent completed sweep; the on-demand endpoint reports them. */
     private volatile SweepStats lastSweep = new SweepStats(0, 0, 0, 0, 0, 0, 0);
 
@@ -102,14 +128,18 @@ public class SidecarWarmUpService {
                                 AnalysisViewWriter writer,
                                 AnalysisViewStore views,
                                 @Qualifier("parserAnalysisService") AnalysisService analysisService,
+                                DecompileWarmUpService decompileWarmUp,
                                 @Value("${app.sidecar.warmup.enabled:true}") boolean enabled,
-                                @Value("${app.sidecar.warmup.interval-hours:6}") int intervalHours) {
+                                @Value("${app.sidecar.warmup.interval-hours:6}") int intervalHours,
+                                @Value("${app.sidecar.warmup.on-login:true}") boolean onLogin) {
         this.repository = repository;
         this.writer = writer;
         this.views = views;
         this.analysisService = analysisService;
+        this.decompileWarmUp = decompileWarmUp;
         this.enabled = enabled;
         this.intervalHours = intervalHours;
+        this.onLogin = onLogin;
     }
 
     private static Thread daemon(Runnable r, String name) {
@@ -121,6 +151,12 @@ public class SidecarWarmUpService {
     /** The sweep interval in millis, from {@code app.sidecar.warmup.interval-hours}. */
     public long getIntervalMillis() {
         return Math.max(1, intervalHours) * 3_600_000L;
+    }
+
+    /** A short, non-reversible session suffix for a log line, or {@code null} for no session. */
+    private static String mask(String sessionId) {
+        if (sessionId == null) return "none";
+        return sessionId.length() <= 8 ? "…" : "…" + sessionId.substring(sessionId.length() - 8);
     }
 
     /**
@@ -181,6 +217,53 @@ public class SidecarWarmUpService {
     }
 
     /**
+     * Starts a sweep in the background bound to a just-logged-in user's <em>captured</em>
+     * credentials, so a pod with no ambient AWS credentials finally has a principal that can reach
+     * the store.
+     *
+     * <p>The capture is taken on the login thread by the caller ({@code LoginWarmUpTrigger}); this
+     * method installs it via {@link SsoJobContext} around the sweep, the same mechanism a queue job
+     * uses. It runs at most once per pod per sweep interval: the first completed login triggers it,
+     * and a later login within the interval is a no-op (the {@code running} guard also means it can
+     * never overlap an in-flight boot/periodic sweep). Returns immediately — the login response is
+     * never made to wait on a sweep.
+     *
+     * @return true when this call started a sweep
+     */
+    public boolean triggerLoginSweep(CapturedStores stores, CapturedCredentials credentials,
+                                     String sessionId) {
+        if (!enabled || !onLogin) return false;
+        long now = System.currentTimeMillis();
+        long last = lastLoginSweepAt.get();
+        if (last != 0 && now - last < getIntervalMillis()) {
+            log.debug("Sidecar warm-up: login sweep skipped; last ran {} ms ago", now - last);
+            return false;
+        }
+        if (!running.compareAndSet(false, true)) {
+            log.debug("Sidecar warm-up: login sweep skipped; a sweep is already running");
+            return false;
+        }
+        lastLoginSweepAt.set(now);
+        // One INFO at sweep start; the session is masked to a non-reversible suffix, never the id.
+        log.info("Sidecar warm-up: login-triggered sweep starting (session {})", mask(sessionId));
+        try {
+            coordinator.submit(() -> {
+                try {
+                    sweep(stores, credentials);
+                } catch (Throwable t) {
+                    log.info("Sidecar warm-up (login) aborted: {}", t.toString());
+                } finally {
+                    running.set(false);
+                }
+            });
+            return true;
+        } catch (RejectedExecutionException e) {
+            running.set(false);
+            return false;
+        }
+    }
+
+    /**
      * One sweep: enumerate every analysis, skip the complete ones, warm the rest with bounded
      * parallelism, and emit exactly one INFO line — analyses warmed, sidecars written, duration.
      * Never throws.
@@ -196,15 +279,32 @@ public class SidecarWarmUpService {
      * @return how many analyses were warmed (for tests)
      */
     int sweep() {
+        return sweep(null, null);
+    }
+
+    /**
+     * The sweep proper. When {@code stores}/{@code credentials} are non-null they are installed as
+     * the {@link SsoJobContext} on this coordinator thread <em>and</em> on every worker task, so the
+     * listing and each analysis's reads/writes sign with the captured user's role instead of the
+     * pod's (absent) default chain. {@link com.analyzer.storage.sso.SessionRoutingArtifactStore}
+     * additionally carries the snapshot's session onto {@code ShallowTree}'s own listing pool, so
+     * the parallel walk routes as the same user. Never throws.
+     */
+    int sweep(CapturedStores stores, CapturedCredentials credentials) {
         long startNanos = System.nanoTime();
         List<String> names;
-        try {
-            names = repository.analyses(AnalysisQuery.Dataset.PLSQL_ANALYSES)
-                    .stream().map(AnalysisRef::name).toList();
-        } catch (Exception e) {
-            // An unreachable store: one line, retried next sweep. Never per analysis.
-            log.info("Sidecar warm-up: could not list analyses ({}); will retry next sweep", e.toString());
-            return 0;
+        // Installed on the coordinator so the analyses listing (which fans out on ShallowTree) and
+        // the decompile warm-up below run under the capture. Null-safe: a legacy sweep with no
+        // capture installs nothing.
+        try (SsoJobContext ignored = SsoJobContext.install(stores, credentials)) {
+            try {
+                names = repository.analyses(AnalysisQuery.Dataset.PLSQL_ANALYSES)
+                        .stream().map(AnalysisRef::name).toList();
+            } catch (Exception e) {
+                // An unreachable store: one line, retried next sweep. Never per analysis.
+                log.info("Sidecar warm-up: could not list analyses ({}); will retry next sweep", e.toString());
+                return 0;
+            }
         }
 
         AtomicInteger warmed = new AtomicInteger();
@@ -215,15 +315,19 @@ public class SidecarWarmUpService {
         List<Future<?>> inFlight = new ArrayList<>(names.size());
         for (String name : names) {
             inFlight.add(workers.submit(() -> {
-                if (views.hasCompleteViewSet(name)) {
-                    skipped.incrementAndGet();
-                } else {
-                    int written = warmByName(name);
-                    if (written >= 0) {
-                        warmed.incrementAndGet();
-                        sidecars.addAndGet(written);
+                // Each worker is a pool thread: the coordinator's ThreadLocal does not reach it, so
+                // the snapshot is re-installed here for the duration of this one analysis.
+                try (SsoJobContext ignored = SsoJobContext.install(stores, credentials)) {
+                    if (views.hasCompleteViewSet(name)) {
+                        skipped.incrementAndGet();
                     } else {
-                        failed.incrementAndGet();
+                        int written = warmByName(name);
+                        if (written >= 0) {
+                            warmed.incrementAndGet();
+                            sidecars.addAndGet(written);
+                        } else {
+                            failed.incrementAndGet();
+                        }
                     }
                 }
             }));
@@ -236,12 +340,26 @@ public class SidecarWarmUpService {
             }
         }
 
+        // The JAR decompile cache, warmed the same sweep: best-effort and never able to fail the
+        // sidecar half.
+        DecompileWarmUpService.WarmerResult decompiled = DecompileWarmUpService.WarmerResult.EMPTY;
+        if (decompileWarmUp != null) {
+            try (SsoJobContext ignored = SsoJobContext.install(stores, credentials)) {
+                decompiled = decompileWarmUp.warm();
+            } catch (Throwable t) {
+                log.debug("Decompile warm-up aborted: {}", t.toString());
+            }
+        }
+
         long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
         lastSweep = new SweepStats(names.size(), warmed.get(), skipped.get(), failed.get(),
                 sidecars.get(), durationMs, System.currentTimeMillis());
+        // One INFO at sweep end: warmed counts only, no credential or token material.
         log.info("Sidecar warm-up: {} analyses — {} warmed, {} already complete, {} failed; "
-                + "{} sidecars written in {} ms",
-                names.size(), warmed.get(), skipped.get(), failed.get(), sidecars.get(), durationMs);
+                        + "{} sidecars written; {} JAR classes decompiled ({} already cached, {} failed) "
+                        + "in {} ms",
+                names.size(), warmed.get(), skipped.get(), failed.get(), sidecars.get(),
+                decompiled.decompiled(), decompiled.alreadyCached(), decompiled.failed(), durationMs);
         return warmed.get();
     }
 

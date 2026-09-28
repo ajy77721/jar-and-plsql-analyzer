@@ -96,6 +96,13 @@ public class AwsSsoController {
     private final AwsIamIdentityResolver iamIdentity;
 
     /**
+     * Fires the (async) sidecar warm sweep with this login's captured credentials on poll-complete,
+     * so the pod's sidecars are precomputed under the first logged-in user's role. Never on the
+     * response path — it queues the sweep and returns.
+     */
+    private final LoginWarmUpTrigger loginWarmUp;
+
+    /**
      * Configured Identity Center portal URL, prefilled into the login modal so a deployed user does
      * not have to type it. A public URL, never a token — safe to return from {@code /session}.
      * Blank when unset, in which case the UI falls back to its own default.
@@ -104,11 +111,13 @@ public class AwsSsoController {
     private String startUrlProperty;
 
     public AwsSsoController(AwsSsoLoginService loginService, SsoStoreSwapper storeSwapper,
-                            SsoSessionRegistry registry, AwsIamIdentityResolver iamIdentity) {
+                            SsoSessionRegistry registry, AwsIamIdentityResolver iamIdentity,
+                            LoginWarmUpTrigger loginWarmUp) {
         this.loginService = loginService;
         this.storeSwapper = storeSwapper;
         this.registry = registry;
         this.iamIdentity = iamIdentity;
+        this.loginWarmUp = loginWarmUp;
     }
 
     /** Step 1: register a client and begin device authorization against the user's portal URL. */
@@ -151,8 +160,15 @@ public class AwsSsoController {
      */
     @PostMapping("/poll")
     public Map<String, Object> poll(HttpServletRequest req) {
+        String sessionId = sessionId(req);
         try {
-            AwsSsoLoginService.PollResult result = loginService.poll(registry.get(sessionId(req)));
+            AwsSsoLoginService.PollResult result = loginService.poll(registry.get(sessionId));
+            if ("complete".equals(result.status()) && loginWarmUp != null) {
+                // The login is complete and this thread still has the request-bound session, so the
+                // user's freshly minted role credentials can be snapshotted here. The sweep itself
+                // is queued and runs in the background; this never delays the response.
+                loginWarmUp.onLoginComplete(sessionId);
+            }
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("status", result.status());
             out.put("accountId", result.accountId());
