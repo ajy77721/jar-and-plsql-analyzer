@@ -52,7 +52,8 @@ class ArtifactScanRepositoryTest {
         // One InMemoryArtifactStore stands in for both the parser-side and jar-side beans: this
         // fixture predates the parser/jar ArtifactStore split and nothing here exercises different
         // backends per feature.
-        repo = new ArtifactScanRepository(store, store, mapper, null, null, null,
+        repo = new ArtifactScanRepository(store, store, mapper, null, null,
+                new com.plsqlanalyzer.web.parser.service.AnalysisViewStore(store), null,
                 new JarDataPaths("data/jar", store));
     }
 

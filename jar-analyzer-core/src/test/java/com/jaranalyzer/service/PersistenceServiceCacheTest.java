@@ -88,4 +88,22 @@ class PersistenceServiceCacheTest {
 
         assertFalse(Files.exists(tmp2), ".tmp file must be deleted");
     }
+
+    @Test
+    @DisplayName("invalidateSummaryCache drops the precomputed view summaries")
+    void invalidateDeletesViewSummaries() throws Exception {
+        // A re-analysis or a correction rewrites the document these summarise, so leaving them
+        // behind would serve a pre-change header/collection report.
+        Path views = paths.jarRootKey("test.jar").resolve("views").toPath(tmp.resolve("jar").getParent());
+        Files.createDirectories(views);
+        Files.writeString(views.resolve("summary-header.json"), "{}", StandardCharsets.UTF_8);
+        Files.writeString(views.resolve("collections-count.json"), "[]", StandardCharsets.UTF_8);
+
+        service.invalidateSummaryCache("test.jar");
+
+        assertFalse(Files.exists(views.resolve("summary-header.json")),
+                "a stale summary header must not survive a rewrite");
+        assertFalse(Files.exists(views.resolve("collections-count.json")),
+                "a stale collection report must not survive a rewrite");
+    }
 }

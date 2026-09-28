@@ -67,6 +67,23 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         return tableDetailFacet.getTableJoins(name, table);
     }
 
+    /**
+     * Every table's joins in one node scan — the writer's precomputed {@code table-joins} view
+     * summary. Each map value equals {@link #getTableJoins(String, String)} for that table; see
+     * {@link TableDetailFacetReader#getAllTableJoins}.
+     */
+    public java.util.Map<String, JsonNode> getAllTableJoins(String name) throws IOException {
+        return tableDetailFacet.getAllTableJoins(name);
+    }
+
+    /**
+     * Every table's column references in one node scan — the writer's precomputed {@code
+     * table-columns} view summary. See {@link TableDetailFacetReader#getAllTableColumnRefs}.
+     */
+    public java.util.Map<String, JsonNode> getAllTableColumnRefs(String name) throws IOException {
+        return tableDetailFacet.getAllTableColumnRefs(name);
+    }
+
     /** B3 — one table's folded column-level statement detail and DDL. See {@link TableColumnDetailReader}. */
     public JsonNode getTableColumnDetail(String name, String table) throws IOException {
         return tableColumnDetail.getTableColumnDetail(name, table);

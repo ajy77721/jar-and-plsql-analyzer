@@ -861,6 +861,10 @@ public class PersistenceService {
                     store.delete(entry.key());
                 }
             }
+            // Precomputed view summaries (the summary header, the collections aggregate) summarise
+            // the document that was just rewritten, so they are stale the moment it changes. Deleted
+            // whole: a re-analysis or a correction must never be shadowed by a pre-change view.
+            store.deletePrefix(paths.viewsDirKey(jarName));
         } catch (IOException e) { log.debug("Failed to invalidate summary cache: {}", e.getMessage()); }
     }
 

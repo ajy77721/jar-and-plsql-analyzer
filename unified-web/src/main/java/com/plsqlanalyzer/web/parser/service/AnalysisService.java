@@ -56,6 +56,8 @@ public class AnalysisService {
 
     private final AnalysisReaderFactory readerFactory;
     private final StaticAnalysisReader staticReader;
+    /** Precomputed listing-scalar sidecars ({@code views/header.json}) — see {@link AnalysisViewStore}. */
+    private final AnalysisViewStore viewStore;
     private final PlsqlConfig plsqlConfig;
     private final ClaudePersistenceService claudePersistenceService;
     private final ArtifactStore store;
@@ -71,6 +73,7 @@ public class AnalysisService {
     public AnalysisService(@Value("${app.data-dir.base:data}") String dataDir,
                            AnalysisReaderFactory readerFactory,
                            StaticAnalysisReader staticReader,
+                           AnalysisViewStore viewStore,
                            PlsqlConfig plsqlConfig,
                            ClaudePersistenceService claudePersistenceService,
                            @Qualifier("parserArtifactStore") ArtifactStore store,
@@ -87,6 +90,7 @@ public class AnalysisService {
         this.flowOutputDir = Path.of(dataDir).resolve("plsql-parse");
         this.readerFactory = readerFactory;
         this.staticReader = staticReader;
+        this.viewStore = viewStore;
         this.plsqlConfig = plsqlConfig;
         this.claudePersistenceService = claudePersistenceService;
         this.store = store;
@@ -878,6 +882,13 @@ public class AnalysisService {
             try (OutputStream out = openWrite(indexFile)) {
                 mapper.writerWithDefaultPrettyPrinter().writeValue(out, root);
             }
+            // Precompute the listing scalars from the root already in memory — no second read — so
+            // the history listing serves a few hundred bytes instead of parsing all of index.json.
+            // Written AFTER the index, so its mtime is never older (the freshness check in
+            // AnalysisViewStore).
+            if (viewStore != null) {
+                viewStore.writeHeader(baseFolderName, headerScalars(root));
+            }
         } catch (Exception e) {
             org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
                 .warn("[AnalysisService] Could not patch connection meta for {}: {}", baseFolderName, e.getMessage());
@@ -888,6 +899,29 @@ public class AnalysisService {
 
     /** The one root field the listing needs whole: the history row's {@code errorCount} counts it. */
     private static final String ERRORS_FIELD = "errors";
+
+    /**
+     * The listing scalars of an in-memory index root, exactly as {@link #readIndexHeader} would
+     * extract them from the stored document: every root scalar, plus the {@code errors} array, with
+     * every nested object/array (above all {@code nodes[]}) skipped. Used to seed {@code
+     * views/header.json} from the root {@link #patchConnectionMeta} already holds.
+     */
+    private static ObjectNode headerScalars(JsonNode root) {
+        ObjectNode scalars = READ_HEADER_MAPPER.createObjectNode();
+        if (root == null || !root.isObject()) return scalars;
+        java.util.Iterator<Map.Entry<String, JsonNode>> it = root.fields();
+        while (it.hasNext()) {
+            Map.Entry<String, JsonNode> e = it.next();
+            JsonNode v = e.getValue();
+            if (v == null || v.isValueNode()) {
+                scalars.set(e.getKey(), v == null ? READ_HEADER_MAPPER.nullNode() : v);
+            } else if (ERRORS_FIELD.equals(e.getKey()) && v.isArray()) {
+                scalars.set(e.getKey(), v);
+            }
+            // any other nested value is skipped, as readIndexHeader skips it
+        }
+        return scalars;
+    }
 
     /**
      * Root scalars of an analysis index document, read over the streaming parser.
@@ -937,7 +971,13 @@ public class AnalysisService {
 
     /** @param indexKey the {@code .../<OBJECT>/api/index.json} key that identifies the analysis */
     private AnalysisInfo buildInfo(String name, ArtifactKey indexKey) throws IOException {
-        JsonNode root = readIndexHeader(indexKey);
+        // The listing scalars are precomputed at save time (views/header.json); absent or stale,
+        // fall back to the index-header read this has always done. The interpretation below is
+        // identical either way — the sidecar is readIndexHeader's own output.
+        JsonNode root = viewStore == null ? null : viewStore.readHeader(name);
+        if (root == null) {
+            root = readIndexHeader(indexKey);
+        }
 
         AnalysisInfo info = new AnalysisInfo();
         info.setName(name);

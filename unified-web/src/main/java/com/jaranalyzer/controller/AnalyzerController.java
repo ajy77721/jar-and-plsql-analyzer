@@ -152,6 +152,37 @@ public class AnalyzerController {
         return key;
     }
 
+    /* ---- precomputed view summaries (see JarDataPaths#viewsDirKey) ---- */
+
+    /**
+     * Reads a precomputed view body (the summary header, the collections aggregate) when it exists
+     * and is at least as new as the analysis document it summarises. Returns {@code null} on any
+     * miss — absent, stale, or unreadable — so the caller falls back to the full computation. One
+     * {@code exists}/{@code lastModified} pair is the whole cost, mirroring the {@code
+     * _summary_stats.json} sidecar's own mtime guard.
+     */
+    private byte[] readJarView(AnalysisDataProvider provider, ArtifactKey key) {
+        try {
+            if (!store.exists(key) || store.lastModified(key) < provider.lastModifiedMillis()) return null;
+            try (InputStream in = store.read(key)) {
+                return in.readAllBytes();
+            }
+        } catch (Exception e) {
+            log.debug("view read {} failed: {}", key, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Best-effort write of a view body; a failure only means the next request recomputes. */
+    private void writeJarView(ArtifactKey key, byte[] body) {
+        if (body == null) return;
+        try (OutputStream out = store.write(key, body.length)) {
+            out.write(body);
+        } catch (Exception e) {
+            log.warn("view write {} failed: {}", key, e.getMessage());
+        }
+    }
+
     @PostMapping
     @SuppressWarnings("unchecked")
     public Map<String, Object> uploadAndAnalyze(
@@ -741,6 +772,20 @@ public class AnalyzerController {
         }
         response.setContentType("application/json");
 
+        // The best-available header (no explicit version) is precomputed into
+        // views/summary-header.json at the first request that builds it, so a warm header costs a
+        // few hundred bytes instead of a full pass over the (up to hundreds of MB) document. A
+        // version-explicit request keeps streaming the provider, since each version's header
+        // differs. Absent/stale falls straight through to the legacy build below.
+        boolean cacheable = version == null;
+        if (cacheable) {
+            byte[] cached = readJarView(provider, paths.summaryHeaderViewKey(id));
+            if (cached != null) {
+                response.getOutputStream().write(cached);
+                return;
+            }
+        }
+
         // Buffered, unlike the streamed endpoints below, because the version flags have to be
         // merged into the same object and the whole thing is a few hundred bytes by construction.
         java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream(1024);
@@ -759,7 +804,11 @@ public class AnalyzerController {
         // back to computing them, which is the only answer that cannot show a wrong number.
         Map<String, Long> stats = summaryStats(provider);
         if (stats != null) header.put("stats", stats);
-        objectMapper.writeValue(response.getOutputStream(), header);
+        byte[] payload = objectMapper.writeValueAsBytes(header);
+        if (cacheable) {
+            writeJarView(paths.summaryHeaderViewKey(id), payload);
+        }
+        response.getOutputStream().write(payload);
     }
 
     /**
@@ -1702,12 +1751,30 @@ public class AnalyzerController {
             @RequestParam(value = "after", required = false) String after,
             @RequestHeader(value = "Accept", required = false) String accept) throws IOException {
         AnalysisDataProvider provider = resolveProvider(id, version);
+        // The default request (no version, no paging) is the one that reads the whole document;
+        // its aggregate is precomputed into views/collections-count.json. A version-explicit or
+        // paged request is served the old way — the cached body is specifically the default shape.
+        boolean cacheable = version == null && limit == null && (after == null || after.isBlank());
+        if (cacheable) {
+            byte[] cached = readJarView(provider, paths.collectionsViewKey(id));
+            if (cached != null) {
+                try {
+                    return ResponseEntity.ok(objectMapper.readTree(cached));
+                } catch (IOException e) {
+                    log.debug("collections view unreadable for {}: {}", id, e.getMessage());
+                }
+            }
+        }
         List<com.jaranalyzer.report.CollectionReportAggregator.CollectionRow> rows;
         try (var parser = objectMapper.getFactory().createParser(provider.openStream())) {
             rows = com.jaranalyzer.report.CollectionReportAggregator.aggregate(parser, objectMapper);
         }
-        return ResponseEntity.ok(com.jaranalyzer.report.CollectionReportPage.respond(
-                objectMapper, rows, limit, after, accept));
+        JsonNode body = com.jaranalyzer.report.CollectionReportPage.respond(
+                objectMapper, rows, limit, after, accept);
+        if (cacheable && body != null) {
+            writeJarView(paths.collectionsViewKey(id), objectMapper.writeValueAsBytes(body));
+        }
+        return ResponseEntity.ok(body);
     }
 
     @PostMapping("/{id}/revert-claude")

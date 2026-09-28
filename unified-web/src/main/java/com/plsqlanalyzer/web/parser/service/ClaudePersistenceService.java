@@ -60,6 +60,22 @@ public class ClaudePersistenceService {
     }
 
     /**
+     * Drops the analysis's precomputed view summaries.
+     *
+     * <p>A correction can change what a facet should report without moving {@code api/index.json}'s
+     * mtime (a Claude apply writes {@code claude/tables_merged.json}), so {@code AnalysisViewStore}'s
+     * mtime freshness check would not catch it. Deleting the {@code views/} folder here is the
+     * simplest correct answer: the next read recomputes and rewrites from the corrected data.
+     */
+    private void invalidateViews(String analysisName) {
+        try {
+            store.deletePrefix(AnalysisPaths.resolveKey(analysisName, "views"));
+        } catch (Exception e) {
+            log.debug("view invalidate for '{}' failed: {}", analysisName, e.getMessage());
+        }
+    }
+
+    /**
      * Save a Claude verification result with version rotation.
      * Current analysis_claude.json is moved to analysis_claude_prev.json before writing new.
      */
@@ -83,6 +99,8 @@ public class ClaudePersistenceService {
             // A prior "apply" merge is now stale — drop it so the Claude view reflects
             // the fresh verification (live overlay) until the user applies again.
             store.delete(AnalysisPaths.resolveKey(analysisName, "claude/tables_merged.json"));
+            // The precomputed views are now stale too.
+            invalidateViews(analysisName);
 
             // Update metadata
             updateMetadata(analysisName, result);
@@ -104,6 +122,7 @@ public class ClaudePersistenceService {
             try (OutputStream out = openWrite(claudeFile)) {
                 mapper.writeValue(out, result);
             }
+            invalidateViews(analysisName);
             log.info("Updated Claude result in-place for '{}'", analysisName);
         } catch (IOException e) {
             log.error("Failed to update Claude result for '{}': {}", analysisName, e.getMessage());
@@ -163,6 +182,7 @@ public class ClaudePersistenceService {
         if (!store.exists(claudePrev)) return false;
         try {
             store.move(claudePrev, claudeFile);
+            invalidateViews(analysisName);
             log.info("Reverted Claude enrichment for '{}'", analysisName);
             return true;
         } catch (IOException e) {
@@ -305,6 +325,7 @@ public class ClaudePersistenceService {
     public boolean deleteClaudeData(String analysisName) {
         try {
             if (store.deletePrefix(AnalysisPaths.claudeDirKey(analysisName)) == 0) return false;
+            invalidateViews(analysisName);
             log.info("Deleted Claude data for '{}'", analysisName);
             return true;
         } catch (IOException e) {
@@ -410,6 +431,8 @@ public class ClaudePersistenceService {
             }
             log.info("Applied Claude changes for '{}' -> {}: {} removed, {} added",
                     analysisName, mergedFile, removedCount, addedCount);
+            // The corrected data must not be shadowed by a pre-apply view summary.
+            invalidateViews(analysisName);
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("removed", removedCount);
