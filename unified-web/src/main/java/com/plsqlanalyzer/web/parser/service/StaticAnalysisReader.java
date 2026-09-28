@@ -208,6 +208,15 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         return callTreeFacet.getCallTree(name, nodeId);
     }
 
+    /**
+     * The entry-point node ids {@link AnalysisViewWriter} precomputes call trees for at save time —
+     * the roots plus their depth-1 callees, capped. See
+     * {@link CallTreeFacetReader#entryPointNodeIds(String)}.
+     */
+    public List<String> callTreeEntryPoints(String name) throws IOException {
+        return callTreeFacet.entryPointNodeIds(name);
+    }
+
     @Override
     public JsonNode getCallTree(String name, String nodeId, Integer maxDepth) throws IOException {
         return callTreeFacet.getCallTree(name, nodeId, getCallGraph(name), maxDepth);

@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpServletResponseWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ContentCachingRequestWrapper;
@@ -22,6 +23,35 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(ApiLoggingFilter.class);
     private static final int MAX_BODY_LOG = 2000;
+
+    /** The API latency budget: {@code app.api.slo.ms}, 200ms by default. */
+    @Value("${app.api.slo.ms:200}")
+    private long sloBudgetMs = 200;
+
+    /**
+     * Built lazily rather than in the constructor, because {@link #sloBudgetMs} is injected after
+     * construction; the monitor reads the budget once, from the injected value.
+     */
+    private volatile ApiSloMonitor slo;
+
+    private ApiSloMonitor slo() {
+        ApiSloMonitor m = slo;
+        if (m == null) {
+            synchronized (this) {
+                m = slo;
+                if (m == null) {
+                    m = new ApiSloMonitor(sloBudgetMs);
+                    slo = m;
+                }
+            }
+        }
+        return m;
+    }
+
+    /** Test seam: install a monitor with a fake clock (or a different budget). */
+    void useSloMonitor(ApiSloMonitor monitor) {
+        this.slo = monitor;
+    }
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
@@ -87,6 +117,10 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
 
             if (status >= 400) log.warn(sb.toString());
             else log.info(sb.toString());
+
+            // The 200ms budget's own WARN — distinct from (and in addition to) the line above, so a
+            // sustained slow endpoint is greppable by its [SLO] prefix regardless of status.
+            slo().record(method, uri, status, elapsed);
 
         } catch (Exception e) {
             log.debug("Error logging API request: {}", e.getMessage());

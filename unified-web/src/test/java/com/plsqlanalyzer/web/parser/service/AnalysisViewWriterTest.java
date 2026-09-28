@@ -178,4 +178,31 @@ class AnalysisViewWriterTest {
         views.write(NAME, AnalysisViewStore.HEADER, wrong);
         assertNull(views.readHeader(NAME));
     }
+
+    /**
+     * The save-time writer precomputes the call trees of the entry points — the root (P1) plus its
+     * depth-1 callee (P2) — each equal to the synthesis the endpoint would otherwise run per request.
+     */
+    @Test
+    void writeAllPrecomputesCallTreesForEntryPoints() throws IOException {
+        index("""
+                {"entryPoint":"DEMO","nodes":[
+                  {"nodeId":"ERP$P1","name":"P1","schema":"ERP","objectType":"PROCEDURE","depth":0},
+                  {"nodeId":"ERP$P2","name":"P2","schema":"ERP","objectType":"PROCEDURE","depth":1}]}""");
+        put(AnalysisPaths.resolveKey(NAME, "api/call_graph.json"),
+                "{\"edges\":[{\"fromNodeId\":\"ERP$P1\",\"toNodeId\":\"ERP$P2\",\"lines\":[10]}]}");
+
+        writer.writeAll(NAME);
+
+        assertTrue(store.exists(callTreeKey("ERP$P1")), "root call-tree sidecar missing");
+        assertTrue(store.exists(callTreeKey("ERP$P2")), "depth-1 call-tree sidecar missing");
+        assertArrayEquals(M.writeValueAsBytes(staticReader.getCallTree(NAME, "ERP$P1")),
+                M.writeValueAsBytes(views.readCallTree(NAME, "ERP$P1")),
+                "precomputed call tree differs from the synthesis it replaces");
+    }
+
+    private ArtifactKey callTreeKey(String nodeId) {
+        return AnalysisPaths.resolveKey(NAME, "views/" + AnalysisViewStore.CALL_TREE_DIR + "/"
+                + AnalysisViewStore.callTreeFileName(nodeId));
+    }
 }

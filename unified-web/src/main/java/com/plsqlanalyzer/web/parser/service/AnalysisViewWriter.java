@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Writes an analysis's precomputed view summaries after {@code AnalysisService.runAnalysis} has
@@ -100,6 +101,45 @@ public class AnalysisViewWriter {
                     summaryStatsService.getStats(name, null, null, null));
         } catch (Exception e) {
             log.warn("view write {} / {} failed: {}", name, AnalysisViewStore.SUMMARY_STATS, e.getMessage());
+        }
+
+        // The call trees for the analysis's entry points, built once here instead of synthesised
+        // from the three whole files on every request. Best-effort and capped; any entry point not
+        // written is backfilled by the read path on first access.
+        writeCallTrees(name);
+    }
+
+    /**
+     * Precomputes the call-tree sidecar for each of {@link StaticAnalysisReader#callTreeEntryPoints}
+     * — the roots plus their depth-1 callees, capped. Each tree is the exact document the endpoint
+     * returns for that node, built through {@link StaticAnalysisReader#getCallTree(String, String)}
+     * (the same synthesis the read path uses), so serving the sidecar is byte-identical.
+     *
+     * <p>Never throws: one node's failure (or the entry-point selection itself) is logged and the
+     * remaining nodes still run.
+     */
+    private void writeCallTrees(String name) {
+        List<String> entryPoints;
+        try {
+            entryPoints = staticReader.callTreeEntryPoints(name);
+        } catch (Exception e) {
+            log.warn("call-tree precompute {} failed to select entry points: {}", name, e.getMessage());
+            return;
+        }
+        int written = 0;
+        for (String nodeId : entryPoints) {
+            try {
+                JsonNode tree = staticReader.getCallTree(name, nodeId);
+                if (tree != null) {
+                    views.writeCallTree(name, nodeId, tree);
+                    written++;
+                }
+            } catch (Exception e) {
+                log.debug("call-tree precompute {} / {} failed: {}", name, nodeId, e.getMessage());
+            }
+        }
+        if (written > 0) {
+            log.debug("call-tree precompute {} wrote {} sidecar(s)", name, written);
         }
     }
 
