@@ -50,6 +50,8 @@ public class ParserAnalysisController {
     private final FacetPageResponder facets;
     private final ParserScopeResolver scopes;
     private final ObjectMapper mapper;
+    /** Precomputed view summaries for the two index-backed endpoints (complexity, summary stats). */
+    private final com.plsqlanalyzer.web.parser.service.AnalysisViewStore views;
     /** The four node-scan facets are queries now, not service calls — PLAN-09 Increment C. */
     private final AnalysisRepository repository;
     private final JoinComplexityConfig joinComplexityConfig;
@@ -75,6 +77,7 @@ public class ParserAnalysisController {
                                      FacetPageResponder facets,
                                      ParserScopeResolver scopes,
                                      ObjectMapper mapper,
+                                     com.plsqlanalyzer.web.parser.service.AnalysisViewStore views,
                                      AnalysisRepository repository,
                                      JoinComplexityConfig joinComplexityConfig,
                                      ParserProcedureReportsService procedureReportsService,
@@ -100,6 +103,7 @@ public class ParserAnalysisController {
         this.facets = facets;
         this.scopes = scopes;
         this.mapper = mapper;
+        this.views = views;
         this.repository = repository;
         this.procedureReportsService = procedureReportsService;
         this.statementsSummaryService = statementsSummaryService;
@@ -694,7 +698,50 @@ public class ParserAnalysisController {
         w.dynamicSql = wDynamicSql; w.depth = wDepth;
         ComplexityScoringService.Thresholds th = new ComplexityScoringService.Thresholds();
         th.medium = thMedium; th.high = thHigh;
+        // Only the default weights/thresholds/algorithm are precomputed (views/complexity.json);
+        // a custom request recomputes, exactly as before.
+        if (isDefaultComplexity(wLoc, wTables, wCallsOut, wCursors, wDynamicSql, wDepth,
+                thMedium, thHigh, algorithm, exponent)) {
+            return serveView(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.COMPLEXITY,
+                    () -> complexityScoringService.getScores(name, w, th, algorithm, exponent));
+        }
         return complexityScoringService.getScores(name, w, th, algorithm, exponent);
+    }
+
+    /** Whether the request is exactly the precomputed {@code /complexity/scores} default. */
+    private static boolean isDefaultComplexity(double wLoc, double wTables, double wCallsOut,
+                                               double wCursors, double wDynamicSql, double wDepth,
+                                               double thMedium, double thHigh, String algorithm,
+                                               double exponent) {
+        ComplexityScoringService.Weights d = new ComplexityScoringService.Weights();
+        ComplexityScoringService.Thresholds dt = new ComplexityScoringService.Thresholds();
+        return Double.compare(wLoc, d.loc) == 0
+                && Double.compare(wTables, d.tables) == 0
+                && Double.compare(wCallsOut, d.callsOut) == 0
+                && Double.compare(wCursors, d.cursors) == 0
+                && Double.compare(wDynamicSql, d.dynamicSql) == 0
+                && Double.compare(wDepth, d.depth) == 0
+                && Double.compare(thMedium, dt.medium) == 0
+                && Double.compare(thHigh, dt.high) == 0
+                && "linear".equalsIgnoreCase(algorithm)
+                && Double.compare(exponent, 1.3) == 0;
+    }
+
+    /**
+     * Serves a small precomputed view body when it exists, otherwise the legacy computation — whose
+     * result is written back as the sidecar (lazy backfill) and returned unchanged. With no view
+     * store wired the legacy response is returned untouched.
+     */
+    private ResponseEntity<Object> serveView(String name, String view,
+                                             java.util.function.Supplier<ResponseEntity<Object>> legacy) {
+        if (views == null) return legacy.get();
+        JsonNode cached = views.read(name, view);
+        if (cached != null) return ResponseEntity.ok(cached);
+        ResponseEntity<Object> response = legacy.get();
+        if (response != null && response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+            views.write(name, view, mapper.valueToTree(response.getBody()));
+        }
+        return response;
     }
 
     /**
@@ -707,6 +754,13 @@ public class ParserAnalysisController {
             @RequestParam(value = "scope", required = false) String scope,
             @RequestParam(value = "procId", required = false) String procId,
             @RequestParam(value = "entrySchema", required = false) String entrySchema) {
+        // The unscoped default is precomputed (views/summary-stats.json); any scope/procId/
+        // entrySchema recomputes, exactly as before.
+        if ((scope == null || scope.isBlank()) && (procId == null || procId.isBlank())
+                && (entrySchema == null || entrySchema.isBlank())) {
+            return serveView(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.SUMMARY_STATS,
+                    () -> summaryStatsService.getStats(name, scope, procId, entrySchema));
+        }
         return summaryStatsService.getStats(name, scope, procId, entrySchema);
     }
 
@@ -783,7 +837,10 @@ public class ParserAnalysisController {
     @GetMapping("/analyses/{name}/joins/summary/queries")
     public ResponseEntity<JsonNode> getJoinsQuerySummary(@PathVariable("name") String name) {
         try {
-            JsonNode raw = service.getJoins(name);
+            // The same joins document /joins serves, read through the repository so it comes from
+            // the precomputed view summary (falls back to the node scan when absent) rather than
+            // re-scanning the node documents for this second view of the same data.
+            JsonNode raw = repository.document(AnalysisQuery.of(AnalysisQuery.Dataset.PLSQL_JOINS, name));
             JoinQuerySummary.Config cfg = new JoinQuerySummary.Config(
                     joinComplexityConfig.getBaseScore(),
                     joinComplexityConfig.getOuterJoinPenalty(),

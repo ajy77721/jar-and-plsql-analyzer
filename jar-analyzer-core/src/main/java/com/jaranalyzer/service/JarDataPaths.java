@@ -132,6 +132,17 @@ public class JarDataPaths {
     public ArtifactKey summaryCacheKey(String jarName)   { return jarRootKey(jarName).resolve("_summary.json"); }
     public ArtifactKey summaryCacheStaticKey(String jarName) { return jarRootKey(jarName).resolve("_summary_static.json"); }
     public ArtifactKey headerKey(String jarName)         { return jarRootKey(jarName).resolve("_header.json"); }
+
+    /**
+     * {@code jar/<id>/views} — precomputed read-side view summaries (the summary header and the
+     * collections aggregate). One folder, deleted whole on re-analysis/correction so no stale view
+     * can outlive the document it summarises; see {@code PersistenceService#invalidateSummaryCache}.
+     */
+    public ArtifactKey viewsDirKey(String jarName)       { return jarRootKey(jarName).resolve("views"); }
+    /** {@code jar/<id>/views/summary-header.json} — the {@code /summary/header} payload. */
+    public ArtifactKey summaryHeaderViewKey(String jarName) { return viewsDirKey(jarName).resolve("summary-header.json"); }
+    /** {@code jar/<id>/views/collections-count.json} — the {@code /collections} aggregate. */
+    public ArtifactKey collectionsViewKey(String jarName) { return viewsDirKey(jarName).resolve("collections-count.json"); }
     public ArtifactKey storedJarKey(String jarName)      { return jarRootKey(jarName).resolve("stored.jar"); }
     public ArtifactKey domainConfigKey(String jarName)   { return jarRootKey(jarName).resolve("domain-config.json"); }
     public ArtifactKey connectionsKey(String jarName)    { return jarRootKey(jarName).resolve("connections.json"); }

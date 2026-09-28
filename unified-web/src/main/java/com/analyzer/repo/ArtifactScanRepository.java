@@ -69,6 +69,14 @@ public class ArtifactScanRepository implements AnalysisRepository {
     private final AnalysisReaderFactory readerFactory;
     private final StaticAnalysisReader staticReader;
 
+    /**
+     * Precomputed view summaries ({@code <analysis>/views/*.json}). Consulted before a facet's own
+     * reader, and written back on a miss, so every facet endpoint's byte-identical response comes
+     * from a few KB instead of a full node scan. Absent sidecars fall straight through to the
+     * reader — see {@link AnalysisViewStore}.
+     */
+    private final com.plsqlanalyzer.web.parser.service.AnalysisViewStore views;
+
     /** JAR side. */
     private final AnalysisDataProviderFactory providerFactory;
     private final JarDataPaths jarPaths;
@@ -78,6 +86,7 @@ public class ArtifactScanRepository implements AnalysisRepository {
                                   ObjectMapper mapper,
                                   AnalysisReaderFactory readerFactory,
                                   StaticAnalysisReader staticReader,
+                                  com.plsqlanalyzer.web.parser.service.AnalysisViewStore views,
                                   AnalysisDataProviderFactory providerFactory,
                                   JarDataPaths jarPaths) {
         this.parserStore = parserStore;
@@ -85,6 +94,7 @@ public class ArtifactScanRepository implements AnalysisRepository {
         this.mapper = mapper;
         this.readerFactory = readerFactory;
         this.staticReader = staticReader;
+        this.views = views;
         this.providerFactory = providerFactory;
         this.jarPaths = jarPaths;
     }
@@ -181,20 +191,61 @@ public class ArtifactScanRepository implements AnalysisRepository {
     public JsonNode document(AnalysisQuery query) throws IOException {
         String name = query.analysis();
         return switch (query.dataset()) {
-            case PLSQL_JOINS -> readerFactory.getReader(name).getJoins(name);
-            case PLSQL_CURSORS -> readerFactory.getReader(name).getCursors(name);
-            case PLSQL_SEQUENCES -> readerFactory.getReader(name).getSequences(name);
-            case PLSQL_DYNAMIC_SQL -> readerFactory.getReader(name).getDynamicSql(name);
+            // The four node-scan facets read their precomputed view summary when one exists,
+            // otherwise the reader computes exactly what it did before and the result is written
+            // back as the sidecar (lazy backfill). Byte-identical either way — see AnalysisViewStore.
+            case PLSQL_JOINS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.JOINS_SUMMARY,
+                    () -> readerFactory.getReader(name).getJoins(name));
+            case PLSQL_CURSORS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.CURSORS,
+                    () -> readerFactory.getReader(name).getCursors(name));
+            case PLSQL_SEQUENCES -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.SEQUENCES,
+                    () -> readerFactory.getReader(name).getSequences(name));
+            case PLSQL_DYNAMIC_SQL -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.DYNAMIC_SQL,
+                    () -> readerFactory.getReader(name).getDynamicSql(name));
             case PLSQL_PROCEDURES -> readerFactory.getReader(name).getProcedures(name);
             // Static reader, matching getTables' own binding: the tables index is a crawler output,
             // not a node scan, and the Claude reader has nothing to add to it.
             case PLSQL_TABLES -> staticReader.getTables(name);
-            case PLSQL_TABLE_JOINS -> staticReader.getTableJoins(name, query.table());
-            case PLSQL_TABLE_COLUMNS -> staticReader.getTableColumnRefs(name, query.table());
+            case PLSQL_TABLE_JOINS -> tableView(name,
+                    com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TABLE_JOINS, query.table(),
+                    () -> staticReader.getTableJoins(name, query.table()));
+            case PLSQL_TABLE_COLUMNS -> tableView(name,
+                    com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TABLE_COLUMNS, query.table(),
+                    () -> staticReader.getTableColumnRefs(name, query.table()));
             case PLSQL_TABLE_COLUMN_DETAIL -> staticReader.getTableColumnDetail(name, query.table());
             default -> throw new UnsupportedOperationException(
                     "document() is not defined for " + query.dataset() + "; use rows()");
         };
+    }
+
+    /**
+     * A whole-analysis facet's document from its sidecar, else computed and cached by {@link
+     * AnalysisViewStore#readOrCompute}. With no view store wired (a test fixture that does not
+     * exercise sidecars) the reader's own result is returned untouched.
+     */
+    private JsonNode view(String name, String view,
+                          com.plsqlanalyzer.web.parser.service.AnalysisViewStore.IoSupplier<JsonNode> legacy)
+            throws IOException {
+        if (views == null) return legacy.get();
+        return views.readOrCompute(name, view, legacy);
+    }
+
+    /**
+     * One table's rows out of a {@code {table -> rows}} sidecar. An entry present is served as-is;
+     * absent means "not computed yet", so the legacy scan runs and its result is merged into the
+     * sidecar — never a false "this table has no rows".
+     */
+    private JsonNode tableView(String name, String view, String table,
+                               com.plsqlanalyzer.web.parser.service.AnalysisViewStore.IoSupplier<JsonNode> legacy)
+            throws IOException {
+        if (views == null) return legacy.get();
+        JsonNode cached = views.readTableEntry(name, view, table);
+        if (cached != null) return cached;
+        JsonNode computed = legacy.get();
+        if (computed != null) {
+            views.putTableEntry(name, view, table, computed);
+        }
+        return computed;
     }
 
     /* ─────────────────────────── rows ─────────────────────────── */

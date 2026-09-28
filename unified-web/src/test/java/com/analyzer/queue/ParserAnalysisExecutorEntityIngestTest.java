@@ -42,7 +42,8 @@ class ParserAnalysisExecutorEntityIngestTest {
         EntityIngestTrigger ingest = mock(EntityIngestTrigger.class);
         when(ingest.enabled()).thenReturn(true);
 
-        ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest);
+        ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest,
+                mock(com.plsqlanalyzer.web.parser.service.AnalysisViewWriter.class));
         QueueJob job = job();
         exec.execute(job, (j, event) -> {});
 
@@ -60,7 +61,8 @@ class ParserAnalysisExecutorEntityIngestTest {
         EntityIngestTrigger ingest = mock(EntityIngestTrigger.class);
         when(ingest.enabled()).thenReturn(false);
 
-        ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest);
+        ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest,
+                mock(com.plsqlanalyzer.web.parser.service.AnalysisViewWriter.class));
         exec.execute(job(), (j, event) -> {});
 
         verify(ingest, never()).afterPlsqlAnalyze(any(), any(), any(), any(), any());
@@ -89,7 +91,8 @@ class ParserAnalysisExecutorEntityIngestTest {
             throw new RuntimeException("simulated entity-ingest outage");
         }).when(ingest).afterPlsqlAnalyze(any(), any(), any(), any(), any());
 
-        ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest);
+        ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest,
+                mock(com.plsqlanalyzer.web.parser.service.AnalysisViewWriter.class));
         QueueJob job = job();
         try {
             exec.execute(job, (j, event) -> {});

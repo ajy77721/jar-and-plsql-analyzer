@@ -59,11 +59,12 @@ public class AnalysisRepositoryConfig {
                                                  ObjectMapper mapper,
                                                  AnalysisReaderFactory readerFactory,
                                                  StaticAnalysisReader staticReader,
+                                                 com.plsqlanalyzer.web.parser.service.AnalysisViewStore views,
                                                  AnalysisDataProviderFactory providerFactory,
                                                  JarDataPaths jarPaths,
                                                  com.analyzer.storage.mongo.MongoConnection mongoConnection) {
         ArtifactScanRepository scan = new ArtifactScanRepository(store, jarStore, mapper, readerFactory,
-                staticReader, providerFactory, jarPaths);
+                staticReader, views, providerFactory, jarPaths);
         return switch (mode) {
             case ARTIFACT_SCAN -> scan;
             case MONGO -> {

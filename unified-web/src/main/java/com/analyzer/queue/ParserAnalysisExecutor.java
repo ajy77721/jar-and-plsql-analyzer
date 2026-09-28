@@ -23,11 +23,14 @@ public class ParserAnalysisExecutor {
 
     private final AnalysisService analysisService;
     private final com.analyzer.repo.EntityIngestTrigger entityIngest;
+    private final com.plsqlanalyzer.web.parser.service.AnalysisViewWriter viewWriter;
 
     public ParserAnalysisExecutor(@Qualifier("parserAnalysisService") AnalysisService analysisService,
-                                   com.analyzer.repo.EntityIngestTrigger entityIngest) {
+                                   com.analyzer.repo.EntityIngestTrigger entityIngest,
+                                   com.plsqlanalyzer.web.parser.service.AnalysisViewWriter viewWriter) {
         this.analysisService = analysisService;
         this.entityIngest = entityIngest;
+        this.viewWriter = viewWriter;
     }
 
     public void execute(QueueJob job, BiConsumer<QueueJob, String> broadcast) throws Exception {
@@ -78,6 +81,16 @@ public class ParserAnalysisExecutor {
             }
         } catch (Exception e) {
             log.warn("Could not attach timing breakdown to job {}: {}", job.id, e.getMessage());
+        }
+
+        // Precompute this analysis's view summaries now that every artifact is written, so read
+        // endpoints serve a few KB instead of re-scanning the node documents. Best-effort: the
+        // primary analysis has already succeeded, and a miss self-heals on first read (see
+        // AnalysisViewStore's lazy backfill), so a failure here must not fail the job.
+        try {
+            viewWriter.writeAll(folderName);
+        } catch (Exception e) {
+            log.warn("Could not precompute view summaries for {}: {}", folderName, e.getMessage());
         }
 
         progress(job, broadcast, "[3/3] Analysis complete: " + folderName);
