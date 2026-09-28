@@ -188,6 +188,34 @@ public class AnalysisService {
         return buildInfo(name, AnalysisPaths.resolveKey(name, "api/index.json"));
     }
 
+    /**
+     * Recomputes and stores {@code views/header.json} for a single analysis from its
+     * {@code api/index.json} — the warm-up sweep's header step, for an analysis that predates the
+     * sidecar (or whose header was invalidated).
+     *
+     * <p>The scalars are exactly what {@link #readIndexHeader} extracts, so the stored header is the
+     * listing read's own output. Best-effort: the store may be unreachable from a background thread
+     * with no user credentials, so this reports failure rather than throwing.
+     *
+     * @param logFailure whether a failed read/write is logged at WARN (the warm-up passes false and
+     *                   tallies the failure itself)
+     * @return true when the header sidecar is now present
+     */
+    public boolean writeHeaderSidecar(String name, boolean logFailure) {
+        if (name == null || name.isBlank() || viewStore == null) return false;
+        try {
+            JsonNode scalars = readIndexHeader(AnalysisPaths.resolveKey(name, "api/index.json"));
+            if (!(scalars instanceof ObjectNode objectNode)) return false;
+            return viewStore.writeHeader(name, objectNode, logFailure);
+        } catch (Exception e) {
+            if (logFailure) {
+                org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
+                        .warn("[AnalysisService] Could not write header sidecar for {}: {}", name, e.getMessage());
+            }
+            return false;
+        }
+    }
+
     public JsonNode getIndex(String name) throws IOException {
         return readerFactory.getReader(name).getIndex(name);
     }

@@ -23,14 +23,14 @@ public class ParserAnalysisExecutor {
 
     private final AnalysisService analysisService;
     private final com.analyzer.repo.EntityIngestTrigger entityIngest;
-    private final com.plsqlanalyzer.web.parser.service.AnalysisViewWriter viewWriter;
+    private final com.plsqlanalyzer.web.parser.service.SidecarWarmUpService sidecarWarmUp;
 
     public ParserAnalysisExecutor(@Qualifier("parserAnalysisService") AnalysisService analysisService,
                                    com.analyzer.repo.EntityIngestTrigger entityIngest,
-                                   com.plsqlanalyzer.web.parser.service.AnalysisViewWriter viewWriter) {
+                                   com.plsqlanalyzer.web.parser.service.SidecarWarmUpService sidecarWarmUp) {
         this.analysisService = analysisService;
         this.entityIngest = entityIngest;
-        this.viewWriter = viewWriter;
+        this.sidecarWarmUp = sidecarWarmUp;
     }
 
     public void execute(QueueJob job, BiConsumer<QueueJob, String> broadcast) throws Exception {
@@ -84,13 +84,16 @@ public class ParserAnalysisExecutor {
         }
 
         // Precompute this analysis's view summaries now that every artifact is written, so read
-        // endpoints serve a few KB instead of re-scanning the node documents. Best-effort: the
-        // primary analysis has already succeeded, and a miss self-heals on first read (see
-        // AnalysisViewStore's lazy backfill), so a failure here must not fail the job.
-        try {
-            viewWriter.writeAll(folderName);
-        } catch (Exception e) {
-            log.warn("Could not precompute view summaries for {}: {}", folderName, e.getMessage());
+        // endpoints serve a few KB instead of re-scanning the node documents. This is the staging
+        // path that matters: the job runs with its submitter's captured stores and credentials
+        // installed (SsoJobContext, wrapped around this executor in AnalysisQueueService), so the
+        // warm-up can reach the store here even when the background sweep — which has no session
+        // and falls back to a credential-less default store on a pod — cannot. Best-effort: the
+        // primary analysis has already succeeded, a miss self-heals on first read (see
+        // AnalysisViewStore's lazy backfill), and warmOne never throws, so this cannot fail the job.
+        if (!sidecarWarmUp.warmOne(folderName)) {
+            log.warn("[ParserAnalysis] View summaries incomplete for {}; the read path will "
+                    + "backfill them", folderName);
         }
 
         progress(job, broadcast, "[3/3] Analysis complete: " + folderName);

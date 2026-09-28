@@ -76,6 +76,17 @@ public class AnalysisViewStore {
     /** The default-scope {@code /summary/stats} body. */
     public static final String SUMMARY_STATS = "summary-stats.json";
 
+    /**
+     * The eight facets {@link AnalysisViewWriter#writeAll} produces, in the order it produces them.
+     * {@link #HEADER} is deliberately not here: it is written at save time from the index root the
+     * analysis already holds, and it is the one sidecar carrying {@code formatVersion}, so it is the
+     * completeness <em>marker</em> rather than just another member of the set.
+     */
+    private static final String[] FACET_VIEWS = {
+            SEQUENCES, CURSORS, DYNAMIC_SQL, JOINS_SUMMARY,
+            TABLE_JOINS, TABLE_COLUMNS, COMPLEXITY, SUMMARY_STATS
+    };
+
     private final ArtifactStore store;
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -134,6 +145,25 @@ public class AnalysisViewStore {
     }
 
     /**
+     * True when an analysis already has a complete, fresh sidecar set — a current-format
+     * {@link #HEADER} plus every {@link #FACET_VIEWS facet}. This is the warm-up sweep's skip flag:
+     * it asks the same question every read asks (present <em>and</em> at least as new as
+     * {@code api/index.json}), so a re-analysis that rewrote the index invalidates the set and the
+     * sweep rebuilds it exactly as a first read would.
+     *
+     * <p>Checks the header first and returns on the first miss, so an analysis with nothing
+     * precomputed costs one store probe rather than nine.
+     */
+    public boolean hasCompleteViewSet(String name) {
+        if (name == null || name.isBlank()) return false;
+        if (readHeader(name) == null) return false;
+        for (String view : FACET_VIEWS) {
+            if (read(name, view) == null) return false;
+        }
+        return true;
+    }
+
+    /**
      * The sidecar if present and fresh, otherwise {@code legacy}'s result — which is then written
      * as the sidecar so the next request is served from it (lazy backfill).
      *
@@ -152,13 +182,33 @@ public class AnalysisViewStore {
     }
 
     /** Writes {@code doc} as the sidecar for {@code view}. Best-effort — never throws. */
-    public void write(String name, String view, JsonNode doc) {
-        if (doc == null) return;
+    public boolean write(String name, String view, JsonNode doc) {
+        return write(name, view, doc, true);
+    }
+
+    /**
+     * As {@link #write(String, String, JsonNode)}, with control over the failure log.
+     *
+     * <p>The background warm-up passes {@code logFailure=false}: it tallies failures itself and
+     * emits one line per sweep, so a deployment whose store is unreachable is not warned once per
+     * facet per analysis. The failure is still recorded at DEBUG, and the return value still says
+     * whether the write landed, so the quieter caller loses no information.
+     *
+     * @return true when the sidecar was written, false when it was not
+     */
+    public boolean write(String name, String view, JsonNode doc, boolean logFailure) {
+        if (doc == null) return false;
         synchronized (lockFor(name)) {
             try (OutputStream out = store.write(key(name, view))) {
                 mapper.writeValue(out, doc);
+                return true;
             } catch (Exception e) {
-                log.warn("view write {} / {} failed: {}", name, view, e.getMessage());
+                if (logFailure) {
+                    log.warn("view write {} / {} failed: {}", name, view, e.getMessage());
+                } else {
+                    log.debug("view write {} / {} failed: {}", name, view, e.getMessage());
+                }
+                return false;
             }
         }
     }
@@ -196,11 +246,16 @@ public class AnalysisViewStore {
      * returned, so a sidecar read yields the same {@code AnalysisInfo} the legacy read would.
      * {@code formatVersion} is added here — the one field the legacy reader never produced.
      */
-    public void writeHeader(String name, ObjectNode scalars) {
-        if (scalars == null) return;
+    public boolean writeHeader(String name, ObjectNode scalars) {
+        return writeHeader(name, scalars, true);
+    }
+
+    /** As {@link #writeHeader(String, ObjectNode)}; see {@link #write(String, String, JsonNode, boolean)}. */
+    public boolean writeHeader(String name, ObjectNode scalars, boolean logFailure) {
+        if (scalars == null) return false;
         ObjectNode copy = scalars.deepCopy();
         copy.put("formatVersion", FORMAT_VERSION);
-        write(name, HEADER, copy);
+        return write(name, HEADER, copy, logFailure);
     }
 
     /* ──────────────────────── table-scoped facets ──────────────────────── */
@@ -231,14 +286,20 @@ public class AnalysisViewStore {
     }
 
     /** Replaces a whole {@code {table -> rows}} sidecar, used by the writer at save time. */
-    public void writeTableMap(String name, String view, Map<String, ? extends JsonNode> byTable) {
+    public boolean writeTableMap(String name, String view, Map<String, ? extends JsonNode> byTable) {
+        return writeTableMap(name, view, byTable, true);
+    }
+
+    /** As {@link #writeTableMap(String, String, Map)}; see {@link #write(String, String, JsonNode, boolean)}. */
+    public boolean writeTableMap(String name, String view, Map<String, ? extends JsonNode> byTable,
+                                 boolean logFailure) {
         ObjectNode map = mapper.createObjectNode();
         byTable.forEach((table, rows) -> {
             if (table != null && !table.isBlank() && rows != null) {
                 map.set(normalizeTable(table), rows);
             }
         });
-        write(name, view, map);
+        return write(name, view, map, logFailure);
     }
 
     /** Table keys are case-insensitive, matching the reader's own {@code upper(table)} matching. */

@@ -95,6 +95,8 @@ public class AdminController {
     private final com.jaranalyzer.service.PersistenceService jarPersistenceService;
     /** The on-disk artifact cache, so the portal can report and empty it. */
     private final DiskCacheAdmin diskCache;
+    /** The background sidecar warmer, so the portal can trigger a sweep on demand. */
+    private final com.plsqlanalyzer.web.parser.service.SidecarWarmUpService sidecarWarmUp;
     private final String username;
     private final String password;
 
@@ -117,6 +119,7 @@ public class AdminController {
                            @Qualifier("jarPersistenceService")
                            com.jaranalyzer.service.PersistenceService jarPersistenceService,
                            DiskCacheAdmin diskCache,
+                           com.plsqlanalyzer.web.parser.service.SidecarWarmUpService sidecarWarmUp,
                            // Env-var fallback (APP_ADMIN_USERNAME/PASSWORD) lets Kanopy inject
                            // real credentials via envSecrets without code changes; the property
                            // defaults are for local dev only and must not reach production.
@@ -129,6 +132,7 @@ public class AdminController {
         this.parserAnalysisService = parserAnalysisService;
         this.jarPersistenceService = jarPersistenceService;
         this.diskCache = diskCache;
+        this.sidecarWarmUp = sidecarWarmUp;
         this.username = username;
         this.password = password;
     }
@@ -172,6 +176,40 @@ public class AdminController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", true);
         return ResponseEntity.ok(out);
+    }
+
+    /**
+     * Triggers one eager sidecar warm-up sweep on demand, so an operator can fill the precomputed
+     * view summaries after a deploy or a bulk re-analysis without waiting for the periodic sweep.
+     *
+     * <p>Runs in the background and returns immediately: a sweep can take minutes over a large
+     * corpus, and an admin request must not sit on it. The counts from the most recent completed
+     * sweep are returned alongside, so the caller sees the effect of the previous trigger.
+     */
+    @PostMapping("/warmup")
+    public ResponseEntity<Map<String, Object>> warmup(
+            @RequestHeader(value = KEY_HEADER, required = false) String key) {
+        ResponseEntity<Map<String, Object>> denied = requireAuth(key);
+        if (denied != null) return denied;
+
+        boolean started = sidecarWarmUp.triggerSweep();
+        var last = sidecarWarmUp.lastSweep();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("started", started);
+        out.put("note", started
+                ? "warm-up sweep started in the background"
+                : "a sweep is already running, or warm-up is disabled (app.sidecar.warmup.enabled)");
+        Map<String, Object> previous = new LinkedHashMap<>();
+        previous.put("analyses", last.analyses());
+        previous.put("warmed", last.warmed());
+        previous.put("alreadyComplete", last.alreadyComplete());
+        previous.put("failed", last.failed());
+        previous.put("sidecarsWritten", last.sidecarsWritten());
+        previous.put("durationMs", last.durationMs());
+        previous.put("finishedAt", last.finishedAt());
+        out.put("lastSweep", previous);
+        return ResponseEntity.accepted().body(out);
     }
 
     private static boolean constantTimeEquals(String supplied, String expected) {

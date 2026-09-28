@@ -57,31 +57,49 @@ public class AnalysisViewWriter {
         this.mapper = mapper;
     }
 
+    /** How many facets {@link #writeAll} attempts — 4 node-scan + 2 table maps + complexity + stats. */
+    public static final int VIEW_COUNT = 8;
+
     /**
      * Computes and writes every parser-side view summary for {@code name}. Never throws — each view
      * is attempted independently, so one bad facet cannot stop the others.
      */
     public void writeAll(String name) {
-        if (name == null || name.isBlank()) return;
+        writeAll(name, true);
+    }
+
+    /**
+     * As {@link #writeAll(String)}, reporting how many facets landed and optionally staying quiet.
+     *
+     * <p>The background warm-up passes {@code verbose=false} and tallies the failures into its one
+     * line per sweep, so a deployment whose store is unreachable does not warn once per facet per
+     * analysis. The computation is identical either way; only the log level differs.
+     *
+     * @return the number of the {@link #VIEW_COUNT} facets whose sidecar was written (0..8)
+     */
+    public int writeAll(String name, boolean verbose) {
+        if (name == null || name.isBlank()) return 0;
+        int written = 0;
+
         // The four node-scan facets: document() backfills each sidecar on the miss this call is.
-        facet(name, AnalysisQuery.Dataset.PLSQL_SEQUENCES);
-        facet(name, AnalysisQuery.Dataset.PLSQL_CURSORS);
-        facet(name, AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL);
-        facet(name, AnalysisQuery.Dataset.PLSQL_JOINS);
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_SEQUENCES, verbose)) written++;
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_CURSORS, verbose)) written++;
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL, verbose)) written++;
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_JOINS, verbose)) written++;
 
         // The two table-scoped facets, grouped in one scan each — the endpoint is per-table, so a
         // map is the only shape that serves every table without re-scanning per table.
         try {
-            views.writeTableMap(name, AnalysisViewStore.TABLE_JOINS,
-                    staticReader.getAllTableJoins(name));
+            if (views.writeTableMap(name, AnalysisViewStore.TABLE_JOINS,
+                    staticReader.getAllTableJoins(name), verbose)) written++;
         } catch (Exception e) {
-            log.warn("view write {} / {} failed: {}", name, AnalysisViewStore.TABLE_JOINS, e.getMessage());
+            logFacet(name, AnalysisViewStore.TABLE_JOINS, e, verbose);
         }
         try {
-            views.writeTableMap(name, AnalysisViewStore.TABLE_COLUMNS,
-                    staticReader.getAllTableColumnRefs(name));
+            if (views.writeTableMap(name, AnalysisViewStore.TABLE_COLUMNS,
+                    staticReader.getAllTableColumnRefs(name), verbose)) written++;
         } catch (Exception e) {
-            log.warn("view write {} / {} failed: {}", name, AnalysisViewStore.TABLE_COLUMNS, e.getMessage());
+            logFacet(name, AnalysisViewStore.TABLE_COLUMNS, e, verbose);
         }
 
         // Complexity at the endpoint's default weights; the endpoint recomputes for custom weights.
@@ -89,34 +107,47 @@ public class AnalysisViewWriter {
             ResponseEntity<Object> response = complexityScoringService.getScores(
                     name, new ComplexityScoringService.Weights(),
                     new ComplexityScoringService.Thresholds(), DEFAULT_ALGORITHM, DEFAULT_EXPONENT);
-            writeBody(name, AnalysisViewStore.COMPLEXITY, response);
+            if (writeBody(name, AnalysisViewStore.COMPLEXITY, response, verbose)) written++;
         } catch (Exception e) {
-            log.warn("view write {} / {} failed: {}", name, AnalysisViewStore.COMPLEXITY, e.getMessage());
+            logFacet(name, AnalysisViewStore.COMPLEXITY, e, verbose);
         }
 
         // Summary stats at the default (unscoped) request.
         try {
-            writeBody(name, AnalysisViewStore.SUMMARY_STATS,
-                    summaryStatsService.getStats(name, null, null, null));
+            if (writeBody(name, AnalysisViewStore.SUMMARY_STATS,
+                    summaryStatsService.getStats(name, null, null, null), verbose)) written++;
         } catch (Exception e) {
-            log.warn("view write {} / {} failed: {}", name, AnalysisViewStore.SUMMARY_STATS, e.getMessage());
+            logFacet(name, AnalysisViewStore.SUMMARY_STATS, e, verbose);
         }
+
+        return written;
     }
 
-    private void facet(String name, AnalysisQuery.Dataset dataset) {
+    private boolean facet(String name, AnalysisQuery.Dataset dataset, boolean verbose) {
         try {
-            repository.document(AnalysisQuery.of(dataset, name));
+            // document() writes the sidecar on the miss this call is; a null document means the
+            // analysis has no such facet, so no sidecar was written and this facet did not land.
+            return repository.document(AnalysisQuery.of(dataset, name)) != null;
         } catch (Exception e) {
-            log.warn("view write {} / {} failed: {}", name, dataset, e.getMessage());
+            logFacet(name, dataset.toString(), e, verbose);
+            return false;
         }
     }
 
     /** Writes a service response body as a sidecar when the response actually carries one. */
-    private void writeBody(String name, String view, ResponseEntity<Object> response) {
+    private boolean writeBody(String name, String view, ResponseEntity<Object> response, boolean verbose) {
         if (response == null || !response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
-            return;
+            return false;
         }
         JsonNode body = mapper.valueToTree(response.getBody());
-        views.write(name, view, body);
+        return views.write(name, view, body, verbose);
+    }
+
+    private static void logFacet(String name, String view, Exception e, boolean verbose) {
+        if (verbose) {
+            log.warn("view write {} / {} failed: {}", name, view, e.getMessage());
+        } else {
+            log.debug("view write {} / {} failed: {}", name, view, e.getMessage());
+        }
     }
 }
