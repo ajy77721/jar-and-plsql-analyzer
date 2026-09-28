@@ -296,8 +296,26 @@ public class AnalysisService {
      * it is now written down.
      */
 
+    /**
+     * The default (unbounded) call tree — the payload {@code /analyses/{name}/call-tree/{nodeId}}
+     * serves. Served from the {@code views/call-tree/<nodeId>.json} sidecar when it is present and
+     * fresh; otherwise synthesised exactly as before from {@code api/index.json} +
+     * {@code api/call_graph.json} + {@code api/node_id_map.json} and written back as the sidecar so
+     * the next request is served from it. Synthesising the three files per request is the 1.9s/598KB
+     * cost this replaces; the miss path is the pre-change code, unchanged.
+     *
+     * <p>The write is best-effort and uses the same reader chain the endpoint reads through, so an
+     * analysis carrying Claude call corrections backfills the corrected tree, never the raw one. The
+     * sidecar is only trusted while it is at least as new as {@code api/index.json} and is dropped by
+     * the correction path's {@link AnalysisViewStore#invalidate(String)} — the same staleness rule the
+     * facet summaries use.
+     */
     public JsonNode getCallTree(String name, String nodeId) throws IOException {
-        return readerFactory.getReader(name).getCallTree(name, nodeId);
+        JsonNode cached = viewStore == null ? null : viewStore.readCallTree(name, nodeId);
+        if (cached != null) return cached;
+        JsonNode computed = readerFactory.getReader(name).getCallTree(name, nodeId);
+        if (computed != null && viewStore != null) viewStore.writeCallTree(name, nodeId, computed);
+        return computed;
     }
 
     /** UI-019 (§142) — {@code maxDepth} fetches only that many levels; see {@link

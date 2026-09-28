@@ -119,6 +119,10 @@ class AnalysisViewsGoldenTest {
         put(AnalysisPaths.resolveKey(NAME, "api/nodes/" + file), json);
     }
 
+    private void callGraph(String json) throws IOException {
+        put(AnalysisPaths.resolveKey(NAME, "api/call_graph.json"), json);
+    }
+
     private void put(ArtifactKey key, String body) throws IOException {
         try (OutputStream out = store.write(key)) {
             out.write(body.getBytes(StandardCharsets.UTF_8));
@@ -157,6 +161,12 @@ class AnalysisViewsGoldenTest {
                  "cursors":[{"name":"C2","query":"SELECT 1","refCursor":true,"line":6}],
                  "tables":[{"name":"ORDERS","joins":[{"joinType":"LEFT","joinedTable":"CUSTOMER",
                     "condition":"c.id=o.cust","line":20}]}]}""");
+        // P1 calls P2, so P1 is the root and P2 its depth-1 callee — the two entry points whose
+        // call trees the save-time writer precomputes.
+        callGraph("""
+                {"edges":[
+                  {"from":"P1","to":"P2","fromNodeId":"ERP$P1","toNodeId":"ERP$P2",
+                   "fromSchema":"ERP","toSchema":"ERP","lines":[10],"count":1}]}""");
     }
 
     /* --------------------------- golden assertions --------------------------- */
@@ -280,6 +290,49 @@ class AnalysisViewsGoldenTest {
     void joinsQuerySummaryIsByteIdenticalFromSidecar() throws Exception {
         writeFixture();
         golden(AnalysisViewStore.JOINS_SUMMARY, () -> controller.getJoinsQuerySummary(NAME));
+    }
+
+    /* ------------------------------ call tree ------------------------------ */
+
+    private ArtifactKey callTreeSidecar(String nodeId) {
+        return AnalysisPaths.resolveKey(NAME, "views/" + AnalysisViewStore.CALL_TREE_DIR + "/"
+                + AnalysisViewStore.callTreeFileName(nodeId));
+    }
+
+    /**
+     * The call-tree sidecar: {@code /call-tree/{nodeId}} served from {@code views/call-tree/} must be
+     * byte-identical to the three-file synthesis it replaces, for a root (P1) and for its depth-1
+     * callee (P2), and the absent-sidecar path must backfill the same document.
+     */
+    @Test
+    void callTreeIsByteIdenticalFromSidecar() throws Exception {
+        writeFixture();
+        for (String nodeId : new String[]{"ERP$P1", "ERP$P2"}) {
+            views.invalidate(NAME);
+            byte[] legacy = bytes(controller.getCallTree(NAME, nodeId, null));
+            assertTrue(store.exists(callTreeSidecar(nodeId)),
+                    "call-tree sidecar was not written for " + nodeId);
+            byte[] cached = bytes(controller.getCallTree(NAME, nodeId, null));
+            assertArrayEquals(legacy, cached,
+                    "call-tree sidecar differs from the legacy synthesis for " + nodeId);
+        }
+    }
+
+    /**
+     * A correction drops the call trees with the rest of {@code views/} — the same invalidation hook
+     * that already covers the facet summaries, because the trees live under the same prefix.
+     */
+    @Test
+    void correctionInvalidationDropsCallTreeSidecars() throws Exception {
+        writeFixture();
+        bytes(controller.getCallTree(NAME, "ERP$P1", null));
+        assertTrue(store.exists(callTreeSidecar("ERP$P1")));
+
+        new ClaudePersistenceService(store).saveClaudeResult(NAME,
+                new com.plsqlanalyzer.web.parser.service.ClaudeVerificationModels.VerificationResult());
+
+        assertTrue(!store.exists(callTreeSidecar("ERP$P1")),
+                "a correction must drop the call-tree sidecars too");
     }
 
     /* ------------------------------ fallback ------------------------------ */

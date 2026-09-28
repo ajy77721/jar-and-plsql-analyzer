@@ -23,6 +23,108 @@ class CallTreeFacetReader {
         this.pkgBuilder = new PackageTreeBuilder(r);
     }
 
+    /**
+     * How many entry-point call trees {@link AnalysisViewWriter} precomputes at save time. The roots
+     * plus their depth-1 callees are what a user opens first; past a few dozen the cost of building
+     * each tree at save time outweighs the hit rate, and any node not precomputed still gets its
+     * sidecar from the read path's lazy backfill on first access.
+     */
+    static final int ENTRY_POINT_CAP = 40;
+
+    /**
+     * The node ids the call-tree sidecars are precomputed for: the analysis's <b>roots</b> (nodes no
+     * edge calls — the top-level procedures the UI opens first) plus their direct callees (the
+     * depth-1 layer), de-duplicated and capped at {@link #ENTRY_POINT_CAP}.
+     *
+     * <p>Computed from the same three files the tree itself is built from, and the same id resolution
+     * ({@link CallGraphNav#resolveToFullId}), so a node selected here is exactly a node the endpoint
+     * can be asked for. An analysis with no {@code api/call_graph.json}, or one whose nodes are all
+     * called (a cycle-only corpus with no root), falls back to the shallowest {@code depth} layer,
+     * then to index order — a best-effort selection that never throws.
+     */
+    List<String> entryPointNodeIds(String name) throws IOException {
+        JsonNode index;
+        try {
+            index = r.getIndex(name);
+        } catch (IOException e) {
+            return List.of();
+        }
+        JsonNode nodes = index.get("nodes");
+        if (nodes == null || !nodes.isArray()) return List.of();
+
+        List<String> ids = new ArrayList<>();
+        Map<String, Integer> depth = new HashMap<>();
+        for (JsonNode n : nodes) {
+            String id = textOrNull(n, "nodeId");
+            if (id == null || id.isBlank()) continue;
+            ids.add(id);
+            depth.put(id, intOrDefault(n, "depth", -1));
+        }
+        if (ids.isEmpty()) return List.of();
+
+        Map<String, String> shortToFull = r.loadIdMap(name);
+        Set<String> known = new HashSet<>(ids);
+
+        JsonNode edges = null;
+        try {
+            JsonNode callGraph = r.getCallGraph(name);
+            if (callGraph != null) edges = callGraph.get("edges");
+        } catch (IOException e) {
+            // No api/call_graph.json — an old run, or one whose crawl recorded no edges. Every node
+            // is a root then, which is the correct reading of "nothing calls it".
+            edges = null;
+        }
+
+        Set<String> hasCaller = new HashSet<>();
+        Map<String, List<String>> children = new HashMap<>();
+        if (edges != null && edges.isArray()) {
+            for (JsonNode edge : edges) {
+                String from = textOrNull(edge, "fromNodeId");
+                String to = textOrNull(edge, "toNodeId");
+                String fullTo = to == null ? null : nav.resolveToFullId(to, shortToFull, known);
+                boolean toKnown = fullTo != null && known.contains(fullTo);
+                if (toKnown) hasCaller.add(fullTo);
+                if (from == null) continue;
+                String fullFrom = nav.resolveToFullId(from, shortToFull, known);
+                if (known.contains(fullFrom) && toKnown) {
+                    children.computeIfAbsent(fullFrom, k -> new ArrayList<>()).add(fullTo);
+                }
+            }
+        }
+
+        LinkedHashSet<String> roots = new LinkedHashSet<>();
+        for (String id : ids) {
+            if (!hasCaller.contains(id)) roots.add(id);
+        }
+        if (roots.isEmpty()) {
+            int min = Integer.MAX_VALUE;
+            for (String id : ids) {
+                int d = depth.getOrDefault(id, -1);
+                if (d >= 0 && d < min) min = d;
+            }
+            if (min != Integer.MAX_VALUE) {
+                for (String id : ids) {
+                    if (depth.getOrDefault(id, -1) == min) roots.add(id);
+                }
+            }
+            if (roots.isEmpty()) roots.addAll(ids);
+        }
+
+        LinkedHashSet<String> entries = new LinkedHashSet<>();
+        for (String root : roots) {
+            if (entries.size() >= ENTRY_POINT_CAP) break;
+            entries.add(root);
+        }
+        for (String root : roots) {
+            if (entries.size() >= ENTRY_POINT_CAP) break;
+            for (String child : children.getOrDefault(root, List.of())) {
+                if (entries.size() >= ENTRY_POINT_CAP) break;
+                entries.add(child);
+            }
+        }
+        return new ArrayList<>(entries);
+    }
+
     JsonNode getCallTree(String name, String nodeId) throws IOException {
         return getCallTree(name, nodeId, r.getCallGraph(name), null);
     }

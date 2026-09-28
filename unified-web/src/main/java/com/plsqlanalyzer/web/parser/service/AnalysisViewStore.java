@@ -57,6 +57,15 @@ public class AnalysisViewStore {
     /** The sidecar folder inside an analysis directory. */
     public static final String VIEWS_DIR = "views";
 
+    /**
+     * The subfolder of {@link #VIEWS_DIR} holding one {@code <nodeId>.json} call-tree sidecar per
+     * precomputed entry point. It lives <em>under</em> {@code views/} deliberately: the correction
+     * paths already call {@link #invalidate(String)}, which deletes the whole prefix, so the trees
+     * are invalidated by the same hook that drops the facet summaries — no second staleness rule to
+     * keep in sync.
+     */
+    public static final String CALL_TREE_DIR = "call-tree";
+
     /** Listing scalars + {@code formatVersion} — see {@link #writeHeader}. */
     public static final String HEADER = "header.json";
     /** The {@code /sequences} document. */
@@ -256,6 +265,37 @@ public class AnalysisViewStore {
         ObjectNode copy = scalars.deepCopy();
         copy.put("formatVersion", FORMAT_VERSION);
         return write(name, HEADER, copy, logFailure);
+    }
+
+    /* ──────────────────────────── call trees ──────────────────────────── */
+
+    /**
+     * The sidecar file name for one node's call tree, e.g. {@code ERP$P1.json}.
+     *
+     * <p>Node ids are {@code SCHEMA$NAME} (or {@code SCHEMA$PKG.MEMBER}); a key segment may not carry
+     * a path separator ({@link ArtifactKey} rejects it), and a caller-supplied id is untrusted REST
+     * input, so anything outside the id alphabet is folded to {@code _}. Real ids never contain such
+     * a character, so the fold is a guard, not a transform.
+     */
+    public static String callTreeFileName(String nodeId) {
+        return nodeId.replaceAll("[^A-Za-z0-9._$-]", "_") + ".json";
+    }
+
+    /**
+     * The precomputed call tree for {@code nodeId} — the exact document
+     * {@code /analyses/{name}/call-tree/{nodeId}} serves — or {@code null} when there is none for
+     * this node (it was not an entry point, or the sidecar is absent/stale). A miss means "synthesise
+     * the legacy way", never "this tree is empty".
+     */
+    public JsonNode readCallTree(String name, String nodeId) {
+        if (name == null || name.isBlank() || nodeId == null || nodeId.isBlank()) return null;
+        return read(name, CALL_TREE_DIR + "/" + callTreeFileName(nodeId));
+    }
+
+    /** Writes one node's call tree as a sidecar. Best-effort — never throws. */
+    public void writeCallTree(String name, String nodeId, JsonNode tree) {
+        if (name == null || name.isBlank() || nodeId == null || nodeId.isBlank() || tree == null) return;
+        write(name, CALL_TREE_DIR + "/" + callTreeFileName(nodeId), tree);
     }
 
     /* ──────────────────────── table-scoped facets ──────────────────────── */
