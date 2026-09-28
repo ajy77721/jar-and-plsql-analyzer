@@ -158,10 +158,13 @@ class CachingArtifactStoreTest {
         get(store, first);
         get(store, second);
 
-        int deleted = store.trimNow();
-        assertTrue(deleted >= 1, "trim should have removed at least one artifact");
+        // NOTE: a scheduled background trim (triggered by the mirrors above) may have already
+        // brought the cache under the cap before trimNow() runs — so the INVARIANT is what
+        // must hold, not the deleted count. (Observed flaky in full-suite runs: the async
+        // trim raced this assertion and trimNow() legitimately found nothing to do.)
+        store.trimNow();
         assertTrue(DiskCacheAdmin.sizeOf(store.cacheDir()) <= 30,
-                "cache must be at or below the cap after trim");
+                "cache must be at or below the cap after trim (whether the background trim or trimNow did it)");
     }
 
     private static List<String> listLeavesList(ArtifactStore store, ArtifactKey dir) throws IOException {
