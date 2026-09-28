@@ -25,11 +25,15 @@ import com.analyzer.storage.ArtifactStore;
  * <h2>Scope and lifetime</h2>
  *
  * <p>The override is a {@link ThreadLocal}, set and cleared around the executor call in
- * {@code AnalysisQueueService}. A nested install restores the previous value on {@link #close()}, so
- * a follow-up job cannot leak its predecessor's identity. Only the job's own thread is covered: work
- * handed to a <em>pooled</em> helper thread (e.g. a Claude chunk executor) starts with no request
- * context and therefore still resolves the default path; such work is expected to run on the job
- * thread or be handed the snapshot explicitly.
+ * {@code AnalysisQueueService} and around the login-triggered warm sweep in
+ * {@code SidecarWarmUpService}. A nested install restores the previous value on {@link #close()}, so
+ * a follow-up job cannot leak its predecessor's identity. The job's own thread is covered directly;
+ * a <em>listing fan-out</em> ({@code ShallowTree}) is covered indirectly, because the routing store's
+ * {@link SessionRoutingArtifactStore#captureScope()} carries this snapshot's {@link #sessionId()}
+ * onto its pool workers so they resolve the capture's user store and cached credentials. Other
+ * pooled helper threads (e.g. a Claude chunk executor) still start with no request context and
+ * resolve the default path; such work is expected to run on the job thread or be handed the snapshot
+ * explicitly.
  *
  * <p>Nothing here is ever logged: the snapshot holds a live credentials triple, and this class never
  * renders it.
@@ -41,11 +45,15 @@ public final class SsoJobContext implements AutoCloseable {
 
     private final CapturedStores stores;
     private final CapturedCredentials credentials;
+    /** The session this snapshot belongs to, taken from whichever half carried one. */
+    private final String sessionId;
     private final SsoJobContext previous;
 
     private SsoJobContext(CapturedStores stores, CapturedCredentials credentials, SsoJobContext previous) {
         this.stores = stores;
         this.credentials = credentials;
+        this.sessionId = stores != null ? stores.sessionId()
+                : (credentials != null ? credentials.sessionId() : null);
         this.previous = previous;
     }
 
@@ -74,6 +82,22 @@ public final class SsoJobContext implements AutoCloseable {
     static CapturedCredentials credentials() {
         SsoJobContext context = CURRENT.get();
         return context == null ? null : context.credentials;
+    }
+
+    /**
+     * The session this thread's job snapshot belongs to, or {@code null} when none is in force.
+     *
+     * <p>This is the one piece of the snapshot a <em>pooled helper</em> thread can carry as
+     * {@link SessionRoutingArtifactStore} re-installs a captured routing scope on its workers
+     * ({@link RequestScopedArtifactStore.Scope} carries a session id, not credential material).
+     * Propagating it lets a listing fan-out started under an installed job context — the login
+     * warm-up sweep — route every worker as the capture's user instead of falling through to the
+     * shared default target. Credentials are then resolved from the registry's per-session cache,
+     * so nothing sensitive crosses threads.
+     */
+    static String sessionId() {
+        SsoJobContext context = CURRENT.get();
+        return context == null ? null : context.sessionId;
     }
 
     @Override

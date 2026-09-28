@@ -71,7 +71,7 @@ class SidecarWarmUpServiceTest {
             return views.writeHeader(inv.getArgument(0), scalars, false);
         });
 
-        warmUp = new SidecarWarmUpService(repository, writer, views, analysisService, true, 6);
+        warmUp = new SidecarWarmUpService(repository, writer, views, analysisService, null, true, 6, true);
 
         writeFixture();
     }
@@ -129,13 +129,22 @@ class SidecarWarmUpServiceTest {
     }
 
     @Test
+    @DisplayName("a login-triggered sweep runs once per interval, not once per login")
+    void loginSweepRunsOncePerInterval() {
+        assertTrue(warmUp.triggerLoginSweep(null, null, "session-abcdefgh"),
+                "the first login starts the sweep");
+        assertFalse(warmUp.triggerLoginSweep(null, null, "session-abcdefgh"),
+                "a later login inside the interval must not re-sweep");
+    }
+
+    @Test
     @DisplayName("a store that cannot be listed fails the sweep quietly, never by throwing")
     void sweepNeverThrowsWhenTheListingFails() throws IOException {
         com.analyzer.storage.AnalysisRepository listingFails =
                 mock(com.analyzer.storage.AnalysisRepository.class);
         when(listingFails.analyses(any())).thenThrow(new IOException("store unreachable"));
         SidecarWarmUpService unreachable = new SidecarWarmUpService(
-                listingFails, writer, views, analysisService, true, 6);
+                listingFails, writer, views, analysisService, null, true, 6, true);
 
         // One INFO line, no exception; the next sweep tries again.
         assertEquals(0, unreachable.sweep());
