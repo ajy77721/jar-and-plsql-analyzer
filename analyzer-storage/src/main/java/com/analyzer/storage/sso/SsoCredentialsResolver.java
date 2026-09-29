@@ -72,6 +72,7 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
     /** Per-user role-credential cache; entries are dropped when their session ends or goes invalid. */
     private final ConcurrentHashMap<String, Cached> cache = new ConcurrentHashMap<>();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public SsoCredentialsResolver(AwsSsoLoginService login, SsoSessionRegistry registry,
                                   CurrentHttpSession currentSession) {
         this(login, registry, currentSession, DefaultCredentialsProvider.create());
