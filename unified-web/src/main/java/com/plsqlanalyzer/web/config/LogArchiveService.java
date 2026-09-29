@@ -198,7 +198,14 @@ public class LogArchiveService {
      * wiring — has no per-user auth step, so the pre-existing behaviour is kept exactly.
      */
     private boolean needsConnectedUser() {
-        return store instanceof SessionRoutingArtifactStore && ssoSessionRegistry != null;
+        // The injected bean is the CachingArtifactStore that WRAPS the SessionRoutingArtifactStore,
+        // so "instanceof SessionRoutingArtifactStore" never matched and the pass ran context-less
+        // against the shared default store (failing every minute on no-ambient-cred deployments).
+        // Anything that implements RequestScopedArtifactStore (the cache forwards captureScope to
+        // the router) is per-user-routed and needs a connected user.
+        return (store instanceof SessionRoutingArtifactStore
+                || store instanceof com.analyzer.storage.RequestScopedArtifactStore)
+                && ssoSessionRegistry != null;
     }
 
     /**
