@@ -34,12 +34,17 @@ import java.util.concurrent.TimeUnit;
  *       expensive to fetch than they are to store.</li>
  * </ul>
  *
- * <h2>Never a hard failure on the request path</h2>
+ * <h2>Falling back to the default chain only when it can actually answer</h2>
  *
- * <p>No session, not logged in, or the AWS round trip failing all fall back to
- * {@link DefaultCredentialsProvider} rather than throwing, so SSO state can never take down the
- * default workflow. The one place "no session" is treated as an error is the per-user store router
- * ({@link SessionRoutingArtifactStore}), which owns that policy explicitly.
+ * <p>When the request has no SSO-bound session, or a session whose credentials cannot be resolved,
+ * this used to fall back to {@link DefaultCredentialsProvider} unconditionally — which on an
+ * S3-backed pod with no ambient credentials does not silently degrade, it fails <em>or</em> signs as
+ * the wrong principal. The fallback is now only taken when the default chain can actually resolve
+ * credentials (a CLI, a local run, an instance role); when it cannot, an S3 operation has no
+ * principal to sign with, so this throws {@link NotAuthenticatedException} rather than pretending.
+ * Nothing about the CLI/local path changes: ambient credentials that resolve are still used exactly
+ * as before, and a session-less local run with no ambient credentials already failed at the default
+ * chain — it now simply fails with a clear type instead of an SDK exception.
  *
  * <p><b>Capture for background work.</b> {@link #captureCurrent()} snapshots the caller's
  * credentials while their request thread still exists, so a queued job can run under the submitter's
@@ -69,10 +74,19 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
 
     public SsoCredentialsResolver(AwsSsoLoginService login, SsoSessionRegistry registry,
                                   CurrentHttpSession currentSession) {
+        this(login, registry, currentSession, DefaultCredentialsProvider.create());
+    }
+
+    /**
+     * Test seam: same resolver with an explicit ambient provider, so the "the default chain cannot
+     * resolve" branch can be exercised without depending on the host's real AWS environment.
+     */
+    SsoCredentialsResolver(AwsSsoLoginService login, SsoSessionRegistry registry,
+                           CurrentHttpSession currentSession, AwsCredentialsProvider fallback) {
         this.login = login;
         this.registry = registry;
         this.currentSession = currentSession;
-        this.fallback = DefaultCredentialsProvider.create();
+        this.fallback = fallback;
     }
 
     /**
@@ -90,10 +104,28 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
         if (captured != null) return captured.credentials();
         String sessionId = currentSession.currentSessionId();
         if (sessionId == null) {
-            return fallback.resolveCredentials();
+            // No session-bound identity: the CLI/local path. The default chain is used only if it
+            // can actually answer; see ambientOrThrow.
+            return ambientOrThrow();
         }
         AwsCredentials credentials = credentialsFor(sessionId);
-        return credentials != null ? credentials : fallback.resolveCredentials();
+        return credentials != null ? credentials : ambientOrThrow();
+    }
+
+    /**
+     * The ambient (default-chain) credentials, when they resolve — otherwise a
+     * {@link NotAuthenticatedException}. This is the only route to {@code fallback}, so the default
+     * chain can never sign an operation it has no principal for. The SDK failure is deliberately not
+     * wrapped: it can echo request material, and credential material must never reach a message.
+     */
+    private AwsCredentials ambientOrThrow() {
+        try {
+            return fallback.resolveCredentials();
+        } catch (RuntimeException e) {
+            throw new NotAuthenticatedException(
+                    "No AWS SSO session and no ambient AWS credentials are available — "
+                            + "authenticate via AWS SSO first");
+        }
     }
 
     /** The current thread's session id, or {@code null}; exposed so callers do not re-derive it. */
@@ -103,15 +135,22 @@ public class SsoCredentialsResolver implements AwsCredentialsProvider {
 
     /**
      * A provider fixed to {@code sessionId}'s credentials, for building an S3 client that belongs to
-     * one user rather than to whatever thread happens to use it. Falls back to the default chain if
-     * that user's credentials cannot be resolved, so a client built this way is never left with no
-     * answer at all.
+     * one user rather than to whatever thread happens to use it.
+     *
+     * <p>When that user's credentials cannot be resolved — the session ended or the user logged out
+     * mid-job — this refuses rather than degrading to the default chain: the client was built for a
+     * specific user, so signing as the ambient principal would write that user's data under the
+     * wrong identity. No ambient provider is consulted here, because there is always a session id to
+     * hold to. {@code resolveFor(null)} (the CLI/local path) still returns the ambient provider
+     * directly, so a store built without a session is unchanged.
      */
     public AwsCredentialsProvider resolveFor(String sessionId) {
         if (sessionId == null) return fallback;
         return () -> {
             AwsCredentials credentials = credentialsFor(sessionId);
-            return credentials != null ? credentials : fallback.resolveCredentials();
+            if (credentials != null) return credentials;
+            throw new NotAuthenticatedException(
+                    "The AWS SSO session backing this S3 store has ended — sign in again");
         };
     }
 

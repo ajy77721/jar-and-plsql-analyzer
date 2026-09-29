@@ -6,10 +6,14 @@ import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.LocalHandle;
 import com.analyzer.storage.RequestScopedArtifactStore;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 /**
@@ -24,11 +28,21 @@ import java.util.stream.Stream;
  *       verified bucket/region and signed with their role. This is the per-user path.</li>
  *   <li><b>A session that is not logged in</b> — throw {@link NotAuthenticatedException}. The web
  *       layer maps it to 401, so an unauthenticated browser cannot read or write storage at all.</li>
- *   <li><b>No request-bound session</b> — delegate to the startup store, which signs with the
- *       default AWS chain and the configured bucket/region. This is a background job thread, a CLI,
- *       or the pre-SSO local workflow, all of which must keep working exactly as before. A job that
- *       wants to run under its submitter instead should be handed a {@link CapturedStores} snapshot
- *       taken on the request thread.</li>
+ *   <li><b>A session that is logged in but has not connected a bucket</b> — throw
+ *       {@link NotAuthenticatedException} with a "connect your account first" message. Serving the
+ *       shared default store here silently wrote the user's artifacts to the shared bucket under the
+ *       wrong principal (the live F1 failure); per-user isolation is not a thing the user can opt
+ *       out of by not connecting.</li>
+ *   <li><b>A job snapshot whose identity is resolvable but incomplete</b> — a {@link SsoJobContext}
+ *       is installed with a session id, yet it holds no store for this feature (a credentials-only
+ *       snapshot, F3). Same throw: a resolvable identity must never be handed the shared default
+ *       store.</li>
+ *   <li><b>No request-bound session and no job snapshot</b> — delegate to the startup store, which
+ *       signs with the default AWS chain and the configured bucket/region. This is a background job
+ *       thread without a snapshot, a CLI, or the pre-SSO local workflow, all of which must keep
+ *       working exactly as before. A throttled WARN is logged so this path can never masquerade as
+ *       correct behaviour during diagnosis. A job that wants to run under its submitter instead
+ *       should be handed a {@link CapturedStores} snapshot taken on the request thread.</li>
  * </ul>
  *
  * <h2>Why a stable façade</h2>
@@ -47,6 +61,24 @@ import java.util.stream.Stream;
  */
 public final class SessionRoutingArtifactStore implements RequestScopedArtifactStore {
 
+    private static final Logger log = LoggerFactory.getLogger(SessionRoutingArtifactStore.class);
+
+    /**
+     * How often the "no session at all" fallback may emit its WARN. Long enough that a background
+     * job's per-artifact store calls do not flood the log, short enough that the fallback is always
+     * visible in a fresh diagnostic window.
+     */
+    private static final long NO_SESSION_WARN_INTERVAL_MS = 60_000L;
+
+    /**
+     * The message for "the identity resolved, but it has no bucket to route to". Kept as a constant
+     * so the audit's expected wording is exact; the web layer's 401 body still uses
+     * {@link NotAuthenticatedException#MESSAGE}, but this text is what a log or a direct caller sees.
+     */
+    static final String NO_BUCKET_CONNECTED =
+            "Logged in but no AWS bucket connected — connect your account first "
+                    + "(was going to fall back to the shared default store)";
+
     /** Which registered half of a user's built stores this façade fronts. */
     private final String name;
 
@@ -56,6 +88,9 @@ public final class SessionRoutingArtifactStore implements RequestScopedArtifactS
     private final SsoStoreSwapper swapper;
     private final SsoSessionRegistry registry;
     private final CurrentHttpSession currentSession;
+
+    /** Wall-clock time of the last "no session" WARN; only ever read/written by {@link #warnNoSessionFallback()}. */
+    private final AtomicLong lastNoSessionWarnMs = new AtomicLong(0L);
 
     public SessionRoutingArtifactStore(String name,
                                        ArtifactStore defaultStore,
@@ -72,8 +107,9 @@ public final class SessionRoutingArtifactStore implements RequestScopedArtifactS
 
     /**
      * The store to serve this operation from — the user's when there is a connected session, the
-     * default store when there is no session at all, and a thrown {@link NotAuthenticatedException}
-     * otherwise. See the class Javadoc for the exact rule.
+     * default store only when there is no session identity at all (warned, throttled), and a thrown
+     * {@link NotAuthenticatedException} when an identity is resolvable but incomplete. See the class
+     * Javadoc for the exact rule.
      */
     private ArtifactStore delegate() {
         // A background job running with its submitter's snapshot installed on this thread takes
@@ -81,8 +117,19 @@ public final class SessionRoutingArtifactStore implements RequestScopedArtifactS
         // the job would write to the default bucket under the default chain. See SsoJobContext.
         ArtifactStore jobStore = SsoJobContext.storeFor(name);
         if (jobStore != null) return jobStore;
+        // F3: a snapshot is installed and its identity is resolvable (it carries a session id) but
+        // it holds no store for this feature — a credentials-only snapshot, or a feature the
+        // capture did not build. Serving the shared default store here would sign the job's work as
+        // the wrong principal on a pod with no ambient credentials; refuse instead.
+        if (SsoJobContext.current() != null && SsoJobContext.sessionId() != null) {
+            throw new NotAuthenticatedException(NO_BUCKET_CONNECTED);
+        }
         String sessionId = currentSession.currentSessionId();
         if (sessionId == null) {
+            // No session-bound state at all: a background job without a snapshot, a CLI, or the
+            // pre-SSO local workflow. The legacy default-store path is kept, but it is never allowed
+            // to be silent — a throttled WARN records every window in which it is taken.
+            warnNoSessionFallback();
             return defaultStore;
         }
         SsoSessionState state = registry.get(sessionId);
@@ -92,14 +139,31 @@ public final class SessionRoutingArtifactStore implements RequestScopedArtifactS
         SsoStoreSwapper.BuiltStores stores = swapper.storesFor(sessionId);
         ArtifactStore perUser = stores == null ? null : stores.storeFor(name);
         if (perUser == null) {
-            // Logged in but not connected (or this feature is not S3-backed for them): serve the
-            // default/configured store rather than failing — the configured bucket IS the shared
-            // target, and throwing made every listing/read 500 for a signed-in user who hadn't
-            // connected a bucket yet. Writes the user makes after connecting still land in their
-            // own per-user store, so per-user isolation is unaffected.
-            return defaultStore;
+            // F1(b), the live failure: logged in but no bucket connected. This used to serve the
+            // shared default store, silently writing the user's artifacts to the shared bucket (or
+            // failing to sign at all on a pod with no ambient credentials). A resolvable identity
+            // with no connected bucket is an incomplete identity, not a licence to use the shared
+            // target — tell the user to connect, and surface it as a 401 through the web advice.
+            throw new NotAuthenticatedException(NO_BUCKET_CONNECTED);
         }
         return perUser;
+    }
+
+    /**
+     * Emits at most one WARN per {@link #NO_SESSION_WARN_INTERVAL_MS} for the no-session default
+     * fallback. Uses a CAS on {@link #lastNoSessionWarnMs} so a burst of concurrent store calls
+     * produces one line, not one per call.
+     */
+    private void warnNoSessionFallback() {
+        long now = System.currentTimeMillis();
+        long last = lastNoSessionWarnMs.get();
+        if (now - last < NO_SESSION_WARN_INTERVAL_MS) return;
+        if (lastNoSessionWarnMs.compareAndSet(last, now)) {
+            log.warn("[storage] {} routing store has no session identity (background job without a "
+                    + "snapshot, CLI, or pre-SSO local workflow) — serving the shared default store "
+                    + "and default AWS credentials. If this is a background job that should run as its "
+                    + "submitter, it was not handed a captured SSO snapshot.", name);
+        }
     }
 
     /**
@@ -117,9 +181,10 @@ public final class SessionRoutingArtifactStore implements RequestScopedArtifactS
      *
      * <p>Only the session id is carried, not credentials or a resolved store: on a worker the same
      * {@code registry -> swapper} lookup the request thread would have done then runs, so the worker
-     * gets exactly the user's store — and, for a user who is logged in but has not connected a bucket
-     * yet, exactly the same {@code defaultStore} fallback with the same user-signed credentials. The
-     * id is opaque and server-generated and never rendered; no credential material crosses threads.
+     * gets exactly the user's store — and, for a user who is logged in but has not connected a
+     * bucket yet, exactly the same refusal ({@link NotAuthenticatedException}) the request thread
+     * would have raised. The id is opaque and server-generated and never rendered; no credential
+     * material crosses threads.
      *
      * <p>A thread with no session (a background job, a CLI) returns {@link Scope#NONE}, so those paths
      * keep the shared default target unchanged.
