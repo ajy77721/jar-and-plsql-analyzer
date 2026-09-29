@@ -234,11 +234,17 @@ public class JarAnalysisExecutor {
             var storedJarKey = persistenceService.getPaths().storedJarKey(jarName);
             if (store.exists(storedJarKey)) storedJarHandle = store.materialize(storedJarKey);
             Path storedJar = storedJarHandle == null ? null : storedJarHandle.path();
-            if (storedJar != null) {
+            if (store.exists(storedJarKey)) {
                 // CFR decompilation of source: this is "parse" work (turning bytecode back into
                 // readable source), not schema/cross-ref discovery.
+                //
+                // Enrich by KEY, not by the materialized Path: in remote (s3/mongo) mode that Path
+                // is a /tmp download (artifact-*-stored.jar) outside the data root, which the
+                // decompiler's containment check refuses for every class. The key is also the
+                // decompile cache's identity. storedJar stays materialized for the File-based
+                // readers below.
                 long tDecompile0 = System.nanoTime();
-                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedJar);
+                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedJarKey);
                 parseNanos += System.nanoTime() - tDecompile0;
             }
             System.gc();

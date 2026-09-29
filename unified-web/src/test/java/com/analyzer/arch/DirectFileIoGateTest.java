@@ -155,7 +155,12 @@ class DirectFileIoGateTest {
         ALLOWED.put("unified-web/ClaudeJobExecutor", 3);
         ALLOWED.put("jar-analyzer-core/JarParserService", 13);
         ALLOWED.put("jar-analyzer-core/WarParserService", 9);
-        ALLOWED.put("jar-analyzer-core/DecompilerService", 11);
+        // Raised 11 -> 12: one Path.of resolves the app-owned temp root (app.upload.temp-dir,
+        // default java.io.tmpdir) so the containment guard can recognise temps THIS app created
+        // (ArtifactStore.materialize's artifact-*, the multipart jar-analyze-* temps) and decompile
+        // them directly instead of refusing every class in remote storage mode. No new artifact
+        // I/O — the same seekable-file need already budgeted here.
+        ALLOWED.put("jar-analyzer-core/DecompilerService", 12);
         ALLOWED.put("jar-analyzer-core/PersistenceService", 3);
         ALLOWED.put("unified-web/FlowAnalysisController", 1);
         // Chat sandbox — genuinely local, pre-existing, not yet migrated to ArtifactStore. Chat

@@ -11,6 +11,7 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.jar.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -40,6 +41,33 @@ public class DecompilerService {
 
     private final JarDataPaths jarDataPaths;
     private final com.analyzer.storage.ArtifactStore store;
+
+    /**
+     * The temp root this app's own artifacts are materialized into, and the filename prefixes it
+     * uses there. Used ONLY by the defense-in-depth branch of {@link #decompile(Path, String)}: a
+     * regular file under here whose name begins with one of {@link #appTempPrefixes} was written by
+     * this app from its OWN upload/materialize path, never a user-supplied arbitrary path, so it is
+     * safe to decompile directly from. The guard is NOT opened to anything else.
+     */
+    private final Path appTempRoot;
+    private final List<String> appTempPrefixes;
+
+    /**
+     * Prefixes of temp files this app creates in {@code java.io.tmpdir}: {@code artifact-} is
+     * {@link com.analyzer.storage.ArtifactStore#materialize} (S3/Mongo download or in-memory
+     * scratch), the rest are multipart/upload temps created with {@code Files.createTempFile}.
+     */
+    private static final List<String> DEFAULT_APP_TEMP_PREFIXES = List.of(
+            "artifact-", "jar-analyze-", "jar-targeted-", "jar-reanalyze-",
+            "war-analyze-", "war-reanalyze-", "zip-raw-", "cfr-decompile-");
+
+    /**
+     * Refused-outside-path WARNs are emitted once, then only every {@link #WARN_EVERY_N}th attempt,
+     * so a single misrouted analysis cannot produce ~one identical line per class (the live-staging
+     * regression this replaces).
+     */
+    private static final long WARN_EVERY_N = 100;
+    private final AtomicLong outsideBaseWarnCount = new AtomicLong();
 
     /**
      * TTL for the per-class decompile cache, in hours. Re-derivable data (unlike PL/SQL source or
@@ -74,10 +102,17 @@ public class DecompilerService {
                               // application.properties on purpose — it exists solely so this
                               // feature's expiry behaviour can be proven against the real running
                               // app without permanently changing the production default.
-                              @Value("${app.jar.decompile-cache.ttl-millis-override:-1}") long ttlMillisOverride) {
+                              @Value("${app.jar.decompile-cache.ttl-millis-override:-1}") long ttlMillisOverride,
+                              // App-owned temp root/prefixes for the defense-in-depth guard below.
+                              // Defaults to java.io.tmpdir, which is exactly where
+                              // ArtifactStore.materialize (artifact-*) and the multipart upload
+                              // temps (jar-analyze-*, ...) are created.
+                              @Value("${app.upload.temp-dir:}") String appTempDir,
+                              @Value("${app.upload.temp-prefixes:}") String appTempPrefixesCsv) {
         this(jarDataPaths, store, ttlMillisOverride >= 0
                 ? java.time.Duration.ofMillis(ttlMillisOverride)
-                : java.time.Duration.ofHours(cacheTtlHours));
+                : java.time.Duration.ofHours(cacheTtlHours),
+                appTempDir, appTempPrefixesCsv);
     }
 
     /**
@@ -88,9 +123,33 @@ public class DecompilerService {
      */
     public DecompilerService(JarDataPaths jarDataPaths, com.analyzer.storage.ArtifactStore store,
                               java.time.Duration cacheTtl) {
+        this(jarDataPaths, store, cacheTtl, null, null);
+    }
+
+    /**
+     * Full constructor. {@code appTempDir}/{@code appTempPrefixesCsv} are the configurable
+     * app-owned temp root and comma-separated filename prefixes for the defense-in-depth guard;
+     * blank/null means java.io.tmpdir and {@link #DEFAULT_APP_TEMP_PREFIXES}.
+     */
+    public DecompilerService(JarDataPaths jarDataPaths, com.analyzer.storage.ArtifactStore store,
+                              java.time.Duration cacheTtl,
+                              String appTempDir, String appTempPrefixesCsv) {
         this.jarDataPaths = jarDataPaths;
         this.store = store;
         this.cacheTtlMillis = cacheTtl == null ? 0 : cacheTtl.toMillis();
+        this.appTempRoot = Path.of(appTempDir == null || appTempDir.isBlank()
+                ? System.getProperty("java.io.tmpdir", "/tmp")
+                : appTempDir).toAbsolutePath().normalize();
+        if (appTempPrefixesCsv == null || appTempPrefixesCsv.isBlank()) {
+            this.appTempPrefixes = DEFAULT_APP_TEMP_PREFIXES;
+        } else {
+            List<String> parsed = new ArrayList<>();
+            for (String p : appTempPrefixesCsv.split(",")) {
+                String trimmed = p.trim();
+                if (!trimmed.isEmpty()) parsed.add(trimmed);
+            }
+            this.appTempPrefixes = parsed.isEmpty() ? DEFAULT_APP_TEMP_PREFIXES : parsed;
+        }
     }
 
     private Path getThreadTempDir() throws IOException {
@@ -110,14 +169,87 @@ public class DecompilerService {
      */
     public String decompile(Path jarPath, String className) {
         if (jarPath == null) return null;
-        com.analyzer.storage.ArtifactKey key = jarDataPaths.keyForPath(jarPath);
-        if (key == null) {
-            // Not under the data root, so the store cannot address it. Refuse rather than reach
-            // for the filesystem: in s3 mode that path is not a real file at all.
-            log.warn("Cannot decompile from {} — it is outside {}", jarPath, jarDataPaths.getBaseDir());
+        com.analyzer.storage.ArtifactKey key = jarDataPaths == null ? null : jarDataPaths.keyForPath(jarPath);
+        if (key != null) return decompile(key, className);
+
+        // Defense in depth. The PRIMARY path is key-based (decompile(ArtifactKey, ...)); a caller
+        // that still hands over a raw Path normally passes the store-materialized file, which in
+        // local mode lies under the data root and keys cleanly above. In S3/Mongo mode
+        // store.materialize() instead downloads to a temp file outside the data root
+        // (artifact-<n>-stored.jar) — which the containment check below would refuse, failing every
+        // class. Such a temp is app-owned: THIS app created it from its own upload/materialize, its
+        // name is one of our fixed prefixes, and it is a regular file under our temp root — never a
+        // user-supplied arbitrary path. Decompile it directly (uncached, since a temp has no stable
+        // store key). Anything else is still refused.
+        if (isAppOwnedTemp(jarPath)) {
+            log.debug("Decompiling {} from app-owned temp {} (no store key — uncached)", className, jarPath);
+            return decompileLocalFile(jarPath, className);
+        }
+
+        // Rate-limit the refusal: one identical WARN per class is the live-staging regression this
+        // replaces. First attempt warns; then only every WARN_EVERY_Nth, so the count still shows
+        // up in the log without flooding it.
+        long attempts = outsideBaseWarnCount.incrementAndGet();
+        if (attempts == 1 || attempts % WARN_EVERY_N == 0) {
+            log.warn("Cannot decompile from {} — it is outside {} ({} attempt(s) refused so far;"
+                            + " further identical failures logged at debug)",
+                    jarPath, jarDataPaths == null ? "the data root" : jarDataPaths.getBaseDir(), attempts);
+        } else {
+            log.debug("Cannot decompile from {} — it is outside {} (attempt #{})",
+                    jarPath, jarDataPaths == null ? "the data root" : jarDataPaths.getBaseDir(), attempts);
+        }
+        return null;
+    }
+
+    /**
+     * Resets the refused-path WARN rate limit. Called at the start of an analysis so the limit is
+     * per-analysis rather than per-JVM-lifetime.
+     */
+    public void resetGuardWarnCounter() {
+        outsideBaseWarnCount.set(0);
+    }
+
+    /** True when {@code p} is a regular app-owned temp file (fixed prefix under our temp root). */
+    private boolean isAppOwnedTemp(Path p) {
+        try {
+            Path abs = p.toAbsolutePath().normalize();
+            if (!abs.startsWith(appTempRoot)) return false;
+            Path name = abs.getFileName();
+            if (name == null) return false;
+            String n = name.toString();
+            for (String prefix : appTempPrefixes) {
+                if (n.startsWith(prefix)) return true;
+            }
+            return false;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Decompile a class straight from a local jar file that has no store key (an app-owned temp).
+     * No cache read/write — a temp's identity is not stable across analyses.
+     */
+    private String decompileLocalFile(Path jarPath, String className) {
+        try {
+            byte[] classBytes = extractClassBytes("local-temp:" + jarPath.toAbsolutePath().normalize(), jarPath, className);
+            if (classBytes == null) return null;
+            Path tempDir = getThreadTempDir();
+            Future<String> future = decompileExecutor.submit(() -> decompileBytes(classBytes, className, tempDir));
+            try {
+                return future.get(DECOMPILE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                future.cancel(true);
+                log.warn("Decompile timed out after {}s for {}", DECOMPILE_TIMEOUT_SECONDS, className);
+                return null;
+            } catch (ExecutionException e) {
+                log.warn("Decompile failed for {}: {}", className, e.getCause().getMessage());
+                return null;
+            }
+        } catch (Throwable e) {
+            log.warn("Failed to decompile {}: {}", className, e.getMessage());
             return null;
         }
-        return decompile(key, className);
     }
 
     /**
@@ -380,7 +512,10 @@ public class DecompilerService {
      *            artifact a second time just to index it.
      */
     private Map<String, String> nestedJarIndex(com.analyzer.storage.ArtifactKey jarKey, JarFile jar) {
-        String id = jarKey.toString();
+        return nestedJarIndex(jarKey.toString(), jar);
+    }
+
+    private Map<String, String> nestedJarIndex(String id, JarFile jar) {
         synchronized (nestedJarIndexes) {
             Map<String, String> cached = nestedJarIndexes.get(id);
             if (cached != null) {
@@ -444,6 +579,16 @@ public class DecompilerService {
      */
     byte[] extractClassBytes(com.analyzer.storage.ArtifactKey jarKey, Path jarPath, String className)
             throws IOException {
+        return extractClassBytes(jarKey.toString(), jarPath, className);
+    }
+
+    /**
+     * As {@link #extractClassBytes(com.analyzer.storage.ArtifactKey, Path, String)} but keyed by an
+     * arbitrary string id — used for app-owned temp files that have no store key, so the nested-JAR
+     * index is still scoped per file rather than shared service-wide.
+     */
+    byte[] extractClassBytes(String indexKey, Path jarPath, String className)
+            throws IOException {
         String classFilePath = className.replace('.', '/') + ".class";
         String bootInfPath = "BOOT-INF/classes/" + classFilePath;
         // WAR layout (Servlet spec): application classes live under WEB-INF/classes/, the WAR
@@ -477,7 +622,7 @@ public class DecompilerService {
             }
 
             // Build this JAR's package→nested JAR index on first miss
-            String cachedJar = nestedJarIndex(jarKey, jar).get(packagePath);
+            String cachedJar = nestedJarIndex(indexKey, jar).get(packagePath);
             if (cachedJar != null) {
                 entry = jar.getJarEntry(cachedJar);
                 if (entry != null) {

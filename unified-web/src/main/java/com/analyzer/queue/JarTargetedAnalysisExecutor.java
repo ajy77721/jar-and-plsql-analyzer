@@ -13,7 +13,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import com.analyzer.storage.ArtifactStore;
-import com.analyzer.storage.LocalHandle;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -94,13 +93,14 @@ public class JarTargetedAnalysisExecutor {
 
             progress(job, broadcast, "[4/4] Writing analysis to disk...");
             persistenceService.storeJar(tempJar, jarName);
-            // The decompiler needs a REAL local file (it opens a JarFile and seeks), so this is
-            // ArtifactStore's documented escape hatch rather than a stream. Locally it is a
-            // zero-copy handle; remotely it downloads to a temp that close() removes.
+            // Enrich by KEY, not by a materialized Path: `store.materialize()` hands back the real
+            // file only in local mode; remotely it downloads to a /tmp temp that the decompiler's
+            // data-root containment check refuses for every class. The key is also the decompile
+            // cache's stable identity, and decompile(key, ...) does its own materialize internally.
             var storedJarKey = persistenceService.getPaths().storedJarKey(jarName);
             if (store.exists(storedJarKey)) {
-                try (LocalHandle storedJar = store.materialize(storedJarKey)) {
-                    sourceEnrichmentService.enrichCallTreesWithSource(endpoints, storedJar.path());
+                try {
+                    sourceEnrichmentService.enrichCallTreesWithSource(endpoints, storedJarKey);
                 } catch (Exception ex) {
                     log.warn("Source enrichment failed (non-fatal): {}", ex.getMessage());
                 }
