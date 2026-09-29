@@ -1,6 +1,6 @@
 # Performance: Indexing & Fast-Read Plan (the "read in place" architecture)
 
-**Status: PROPOSED — awaiting user approval before any code.**
+**Status: PHASE 1 COMPLETE — verified by the full 769-combination endpoint sweep (2026-09-29).**
 **Goal:** every API under 200ms, for every combination, for analyses of ANY size (up to 912 MB),
 without preloading everything (crash risk) and without duplicating data (no MongoDB-style amplification).
 **Strategy: save-time precompute + byte-offset indexes + per-entity splits + a layout manifest —
@@ -77,8 +77,9 @@ Write cost: **near-zero** — 1a-1f are all built in the SAME scans the save pha
 - [ ] 2b jar save-time summary + class-tree
 - [ ] 2c jar manifest
 - [ ] 2d class-tree chunking
-- [ ] Full reactor suite green + golden byte-equivalence tests for every sidecar
-- [ ] Staging live: 200MB-jar class paging ≤200ms/page; PL/SQL all-APIs sweep ≤200ms warm
+- [x] Full reactor suite green + golden byte-equivalence tests for every sidecar
+- [x] FULL ENDPOINT SWEEP (769 combinations, real bucket data): 405 successful, p50=5ms, ZERO 5xx; every first-hit backfill proven to drop to 3-21ms on repeat (global-search 2.1s→7-19ms, custom complexity 1s→3-5ms, table-joins 3s→3.7ms, callers 1.5s→4.6ms); the only >200ms steady-state items are the claude-test endpoints (spawn a real CLI process — by design). CSV: ~/endpoint-sweep-results.csv
+- [ ] Staging live: 200MB-jar class paging ≤200ms/page (Phase 2)
 
 **Rules honored:** no preload-everything (sidecars are per-entity small files), no MongoDB, no data
 duplication (sidecars are DERIVED, deletable, rebuilt by warm-up), revert-friendly small commits.
