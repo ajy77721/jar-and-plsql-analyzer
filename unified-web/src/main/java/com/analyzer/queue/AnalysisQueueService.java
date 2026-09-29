@@ -1,5 +1,6 @@
 package com.analyzer.queue;
 
+import com.analyzer.auth.ConnectionGuard;
 import com.analyzer.storage.sso.CapturedCredentials;
 import com.analyzer.storage.sso.CapturedStores;
 import com.analyzer.storage.sso.SsoCredentialsResolver;
@@ -53,6 +54,9 @@ public class AnalysisQueueService {
     /** Snapshots the submitter's role credentials for jobs whose calls sign with them directly. */
     private final SsoCredentialsResolver ssoCredentialsResolver;
 
+    /** Fails a submit fast when the caller is logged in but has not connected a bucket. */
+    private final ConnectionGuard connectionGuard;
+
     public AnalysisQueueService(JarAnalysisExecutor jarExecutor,
                                  JarTargetedAnalysisExecutor jarTargetedExecutor,
                                  WarAnalysisExecutor warExecutor,
@@ -64,7 +68,8 @@ public class AnalysisQueueService {
                                  JarExportBundleExecutor jarExportBundleExecutor,
                                  PurposeSummaryExecutor purposeSummaryExecutor,
                                  SsoStoreSwapper ssoStoreSwapper,
-                                 SsoCredentialsResolver ssoCredentialsResolver) {
+                                 SsoCredentialsResolver ssoCredentialsResolver,
+                                 ConnectionGuard connectionGuard) {
         this.jarExecutor = jarExecutor;
         this.jarTargetedExecutor = jarTargetedExecutor;
         this.warExecutor = warExecutor;
@@ -77,6 +82,7 @@ public class AnalysisQueueService {
         this.purposeSummaryExecutor = purposeSummaryExecutor;
         this.ssoStoreSwapper = ssoStoreSwapper;
         this.ssoCredentialsResolver = ssoCredentialsResolver;
+        this.connectionGuard = connectionGuard;
     }
 
     /**
@@ -89,9 +95,28 @@ public class AnalysisQueueService {
      * has no SSO-bound session — the documented legacy path (see {@code QueueJob}).
      */
     public QueueJob submit(QueueJob.Type type, String displayName, Map<String, Object> metadata) {
+        // Capture the submitter's stores first, then fail fast if they are logged in but have not
+        // connected a bucket and this job's storage is S3-backed. This single submit point covers
+        // every controller that reaches the queue, so a new endpoint cannot forget the guard.
+        CapturedStores capturedStores = ssoStoreSwapper.captureCurrent();
+        connectionGuard.requireConnected(featureOf(type));
         return submit(type, displayName, metadata,
-                ssoStoreSwapper.captureCurrent(),
+                capturedStores,
                 needsCredentials(type) ? ssoCredentialsResolver.captureCurrent() : null);
+    }
+
+    /**
+     * Which SSO feature's store this job writes through — the PL/SQL parser's or the JAR
+     * analyzer's. Used to apply the connect guard against the right storage mode, since the two
+     * features can run on different backends ({@code app.storage.parser.mode} vs
+     * {@code app.storage.jar.mode}).
+     */
+    private static String featureOf(QueueJob.Type type) {
+        return switch (type) {
+            case PLSQL_ANALYSIS, PLSQL_FAST_ANALYSIS, PARSER_ANALYSIS, PARSER_VALIDATION,
+                 PLSQL_CLAUDE_VERIFY, PLSQL_PURPOSE_SUMMARY -> ConnectionGuard.PARSER;
+            default -> ConnectionGuard.JAR;
+        };
     }
 
     /**

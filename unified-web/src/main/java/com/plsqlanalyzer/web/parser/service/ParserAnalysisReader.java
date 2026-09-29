@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.plsqlanalyzer.web.parser.model.ParserAnalysisInfo;
+import com.analyzer.auth.ConnectionGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -42,8 +44,23 @@ public class ParserAnalysisReader {
 
     private final ArtifactStore store;
 
+    /**
+     * Supplies the calling user's routing identity for the cache key, or {@code null} in a
+     * stripped-down context (a unit test constructing this with only a store) where every read is
+     * scoped to {@link ConnectionGuard#SHARED}.
+     */
+    private final ConnectionGuard connectionGuard;
+
+    /** Test / non-Spring construction: no per-user identity, so the cache is shared as before. */
     public ParserAnalysisReader(@Qualifier("parserArtifactStore") ArtifactStore store) {
+        this(store, null);
+    }
+
+    @Autowired
+    public ParserAnalysisReader(@Qualifier("parserArtifactStore") ArtifactStore store,
+                                ConnectionGuard connectionGuard) {
         this.store = store;
+        this.connectionGuard = connectionGuard;
     }
 
     /**
@@ -90,9 +107,21 @@ public class ParserAnalysisReader {
         }
     }
 
-    /** The cache key for one facet of one analysis, scoped to the version on disk. */
+    /**
+     * The cache key for one facet of one analysis.
+     *
+     * <p>Scoped to the routing identity as well as the version on disk: the parsed document depends
+     * only on the artifact, but the store it was read through belongs to one user, so the same
+     * analysis name in two users' buckets must not share an entry. Two requests that resolve to no
+     * identity both fall back to {@link ConnectionGuard#SHARED} and keep sharing, exactly as before.
+     */
     private String cacheKey(String name, String facet) {
-        return name + "::" + facet + "::" + versionToken(name);
+        return routingIdentity() + "::" + name + "::" + facet + "::" + versionToken(name);
+    }
+
+    /** The calling user's routing identity, or {@code "shared"} when none is resolvable. */
+    private String routingIdentity() {
+        return connectionGuard == null ? ConnectionGuard.SHARED : connectionGuard.routingIdentityKey();
     }
 
     private InputStream openRead(ArtifactKey key) throws IOException { return store.read(key); }

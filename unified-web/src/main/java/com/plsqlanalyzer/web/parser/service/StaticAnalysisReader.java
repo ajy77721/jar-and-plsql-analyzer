@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.analyzer.auth.ConnectionGuard;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -35,6 +37,9 @@ public class StaticAnalysisReader implements AnalysisDataReader {
 
     private final ArtifactStore store;
 
+    /** Routing identity for cache scoping; {@code null} in a store-only test construction. */
+    private final ConnectionGuard connectionGuard;
+
     private final IndexFacetReader indexFacet;
     private final TableFacetReader tableFacet;
     private final NodeScanFacetReader nodeScanFacet;
@@ -50,8 +55,16 @@ public class StaticAnalysisReader implements AnalysisDataReader {
      * removed {@code Path.of(dataDir).resolve("plsql-parse")} root was the last thing here that
      * assumed the parse tree is a local directory.
      */
+    /** Test / non-Spring construction: no per-user identity, so the cache is shared as before. */
     public StaticAnalysisReader(@Qualifier("parserArtifactStore") ArtifactStore store) {
+        this(store, null);
+    }
+
+    @Autowired
+    public StaticAnalysisReader(@Qualifier("parserArtifactStore") ArtifactStore store,
+                                ConnectionGuard connectionGuard) {
         this.store = store;
+        this.connectionGuard = connectionGuard;
         this.indexFacet = new IndexFacetReader(this);
         this.tableFacet = new TableFacetReader(this);
         this.nodeScanFacet = new NodeScanFacetReader(this);
@@ -191,8 +204,17 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         return sequenceFacet.getDynamicSql(name);
     }
 
+    /**
+     * The cache key for one synthesized view of one analysis, scoped to the calling user's routing
+     * identity as well as the analysis name. Without the identity, the same analysis name read from
+     * two users' buckets collided in the one in-process map — one user could be served another's
+     * parsed view. Requests that resolve to no identity share the {@link ConnectionGuard#SHARED}
+     * partition, preserving the previous single-tenant behaviour.
+     */
     String cacheKey(String name, String type) {
-        return name + "::" + type;
+        String identity = connectionGuard == null
+                ? ConnectionGuard.SHARED : connectionGuard.routingIdentityKey();
+        return identity + "::" + name + "::" + type;
     }
 
     public void evictCache(String analysisName) {

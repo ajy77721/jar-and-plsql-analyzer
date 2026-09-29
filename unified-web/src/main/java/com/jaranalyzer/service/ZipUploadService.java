@@ -1,5 +1,6 @@
 package com.jaranalyzer.service;
 
+import com.analyzer.auth.ConnectionGuard;
 import com.analyzer.queue.AnalysisQueueService;
 import com.analyzer.queue.QueueJob;
 import com.analyzer.storage.ArtifactEntry;
@@ -89,15 +90,18 @@ public class ZipUploadService {
     private final ArtifactStore parserStore;
     private final ObjectMapper objectMapper;
     private final AnalysisQueueService queueService;
+    private final ConnectionGuard connectionGuard;
 
     public ZipUploadService(@Qualifier("jarArtifactStore") ArtifactStore jarStore,
                             @Qualifier("parserArtifactStore") ArtifactStore parserStore,
                             ObjectMapper objectMapper,
-                            AnalysisQueueService queueService) {
+                            AnalysisQueueService queueService,
+                            ConnectionGuard connectionGuard) {
         this.jarStore = jarStore;
         this.parserStore = parserStore;
         this.objectMapper = objectMapper;
         this.queueService = queueService;
+        this.connectionGuard = connectionGuard;
     }
 
     /**
@@ -407,6 +411,9 @@ public class ZipUploadService {
     }
 
     private Map<String, Object> executeRaw(ZipFile zf, Plan plan, String mode) throws IOException {
+        // A raw archive is handed to the JAR/WAR upload queue, so the same fail-fast guard applies:
+        // a logged-in caller without a connected bucket gets a 409 before anything is staged.
+        connectionGuard.requireJarConnected();
         Path raw = Files.createTempFile("zip-raw-", plan.war ? ".war" : ".jar");
         long size;
         try (InputStream in = zf.getInputStream(plan.rawEntry)) {

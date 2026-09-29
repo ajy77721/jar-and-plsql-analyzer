@@ -20,11 +20,13 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import com.analyzer.auth.ConnectionGuard;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.LocalHandle;
 import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.sso.CapturedSsoContext;
+import com.analyzer.storage.sso.SsoCredentialsResolver;
 
 import java.io.ByteArrayOutputStream;
 import java.io.StringReader;
@@ -64,6 +66,12 @@ public class FlowAnalysisController {
     private final MongoCatalogService mongoCatalogService;
     private final FlowRunStore store;
 
+    /** Fails a run fast when the caller is logged in but has not connected a bucket. */
+    private final ConnectionGuard connectionGuard;
+
+    /** Carries the caller's role credentials onto the bare run thread (defense in depth). */
+    private final SsoCredentialsResolver ssoCredentialsResolver;
+
     /**
      * Required, not optional — an optional store would leave a silent filesystem fallback.
      *
@@ -84,7 +92,9 @@ public class FlowAnalysisController {
                                   @Qualifier("plsqlClaudeProcessRunner") ClaudeProcessRunner claudeProcessRunner,
                                   JarParserService jarParserService,
                                   MongoCatalogService mongoCatalogService,
-                                  @Qualifier("jarArtifactStore") ArtifactStore artifacts) {
+                                  @Qualifier("jarArtifactStore") ArtifactStore artifacts,
+                                  ConnectionGuard connectionGuard,
+                                  SsoCredentialsResolver ssoCredentialsResolver) {
         this.paths               = paths;
         this.persistenceService  = persistenceService;
         this.objectMapper        = objectMapper;
@@ -92,6 +102,8 @@ public class FlowAnalysisController {
         this.jarParserService    = jarParserService;
         this.mongoCatalogService = mongoCatalogService;
         this.artifacts           = artifacts;
+        this.connectionGuard     = connectionGuard;
+        this.ssoCredentialsResolver = ssoCredentialsResolver;
         this.store               = new FlowRunStore(paths.keyForPath(paths.getBaseDir()), artifacts, objectMapper);
     }
 
@@ -120,6 +132,9 @@ public class FlowAnalysisController {
 
     @PostMapping("/{id}/flow/run")
     public Map<String, Object> run(@PathVariable String id, @RequestBody FlowRunRequest req) {
+        // Fail fast when the caller is logged in but has not connected a bucket, rather than start
+        // a run whose artifact writes would fall through to the shared default target.
+        connectionGuard.requireJarConnected();
         String runId = String.valueOf(counter.getAndIncrement());
 
         // Create run directory and minimal in-memory state
@@ -131,6 +146,8 @@ public class FlowAnalysisController {
         }
 
         RunMeta meta = new RunMeta(runId, runDir);
+        // Record the owner now, on the request thread, so a poll by another session can be refused.
+        meta.owner     = connectionGuard.currentIdentityKey();
         meta.mode      = req.mode();
         meta.endpoints = req.endpointPaths() != null ? req.endpointPaths() : List.of();
         runs.put(runId, meta);
@@ -143,7 +160,7 @@ public class FlowAnalysisController {
         // carry nothing (install is then a no-op), preserving the default-chain path exactly.
         final RequestScopedArtifactStore.Scope routingScope = artifacts instanceof RequestScopedArtifactStore routed
                 ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
-        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(ssoCredentialsResolver);
 
         new Thread(() -> {
           try (AutoCloseable routed = routingScope.install();
@@ -296,6 +313,10 @@ public class FlowAnalysisController {
             ArtifactKey runDir = store.runDir(id, runId);
             Map<String, Object> diskStatus = store.readStatus(runDir);
             if (diskStatus == null) return ResponseEntity.notFound().build();
+            // 404 rather than 403 for a non-owner: a poll for someone else's (or a nonexistent)
+            // runId is indistinguishable, so this cannot be used to probe which ids exist.
+            if (!connectionGuard.owns(str(diskStatus.get("owner"))))
+                return ResponseEntity.notFound().build();
 
             Map<String, Object> resp = new LinkedHashMap<>(diskStatus);
             resp.put("log", store.readLogTail(runDir));
@@ -306,6 +327,8 @@ public class FlowAnalysisController {
             }
             return ResponseEntity.ok(resp);
         }
+
+        if (!connectionGuard.owns(meta.owner)) return ResponseEntity.notFound().build();
 
         // In-memory run (active or recently completed)
         Map<String, Object> resp = new LinkedHashMap<>();
@@ -352,6 +375,11 @@ public class FlowAnalysisController {
                                           @PathVariable String runId) {
         ArtifactKey runDir = resolveRunDir(id, runId);
         if (runDir == null) return ResponseEntity.notFound().build();
+        // The status.json beside the report carries the owner; a non-owner gets the same 404 as a
+        // run whose report does not exist.
+        Map<String, Object> runStatus = store.readStatus(runDir);
+        if (runStatus != null && !connectionGuard.owns(str(runStatus.get("owner"))))
+            return ResponseEntity.notFound().build();
 
         byte[] bytes = store.readReport(runDir);
         if (bytes == null) return ResponseEntity.notFound().build();

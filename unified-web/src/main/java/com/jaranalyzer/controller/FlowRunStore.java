@@ -344,6 +344,7 @@ public class FlowRunStore {
         m.put("currentClaudeNode",meta.currentClaudeNode);
         m.put("error",            meta.error);
         m.put("timestamp",        meta.timestamp);
+        m.put("owner",            meta.owner);
         m.put("mode",             meta.mode);
         m.put("endpoints",        meta.endpoints);
         m.put("highCount",        meta.highCount);
@@ -375,6 +376,12 @@ public class FlowRunStore {
         public final long timestamp;
         /** Run mode (e.g. "optimize") — stored for history. */
         public volatile String mode;
+        /**
+         * Routing identity of the session that started this run, or {@code null} when none was
+         * resolvable. Persisted in status.json so the ownership check survives eviction from the
+         * in-memory map and a restart; {@code null} stays readable for the legacy path.
+         */
+        public volatile String owner;
         /** Selected endpoint paths — stored for history. */
         public volatile List<String> endpoints;
         /**

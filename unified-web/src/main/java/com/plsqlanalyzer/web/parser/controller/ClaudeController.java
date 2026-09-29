@@ -9,10 +9,12 @@ import com.plsqlanalyzer.web.parser.service.ClaudeVerificationModels.Verificatio
 import com.plsqlanalyzer.web.parser.service.ClaudeVerificationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.analyzer.auth.ConnectionGuard;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.page.Page;
 import com.analyzer.storage.sso.CapturedSsoContext;
+import com.analyzer.storage.sso.SsoCredentialsResolver;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
@@ -52,13 +54,21 @@ public class ClaudeController {
      */
     private final ArtifactStore store;
 
+    /** Fails a verification start fast when the caller is logged in but has not connected a bucket. */
+    private final ConnectionGuard connectionGuard;
+
+    /** Carries the caller's role credentials onto the manager's pool (defense in depth). */
+    private final SsoCredentialsResolver ssoCredentialsResolver;
+
     public ClaudeController(ClaudeVerificationService verificationService,
                             ClaudeSessionManager sessionManager,
                             ClaudePersistenceService persistenceService,
                             ClaudeProcessRunner processRunner,
                             AnalysisReaderFactory readerFactory,
                             ClaudeCallLogger callLogger,
-                            @Qualifier("parserArtifactStore") ArtifactStore store) {
+                            @Qualifier("parserArtifactStore") ArtifactStore store,
+                            ConnectionGuard connectionGuard,
+                            SsoCredentialsResolver ssoCredentialsResolver) {
         this.verificationService = verificationService;
         this.sessionManager = sessionManager;
         this.persistenceService = persistenceService;
@@ -66,6 +76,8 @@ public class ClaudeController {
         this.readerFactory = readerFactory;
         this.callLogger = callLogger;
         this.store = store;
+        this.connectionGuard = connectionGuard;
+        this.ssoCredentialsResolver = ssoCredentialsResolver;
     }
 
     // ==================== CONFIG ====================
@@ -97,6 +109,9 @@ public class ClaudeController {
     public ResponseEntity<Map<String, Object>> startVerification(
             @PathVariable("name") String name,
             @RequestBody(required = false) Map<String, Object> body) {
+        // Outside the try below on purpose: the guard throws a 409 ResponseStatusException, and the
+        // catch(Exception) that maps handler failures to a 500 would otherwise swallow it.
+        connectionGuard.requireParserConnected();
         try {
             if (!processRunner.isAvailable()) {
                 return ResponseEntity.status(503).body(Map.of(
@@ -126,7 +141,7 @@ public class ClaudeController {
             // for the whole task below. Either capture may carry nothing (install is then a no-op).
             final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
                     ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
-            final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+            final CapturedSsoContext jobContext = CapturedSsoContext.capture(ssoCredentialsResolver);
 
             String sessionId = sessionManager.submit(name, type, detail, () -> {
                 try (AutoCloseable routed = routingScope.install();
@@ -186,7 +201,14 @@ public class ClaudeController {
     public SseEmitter streamProgress(@PathVariable("name") String name) {
         SseEmitter emitter = new SseEmitter(0L); // no timeout — runs until complete/cancelled
 
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        // Daemon threads: a browser that disconnects without completing the stream must not leave a
+        // non-daemon poller holding the JVM open at shutdown. (The scheduler is still shut down on
+        // completion/timeout/error below, so a live stream releases its thread promptly too.)
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "parser-progress-sse-" + name);
+            t.setDaemon(true);
+            return t;
+        });
 
         emitter.onCompletion(scheduler::shutdown);
         emitter.onTimeout(scheduler::shutdown);

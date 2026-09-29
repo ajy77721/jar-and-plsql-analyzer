@@ -12,10 +12,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import com.analyzer.auth.ConnectionGuard;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.sso.CapturedSsoContext;
+import com.analyzer.storage.sso.SsoCredentialsResolver;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -61,6 +63,12 @@ public class CrossRefClaudeService {
     private final ArtifactStore parserArtifacts;
     private final com.jaranalyzer.service.JarDataPaths jarDataPaths;
 
+    /** Fails an enrichment start fast when the caller is logged in but has not connected a bucket. */
+    private final ConnectionGuard connectionGuard;
+
+    /** Carries the caller's role credentials onto the cr-claude pool (defense in depth). */
+    private final SsoCredentialsResolver ssoCredentialsResolver;
+
     /**
      * Root of the parser output subtree, as a key. Relative to the data root, so it names the
      * {@code plsql-parse} segment explicitly — see
@@ -78,12 +86,16 @@ public class CrossRefClaudeService {
     public CrossRefClaudeService(CrossRefStore store, ObjectMapper objectMapper,
                                  @Qualifier("jarArtifactStore") ArtifactStore artifacts,
                                  @Qualifier("parserArtifactStore") ArtifactStore parserArtifacts,
-                                 com.jaranalyzer.service.JarDataPaths jarDataPaths) {
+                                 com.jaranalyzer.service.JarDataPaths jarDataPaths,
+                                 ConnectionGuard connectionGuard,
+                                 SsoCredentialsResolver ssoCredentialsResolver) {
         this.store = store;
         this.objectMapper = objectMapper;
         this.artifacts = artifacts;
         this.parserArtifacts = parserArtifacts;
         this.jarDataPaths = jarDataPaths;
+        this.connectionGuard = connectionGuard;
+        this.ssoCredentialsResolver = ssoCredentialsResolver;
     }
 
     private InputStream openRead(ArtifactKey key) throws IOException {
@@ -154,6 +166,9 @@ public class CrossRefClaudeService {
      * Streams progress via SSE. Skips already-completed chunks (checkpoint.json).
      */
     public SseEmitter runEnrichment(String jarId, String crossRefId) {
+        // Fail fast (409 from CrossRefController) when the caller is logged in but has not
+        // connected a bucket, before any chunk executor or state is created.
+        connectionGuard.requireJarConnected();
         SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
 
         CrossRefResult result = store.readResult(store.runDir(jarId, crossRefId));
@@ -246,7 +261,7 @@ public class CrossRefClaudeService {
         // Either capture may carry nothing, and install is then a no-op.
         final RequestScopedArtifactStore.Scope routingScope = artifacts instanceof RequestScopedArtifactStore routed
                 ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
-        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(ssoCredentialsResolver);
 
         ExecutorService executor = Executors.newFixedThreadPool(parallelChunks,
                 r -> { Thread t = new Thread(r, "cr-claude-" + crossRefId); t.setDaemon(true); return t; });

@@ -2,11 +2,13 @@ package com.jaranalyzer.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jaranalyzer.service.ConversionService;
+import com.analyzer.auth.ConnectionGuard;
 import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.sso.CapturedSsoContext;
+import com.analyzer.storage.sso.SsoCredentialsResolver;
 import com.analyzer.storage.log.LineBufferTail;
 import com.analyzer.storage.log.LogTailBody;
 import com.plsqlanalyzer.web.service.ClaudeProcessRunner;
@@ -75,6 +77,15 @@ public class ConversionController {
     /** Required, not optional — an optional store would leave a silent filesystem fallback. */
     private final ArtifactStore store;
 
+    /** Fails a start fast when the caller is logged in but has not connected a bucket. */
+    private final ConnectionGuard connectionGuard;
+
+    /**
+     * Used to carry the caller's role credentials onto the bare worker thread (defense in depth
+     * alongside the captured routing scope), so a write the job makes signs as the submitter.
+     */
+    private final SsoCredentialsResolver ssoCredentialsResolver;
+
     private final ConcurrentHashMap<String, JobState> jobs = new ConcurrentHashMap<>();
     private final AtomicLong counter = new AtomicLong(1);
 
@@ -89,11 +100,15 @@ public class ConversionController {
     public ConversionController(ConversionService conversionService,
                                 @Qualifier("plsqlClaudeProcessRunner") ClaudeProcessRunner claudeRunner,
                                 ObjectMapper mapper,
-                                @Qualifier("jarArtifactStore") ArtifactStore store) {
+                                @Qualifier("jarArtifactStore") ArtifactStore store,
+                                ConnectionGuard connectionGuard,
+                                SsoCredentialsResolver ssoCredentialsResolver) {
         this.conversionService  = conversionService;
         this.claudeRunner       = claudeRunner;
         this.mapper             = mapper;
         this.store              = store;
+        this.connectionGuard    = connectionGuard;
+        this.ssoCredentialsResolver = ssoCredentialsResolver;
     }
 
     /**
@@ -138,6 +153,7 @@ public class ConversionController {
         ensureJobsLoaded();
         List<Map<String, Object>> result = new ArrayList<>();
         jobs.values().stream()
+            .filter(j -> connectionGuard.owns(j.owner))
             .sorted(Comparator.comparing(j -> -j.startedAt))
             .limit(50)
             .forEach(j -> result.add(j.toMap(false)));
@@ -154,7 +170,7 @@ public class ConversionController {
     public ResponseEntity<Map<String, Object>> jobStatus(@PathVariable String jobId) {
         ensureJobsLoaded();
         JobState s = jobs.get(jobId);
-        if (s == null) return ResponseEntity.notFound().build();
+        if (s == null || !connectionGuard.owns(s.owner)) return ResponseEntity.notFound().build();
         return ResponseEntity.ok(s.toMap(true));
     }
 
@@ -180,7 +196,7 @@ public class ConversionController {
 
         ensureJobsLoaded();
         JobState s = jobs.get(jobId);
-        if (s == null) return ResponseEntity.notFound().build();
+        if (s == null || !connectionGuard.owns(s.owner)) return ResponseEntity.notFound().build();
 
         String etag = "\"" + s.status + '|' + s.phase.hashCode() + '|' + s.log.size() + '|'
                 + s.liveAppended.get() + '|' + (s.reportPath != null) + '|'
@@ -227,7 +243,7 @@ public class ConversionController {
                                               @RequestParam(required = false) String q) {
         ensureJobsLoaded();
         JobState s = jobs.get(jobId);
-        if (s == null) return ResponseEntity.notFound().build();
+        if (s == null || !connectionGuard.owns(s.owner)) return ResponseEntity.notFound().build();
         // The progress log is never evicted, so lines ever appended == lines retained.
         List<String> snapshot = new ArrayList<>(s.log);
         return ResponseEntity.ok(LogTailBody.of(LineBufferTail.of(
@@ -250,7 +266,7 @@ public class ConversionController {
                                                @RequestParam(required = false) String q) {
         ensureJobsLoaded();
         JobState s = jobs.get(jobId);
-        if (s == null) return ResponseEntity.notFound().build();
+        if (s == null || !connectionGuard.owns(s.owner)) return ResponseEntity.notFound().build();
         // Snapshot both together: liveAppended must not advance between reading the list and
         // reading the counter, or `fromSeq` would be computed one line short.
         List<String> snapshot;
@@ -277,7 +293,7 @@ public class ConversionController {
     public ResponseEntity<String> jobInstruction(@PathVariable String jobId) {
         ensureJobsLoaded();
         JobState s = jobs.get(jobId);
-        if (s == null) return ResponseEntity.notFound().build();
+        if (s == null || !connectionGuard.owns(s.owner)) return ResponseEntity.notFound().build();
         if (s.instructionMd == null || s.instructionMd.isEmpty()) {
             return ResponseEntity.noContent().build();
         }
@@ -323,7 +339,7 @@ public class ConversionController {
     public ResponseEntity<Map<String, Object>> jobReport(@PathVariable String jobId) {
         ensureJobsLoaded();
         JobState s = jobs.get(jobId);
-        if (s == null) return ResponseEntity.notFound().build();
+        if (s == null || !connectionGuard.owns(s.owner)) return ResponseEntity.notFound().build();
         if (s.reportPath == null || s.reportPath.isBlank())
             return ResponseEntity.ok(Map.of("found", false, "error", "No report path recorded yet"));
 
@@ -363,8 +379,15 @@ public class ConversionController {
 
     private Map<String, Object> startJob(String action, ConversionRequest req) {
         ensureJobsLoaded();
+        // Fail fast when the caller is logged in but has not connected a bucket, rather than queue
+        // the job and let it fail (or silently use the default target) on the worker thread.
+        connectionGuard.requireJarConnected();
+        // Record the owner on the request thread, while the identity is resolvable, so a later poll
+        // by another user's session can be refused.
+        String owner = connectionGuard.currentIdentityKey();
         String jobId = String.valueOf(counter.getAndIncrement());
         JobState state = new JobState(jobId, action, req);
+        state.owner = owner;
         jobs.put(jobId, state);
         persistJob(state);
 
@@ -375,7 +398,7 @@ public class ConversionController {
         // then a no-op), preserving the default-chain path exactly.
         final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
                 ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
-        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(ssoCredentialsResolver);
 
         Thread t = new Thread(() -> {
             try (AutoCloseable routed = routingScope.install();
@@ -725,6 +748,13 @@ public class ConversionController {
         ConversionRequest req;
         long startedAt = System.currentTimeMillis();
 
+        /**
+         * The routing identity of the session that started this job, or {@code null} when none was
+         * resolvable (a local/CLI run). Read back on every poll so a different user cannot read
+         * another's report by guessing a sequential id; {@code null} stays open for the legacy path.
+         */
+        volatile String owner;
+
         volatile String phase  = "Initializing";
         volatile String status = "running";
         volatile String reportPath;
@@ -785,6 +815,9 @@ public class ConversionController {
             m.put("log",         new ArrayList<>(log));
             m.put("startedAt",   startedAt);
             m.put("elapsedMs",   System.currentTimeMillis() - startedAt);
+            // Persisted so ownership survives a restart; absent (null) for jobs from before this
+            // field existed, which the guard treats as unowned rather than locking anyone out.
+            if (owner != null) m.put("owner", owner);
             if (includeLive)     m.put("liveLines",    new ArrayList<>(liveLines));
             if (reportPath    != null) m.put("reportPath",    reportPath);
             // The instruction is immutable, ~70 KB measured, and only the detail screen's Prompt
@@ -811,6 +844,7 @@ public class ConversionController {
             s.reportPath    = (String) m.get("reportPath");
             s.instructionMd = (String) m.get("instructionMd");
             s.error         = (String) m.get("error");
+            s.owner         = (String) m.get("owner");
             Object st = m.get("startedAt");
             if (st instanceof Number n) s.startedAt = n.longValue();
             List<String> logs = (List<String>) m.get("log");
