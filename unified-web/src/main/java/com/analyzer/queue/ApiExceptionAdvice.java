@@ -28,6 +28,11 @@ import java.util.Map;
  * {@code "Authenticate via AWS SSO first"} and prompt for login. Kept deliberately narrow: only
  * {@link NotAuthenticatedException} is translated, so a genuine storage fault (an S3 outage, a
  * missing object) keeps its existing 5xx handling.
+ *
+ * <p>The specific reason travels in a separate {@code reason} field when the throw site supplied
+ * one (e.g. the routing store's "logged in but no AWS bucket connected" — a login will NOT fix
+ * that, only connecting a bucket will), so the UI can distinguish the two without breaking the
+ * keyed-on constant above.
  */
 @RestControllerAdvice
 public class ApiExceptionAdvice {
@@ -37,6 +42,10 @@ public class ApiExceptionAdvice {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("ok", false);
         body.put("error", NotAuthenticatedException.MESSAGE);
+        String reason = e.getMessage();
+        if (reason != null && !reason.isBlank() && !NotAuthenticatedException.MESSAGE.equals(reason)) {
+            body.put("reason", reason);
+        }
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(body);
     }
 

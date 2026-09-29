@@ -160,7 +160,9 @@ class DirectFileIoGateTest {
         // (ArtifactStore.materialize's artifact-*, the multipart jar-analyze-* temps) and decompile
         // them directly instead of refusing every class in remote storage mode. No new artifact
         // I/O — the same seekable-file need already budgeted here.
-        ALLOWED.put("jar-analyzer-core/DecompilerService", 12);
+        // Lowered 12 -> 10: cleanTempDir (a dead delete of per-thread temp dirs) was removed and
+        // the cache-path helpers consolidated — fewer direct File ops, same seekable-file need.
+        ALLOWED.put("jar-analyzer-core/DecompilerService", 10);
         ALLOWED.put("jar-analyzer-core/PersistenceService", 3);
         ALLOWED.put("unified-web/FlowAnalysisController", 1);
         // Chat sandbox — genuinely local, pre-existing, not yet migrated to ArtifactStore. Chat
