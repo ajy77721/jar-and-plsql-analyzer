@@ -261,8 +261,15 @@ public class StorageConfig {
         // Read semantics are unchanged — every read-shaped call drains pending uploads first (see
         // WriteBehindStore). Hybrid is left alone: its small writes already go to local MongoDB.
         if (mode == StorageMode.S3 && s3WriteBehind) {
-            log.info("[storage] S3 write-behind enabled (bounded upload pool, read barriers on)");
-            store = new WriteBehindStore(store);
+            // The upload pool threads have no request context of their own, so the write-behind
+            // must capture the writer's credentials at write time and re-install them on the flush
+            // thread — see CapturedSsoContext. Only the startup store (signed by the shared
+            // resolver) needs this: a per-user store's client already carries fixed credentials.
+            SsoCredentialsResolver resolver =
+                    credentialsProvider instanceof SsoCredentialsResolver r ? r : null;
+            log.info("[storage] S3 write-behind enabled (bounded upload pool, read barriers on, "
+                    + "caller context carried to flush threads: {})", resolver != null);
+            store = new WriteBehindStore(store, WriteBehindStore.DEFAULT_THREADS, resolver);
         }
         return store;
     }

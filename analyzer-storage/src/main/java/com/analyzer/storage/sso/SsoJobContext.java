@@ -85,6 +85,25 @@ public final class SsoJobContext implements AutoCloseable {
     }
 
     /**
+     * The context installed on this thread, or {@code null}. Package-visible so
+     * {@link CapturedSsoContext#capture} can package it for hand-off to another thread without
+     * re-deriving anything.
+     */
+    static SsoJobContext current() {
+        return CURRENT.get();
+    }
+
+    /** The stores of this snapshot, or {@code null} when it carries none. */
+    CapturedStores capturedStores() {
+        return stores;
+    }
+
+    /** The credentials of this snapshot, or {@code null} when it carries none. */
+    CapturedCredentials capturedCredentials() {
+        return credentials;
+    }
+
+    /**
      * The session this thread's job snapshot belongs to, or {@code null} when none is in force.
      *
      * <p>This is the one piece of the snapshot a <em>pooled helper</em> thread can carry as
