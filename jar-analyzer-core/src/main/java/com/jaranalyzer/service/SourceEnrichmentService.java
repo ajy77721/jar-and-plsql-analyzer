@@ -6,6 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
+
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
@@ -19,10 +23,19 @@ public class SourceEnrichmentService {
     private final DecompilerService decompilerService;
     private final ProgressService progressService;
 
+    /**
+     * The store the decompile cache reads/writes through. Held here (not only inside
+     * {@link DecompilerService}) so the enrich pool can capture the caller's routing scope and
+     * re-install it per task. The same {@code jarArtifactStore} bean the decompiler injects.
+     */
+    private final ArtifactStore store;
+
     public SourceEnrichmentService(DecompilerService decompilerService,
-                                   ProgressService progressService) {
+                                   ProgressService progressService,
+                                   @org.springframework.beans.factory.annotation.Qualifier("jarArtifactStore") ArtifactStore store) {
         this.decompilerService = decompilerService;
         this.progressService = progressService;
+        this.store = store;
     }
 
     /**
@@ -40,21 +53,57 @@ public class SourceEnrichmentService {
      */
     public int enrichCallTreesWithSource(List<EndpointInfo> endpoints,
                                          com.analyzer.storage.ArtifactKey jarKey) {
-        return enrich(endpoints, jarKey, null);
+        return enrich(endpoints, jarKey, null, null);
+    }
+
+    /**
+     * As {@link #enrichCallTreesWithSource(List, com.analyzer.storage.ArtifactKey)} but handed the
+     * artifact's <b>already-resolved local jar file</b> (the queue executors materialize it once and
+     * hold it open for the rest of the job). Every class then decompiles from that one open file
+     * instead of re-reading it per class; {@code jarKey} remains the decompile-cache identity.
+     * Pass {@code null} to have this service resolve the file once itself.
+     */
+    public int enrichCallTreesWithSource(List<EndpointInfo> endpoints,
+                                         com.analyzer.storage.ArtifactKey jarKey, Path localJar) {
+        return enrich(endpoints, jarKey, localJar, null);
     }
 
     /** Path-based variant, retained for callers that genuinely only have a local file. */
     public int enrichCallTreesWithSource(List<EndpointInfo> endpoints, Path jarPath) {
-        return enrich(endpoints, null, jarPath);
+        return enrich(endpoints, null, null, jarPath);
     }
 
     private int enrich(List<EndpointInfo> endpoints,
-                       com.analyzer.storage.ArtifactKey jarKey, Path jarPath) {
+                       com.analyzer.storage.ArtifactKey jarKey, Path localJar, Path jarPath) {
         // Per-analysis rate limit: one bad path must not emit one identical WARN per class.
         decompilerService.resetGuardWarnCounter();
         final int cacheLimit = 1500;
         ConcurrentHashMap<String, String> classSourceCache = new ConcurrentHashMap<>(1024);
         ConcurrentLinkedQueue<String> accessOrder = new ConcurrentLinkedQueue<>();
+
+        // The caller is a queue worker whose installed job context makes the submitter's stores and
+        // credentials resolvable; the [source-enrich] pool threads below have neither. Capture HERE —
+        // before any task is submitted, on the thread that owns the answer — and re-install per task,
+        // or every decompile-cache read/write and jar read routes/signs as the shared default target
+        // (a pod with no ambient credentials then fails every class on a ~2s IMDS timeout). Capture
+        // both halves: the job snapshot (credentials + stores) and the routing scope (store
+        // session). Null-safe: nothing captured means install is a no-op, preserving legacy/
+        // no-SSO behaviour exactly.
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+        final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+
+        // Resolve the jar's local file ONCE for the whole job: every class then decompiles from the
+        // same open JarFile rather than re-materializing the artifact per class. Prefer the file the
+        // caller already holds (the queue executors materialize it once and keep it open); otherwise
+        // pin it here. Null means "no local file resolvable" — the per-class key/path path is kept.
+        DecompilerService.PinnedJar pinned = null;
+        Path effectiveLocalJar = localJar;
+        if (effectiveLocalJar == null && jarKey != null) {
+            pinned = decompilerService.pinJar(jarKey);
+            if (pinned != null) effectiveLocalJar = pinned.path();
+        }
+        final Path localJarFile = effectiveLocalJar;
 
         AtomicInteger methodCount = new AtomicInteger();
         AtomicInteger nodeCount = new AtomicInteger();
@@ -71,53 +120,62 @@ public class SourceEnrichmentService {
             return t;
         });
 
-        List<Future<?>> futures = new ArrayList<>(total);
-        for (int i = 0; i < total; i++) {
-            final int idx = i;
-            final EndpointInfo ep = endpoints.get(i);
-            futures.add(pool.submit(() -> {
-                int beforeMethods = methodCount.get();
-                int beforeNodes = nodeCount.get();
-                int beforeCache = classSourceCache.size();
-                long epStart = System.currentTimeMillis();
+        try {
+            List<Future<?>> futures = new ArrayList<>(total);
+            for (int i = 0; i < total; i++) {
+                final int idx = i;
+                final EndpointInfo ep = endpoints.get(i);
+                // Explicit Callable: the try-with-resources close() can throw, which a Runnable cannot.
+                futures.add(pool.submit((Callable<Void>) () -> {
+                    int beforeMethods = methodCount.get();
+                    int beforeNodes = nodeCount.get();
+                    int beforeCache = classSourceCache.size();
+                    long epStart = System.currentTimeMillis();
 
-                try {
-                    Set<CallNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-                    enrichNodeWithSource(ep.getCallTree(), jarKey, jarPath, classSourceCache,
-                            accessOrder, cacheLimit,
-                            methodCount, nodeCount, newClassCount, failedClassCount, visited,
-                            ep.getFragments());
-                } catch (Throwable t) {
-                    log.warn("[5.6] ({}/{}) {} — FAILED: {}", idx + 1, total,
-                            ep.getHttpMethod() + " " + ep.getFullPath(), t.getMessage());
-                    return;
-                }
+                    try (AutoCloseable routedCtx = routingScope.install();
+                         AutoCloseable ssoCtx = jobContext == null ? null : jobContext.install()) {
+                        try {
+                            Set<CallNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+                            enrichNodeWithSource(ep.getCallTree(), jarKey, localJarFile, jarPath,
+                                    classSourceCache, accessOrder, cacheLimit,
+                                    methodCount, nodeCount, newClassCount, failedClassCount, visited,
+                                    ep.getFragments());
+                        } catch (Throwable t) {
+                            log.warn("[5.6] ({}/{}) {} — FAILED: {}", idx + 1, total,
+                                    ep.getHttpMethod() + " " + ep.getFullPath(), t.getMessage());
+                            return null;
+                        }
+                    }
 
-                int methodsThisEp = methodCount.get() - beforeMethods;
-                int nodesThisEp = nodeCount.get() - beforeNodes;
-                int newClasses = classSourceCache.size() - beforeCache;
-                long epMs = System.currentTimeMillis() - epStart;
-                int done = doneCount.incrementAndGet();
-                String label = ep.getHttpMethod() + " " + ep.getFullPath();
+                    int methodsThisEp = methodCount.get() - beforeMethods;
+                    int nodesThisEp = nodeCount.get() - beforeNodes;
+                    int newClasses = classSourceCache.size() - beforeCache;
+                    long epMs = System.currentTimeMillis() - epStart;
+                    int done = doneCount.incrementAndGet();
+                    String label = ep.getHttpMethod() + " " + ep.getFullPath();
 
-                log.info("[5.6] ({}/{}) {} — {} nodes, {} methods decompiled, {} new classes ({}ms)",
-                        done, total, label, nodesThisEp, methodsThisEp, newClasses, epMs);
-                if (done % 10 == 0 || done == total) {
-                    progressService.detail("[5.6] (" + done + "/" + total + ") "
-                            + methodCount.get() + " methods | " + classSourceCache.size() + " classes cached"
-                            + " | " + failedClassCount.get() + " failed");
-                }
-            }));
-        }
-
-        for (Future<?> f : futures) {
-            try {
-                f.get();
-            } catch (Exception e) {
-                log.warn("[5.6] Endpoint enrichment failed: {}", e.getMessage());
+                    log.info("[5.6] ({}/{}) {} — {} nodes, {} methods decompiled, {} new classes ({}ms)",
+                            done, total, label, nodesThisEp, methodsThisEp, newClasses, epMs);
+                    if (done % 10 == 0 || done == total) {
+                        progressService.detail("[5.6] (" + done + "/" + total + ") "
+                                + methodCount.get() + " methods | " + classSourceCache.size() + " classes cached"
+                                + " | " + failedClassCount.get() + " failed");
+                    }
+                    return null;
+                }));
             }
+
+            for (Future<?> f : futures) {
+                try {
+                    f.get();
+                } catch (Exception e) {
+                    log.warn("[5.6] Endpoint enrichment failed: {}", e.getMessage());
+                }
+            }
+        } finally {
+            pool.shutdown();
+            if (pinned != null) pinned.close();
         }
-        pool.shutdown();
 
         long totalMs = System.currentTimeMillis() - startTime;
         String summary = "Decompiled " + methodCount.get() + " methods across " + nodeCount.get() + " nodes"
@@ -130,7 +188,7 @@ public class SourceEnrichmentService {
     }
 
     private void enrichNodeWithSource(CallNode node,
-                                      com.analyzer.storage.ArtifactKey jarKey, Path jarPath,
+                                      com.analyzer.storage.ArtifactKey jarKey, Path localJar, Path jarPath,
                                       ConcurrentHashMap<String, String> classSourceCache,
                                       ConcurrentLinkedQueue<String> accessOrder, int cacheLimit,
                                       AtomicInteger methodCount, AtomicInteger nodeCount,
@@ -148,11 +206,16 @@ public class SourceEnrichmentService {
                 boolean[] wasNew = {false};
                 String fullSource = classSourceCache.computeIfAbsent(className, cls -> {
                     wasNew[0] = true;
-                    // Key-based when available: a materialized Path is a /tmp download in remote
-                    // storage mode, which the data-root guard refuses for every class.
-                    String src = jarKey != null
-                            ? decompilerService.decompile(jarKey, cls)
-                            : decompilerService.decompile(jarPath, cls);
+                    // Prefer the one local file resolved for the whole job (key still gives the
+                    // cache identity); fall back, null-safe, to the per-class key/path behaviour.
+                    String src;
+                    if (jarKey != null && localJar != null) {
+                        src = decompilerService.decompile(localJar, jarKey, cls);
+                    } else if (jarKey != null) {
+                        src = decompilerService.decompile(jarKey, cls);
+                    } else {
+                        src = decompilerService.decompile(jarPath, cls);
+                    }
                     if (src == null) {
                         failedClassCount.incrementAndGet();
                     }
@@ -190,7 +253,7 @@ public class SourceEnrichmentService {
 
         if (node.getChildren() != null) {
             for (CallNode child : node.getChildren()) {
-                enrichNodeWithSource(child, jarKey, jarPath, classSourceCache,
+                enrichNodeWithSource(child, jarKey, localJar, jarPath, classSourceCache,
                         accessOrder, cacheLimit,
                         methodCount, nodeCount, newClassCount, failedClassCount, visited, fragments);
             }
@@ -201,7 +264,7 @@ public class SourceEnrichmentService {
             List<CallNode> overflow = fragments.get(node.getFragmentRef());
             if (overflow != null) {
                 for (CallNode child : overflow) {
-                    enrichNodeWithSource(child, jarKey, jarPath, classSourceCache,
+                    enrichNodeWithSource(child, jarKey, localJar, jarPath, classSourceCache,
                             accessOrder, cacheLimit,
                             methodCount, nodeCount, newClassCount, failedClassCount, visited, fragments);
                 }

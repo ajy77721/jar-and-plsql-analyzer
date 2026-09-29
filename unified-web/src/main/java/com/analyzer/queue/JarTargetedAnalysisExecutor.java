@@ -96,11 +96,13 @@ public class JarTargetedAnalysisExecutor {
             // Enrich by KEY, not by a materialized Path: `store.materialize()` hands back the real
             // file only in local mode; remotely it downloads to a /tmp temp that the decompiler's
             // data-root containment check refuses for every class. The key is also the decompile
-            // cache's stable identity, and decompile(key, ...) does its own materialize internally.
+            // cache's stable identity. The uploaded temp (tempJar) is this app's own local copy of
+            // the same artifact, so every class decompiles from that one open file instead of
+            // re-reading the store per class.
             var storedJarKey = persistenceService.getPaths().storedJarKey(jarName);
             if (store.exists(storedJarKey)) {
                 try {
-                    sourceEnrichmentService.enrichCallTreesWithSource(endpoints, storedJarKey);
+                    sourceEnrichmentService.enrichCallTreesWithSource(endpoints, storedJarKey, tempJar);
                 } catch (Exception ex) {
                     log.warn("Source enrichment failed (non-fatal): {}", ex.getMessage());
                 }

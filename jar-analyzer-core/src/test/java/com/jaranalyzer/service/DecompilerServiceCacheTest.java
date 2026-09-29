@@ -134,12 +134,74 @@ class DecompilerServiceCacheTest {
     }
 
     /**
-     * A WAR's application classes live under {@code WEB-INF/classes/} — the Servlet-spec
-     * counterpart of a Spring Boot fat jar's {@code BOOT-INF/classes/}. Before this fix,
-     * {@code extractClassBytes} only checked the plain and {@code BOOT-INF/classes/} paths, so
-     * every class in a real WAR silently failed to decompile (classData populated, {@code source}
-     * left null) even though the WAR-routing bug above it was fixed.
+     * §New: the enrich path resolves the jar ONCE and decompiles every class from that local file,
+     * with the artifact key used ONLY as the decompile-cache identity. The decompiled class must
+     * still be cached under {@code jar/<id>/decompiled/<class>.java}, a repeat call must be served
+     * from that cache without reading the local jar again, and a {@code null} file must fall back
+     * (return null) rather than throw.
      */
+    @Test
+    void decompilesFromLocalJarWithTheKeyAsCacheIdentity(@TempDir Path tmp) throws Exception {
+        Path dataDir = tmp.resolve("data").resolve("jar");
+        Files.createDirectories(dataDir);
+        ArtifactStore store = new LocalArtifactStore(tmp.resolve("data"));
+        JarDataPaths paths = new JarDataPaths(dataDir.toString(), store);
+
+        String jarId = "local-once";
+        ArtifactKey jarKey = paths.storedJarKey(jarId);
+        Path storedJar = tmp.resolve("source.jar");
+        writeJarWithOneClass(storedJar, "java/lang/Object.class", realClassBytes());
+        try (var in = Files.newInputStream(storedJar); OutputStream out = store.write(jarKey)) {
+            in.transferTo(out);
+        }
+
+        DecompilerService svc = new DecompilerService(paths, store);
+        String className = "java.lang.Object";
+        ArtifactKey cacheKey = paths.decompiledClassKey(jarId, className);
+
+        String cold = svc.decompile(storedJar, jarKey, className);
+        assertNotNull(cold, "Object must decompile from the one local jar file");
+        assertTrue(store.exists(cacheKey), "the key must still be used as the cache identity");
+
+        // Corrupt the local file: a second call must be a cache hit and not read it at all.
+        Files.write(storedJar, "not a jar".getBytes(StandardCharsets.UTF_8));
+        assertEquals(cold, svc.decompile(storedJar, jarKey, className),
+                "a cache hit must be served without re-reading the local jar");
+
+        assertNull(svc.decompile(null, jarKey, className),
+                "a null local file must fall back safely, not throw");
+    }
+
+    /**
+     * §New: {@code pinJar} materializes the artifact once (null-safe for a missing key/artifact),
+     * so an enrich job that was not handed a local file still reads the jar once.
+     */
+    @Test
+    void pinJarMaterializesOnceAndIsNullSafe(@TempDir Path tmp) throws Exception {
+        Path dataDir = tmp.resolve("data").resolve("jar");
+        Files.createDirectories(dataDir);
+        ArtifactStore store = new LocalArtifactStore(tmp.resolve("data"));
+        JarDataPaths paths = new JarDataPaths(dataDir.toString(), store);
+
+        String jarId = "pin-demo";
+        ArtifactKey jarKey = paths.storedJarKey(jarId);
+        Path jarFile = tmp.resolve("source.jar");
+        writeJarWithOneClass(jarFile, "java/lang/Object.class", realClassBytes());
+        try (var in = Files.newInputStream(jarFile); OutputStream out = store.write(jarKey)) {
+            in.transferTo(out);
+        }
+
+        DecompilerService svc = new DecompilerService(paths, store);
+        try (DecompilerService.PinnedJar pinned = svc.pinJar(jarKey)) {
+            assertNotNull(pinned, "an existing stored jar must pin");
+            assertNotNull(pinned.path());
+            assertTrue(Files.isRegularFile(pinned.path()));
+        }
+        assertNull(svc.pinJar(null), "a null key must pin nothing");
+        assertNull(svc.pinJar(paths.storedJarKey("does-not-exist")),
+                "a missing artifact must pin nothing, not throw");
+    }
+
     @Test
     void decompilesAClassStoredUnderWebInfClasses(@TempDir Path tmp) throws Exception {
         Path dataDir = tmp.resolve("data").resolve("jar");

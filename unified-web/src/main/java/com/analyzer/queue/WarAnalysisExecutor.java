@@ -201,7 +201,9 @@ public class WarAnalysisExecutor {
             if (store.exists(storedWarKey)) {
                 // Key, not materialized Path: in remote mode that Path is a /tmp download outside
                 // the data root and the decompiler would refuse every class (see JarAnalysisExecutor).
-                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedWarKey);
+                // Pass the once-materialized local file too so every class decompiles from one open
+                // JarFile; the key remains the decompile-cache identity.
+                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedWarKey, storedWar);
             }
             System.gc();
             checkCancelled(job);

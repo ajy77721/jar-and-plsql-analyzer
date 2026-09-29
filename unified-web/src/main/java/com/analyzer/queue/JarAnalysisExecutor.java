@@ -244,7 +244,10 @@ public class JarAnalysisExecutor {
                 // decompile cache's identity. storedJar stays materialized for the File-based
                 // readers below.
                 long tDecompile0 = System.nanoTime();
-                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedJarKey);
+                // Hand over the local file materialized once above (storedJar), so every class
+                // decompiles from one open JarFile; the key is still the cache identity. Null means
+                // the enrich service resolves it once itself.
+                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedJarKey, storedJar);
                 parseNanos += System.nanoTime() - tDecompile0;
             }
             System.gc();

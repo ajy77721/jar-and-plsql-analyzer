@@ -183,7 +183,7 @@ public class DecompilerService {
         // store key). Anything else is still refused.
         if (isAppOwnedTemp(jarPath)) {
             log.debug("Decompiling {} from app-owned temp {} (no store key — uncached)", className, jarPath);
-            return decompileLocalFile(jarPath, className);
+            return decompileLocalFile(null, jarPath, className);
         }
 
         // Rate-limit the refusal: one identical WARN per class is the live-staging regression this
@@ -227,12 +227,17 @@ public class DecompilerService {
     }
 
     /**
-     * Decompile a class straight from a local jar file that has no store key (an app-owned temp).
-     * No cache read/write — a temp's identity is not stable across analyses.
+     * Decompile a class straight from a local jar file.
+     *
+     * @param indexKey the nested-JAR index identity for {@code jarPath}; the artifact key when one
+     *                 is known (so the index is shared with {@link #decompile(ArtifactKey, String)}),
+     *                 or {@code null} for an app-owned temp with no store key
      */
-    private String decompileLocalFile(Path jarPath, String className) {
+    private String decompileLocalFile(String indexKey, Path jarPath, String className) {
         try {
-            byte[] classBytes = extractClassBytes("local-temp:" + jarPath.toAbsolutePath().normalize(), jarPath, className);
+            byte[] classBytes = extractClassBytes(
+                    indexKey != null ? indexKey : "local-temp:" + jarPath.toAbsolutePath().normalize(),
+                    jarPath, className);
             if (classBytes == null) return null;
             Path tempDir = getThreadTempDir();
             Future<String> future = decompileExecutor.submit(() -> decompileBytes(classBytes, className, tempDir));
@@ -262,6 +267,105 @@ public class DecompilerService {
     public String decompile(com.analyzer.storage.ArtifactKey jarKey, String className) {
         DecompileResult result = decompileWithMeta(jarKey, className);
         return result == null ? null : result.source();
+    }
+
+    /**
+     * Decompile a class from an <b>already-resolved local jar file</b>, using {@code jarKey} ONLY as
+     * the decompile-cache identity.
+     *
+     * <p>{@link #decompile(com.analyzer.storage.ArtifactKey, String)} re-runs
+     * {@code store.exists()} + {@code store.materialize()} for <em>every class</em> — remotely a
+     * fresh download and {@link JarFile} open per class, which is the bulk of a large analysis's
+     * decompile cost. A caller that holds the artifact's local file for the whole job (the queue
+     * executors materialize it once; {@link #pinJar} does the same for a caller that does not)
+     * decompiles every class from that one open file, while the key still gives each class its
+     * stable {@code decompiled/<class>.java} cache entry — so the cache read/write still routes
+     * through the store (and therefore still needs the calling thread's SSO context).
+     *
+     * <p>Null-safe: a {@code null} jar file or a key that carries no cache identity falls back to
+     * the uncached app-owned-temp behaviour rather than failing. Never throws.
+     */
+    public String decompile(Path localJar, com.analyzer.storage.ArtifactKey jarKey, String className) {
+        if (localJar == null) return null;
+        if (jarKey == null || store == null || jarDataPaths == null) {
+            return decompileLocalFile(jarKey == null ? null : jarKey.toString(), localJar, className);
+        }
+
+        com.analyzer.storage.ArtifactKey cacheKey = decompiledCacheKey(jarKey, className);
+        if (cacheKey != null) {
+            try {
+                if (store.exists(cacheKey)) {
+                    long age = System.currentTimeMillis() - store.lastModified(cacheKey);
+                    if (cacheTtlMillis > 0 && age > cacheTtlMillis) {
+                        log.debug("Decompile cache entry for {} expired ({} ms old, ttl {} ms) — evicting and re-decompiling",
+                                className, age, cacheTtlMillis);
+                        store.delete(cacheKey);
+                    } else {
+                        try (InputStream in = store.read(cacheKey)) {
+                            log.debug("Decompile cache hit for {} ({})", className, cacheKey);
+                            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                log.debug("Cache read failed for {}, decompiling from the local jar: {}", cacheKey, e.getMessage());
+            }
+        }
+
+        String source = decompileLocalFile(jarKey.toString(), localJar, className);
+        if (source != null && cacheKey != null) {
+            byte[] bytes = source.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            try (OutputStream out = store.write(cacheKey, bytes.length)) {
+                out.write(bytes);
+            } catch (IOException e) {
+                log.debug("Failed to cache decompiled source for {}: {}", cacheKey, e.getMessage());
+            }
+        }
+        return source;
+    }
+
+    /**
+     * A local jar file held open for the duration of one enrich job so every class decompiles from
+     * a single open file (one download in remote mode, not one per class). {@link #close()} releases
+     * the temp copy when the artifact came from a remote store.
+     */
+    public static final class PinnedJar implements AutoCloseable {
+        private final com.analyzer.storage.LocalHandle handle;
+        private final Path path;
+
+        private PinnedJar(com.analyzer.storage.LocalHandle handle, Path path) {
+            this.handle = handle;
+            this.path = path;
+        }
+
+        /** The open local jar file. Valid until {@link #close()}. */
+        public Path path() {
+            return path;
+        }
+
+        @Override
+        public void close() {
+            try { handle.close(); } catch (Exception ignored) { /* best effort */ }
+        }
+    }
+
+    /**
+     * Materializes {@code jarKey} to a local file ONCE, for reuse across every class of one enrich
+     * job, or returns {@code null} when there is no such artifact (or no store) — the caller then
+     * keeps its existing per-class behaviour. Must be called on a context-bearing thread (the queue
+     * worker), since it reads through the routing store.
+     */
+    public PinnedJar pinJar(com.analyzer.storage.ArtifactKey jarKey) {
+        if (jarKey == null || store == null) return null;
+        try {
+            if (!store.exists(jarKey)) return null;
+            com.analyzer.storage.LocalHandle handle = store.materialize(jarKey);
+            return new PinnedJar(handle, handle.path());
+        } catch (Throwable e) {
+            log.debug("Could not materialize {} for local reuse ({}); falling back to per-class reads",
+                    jarKey, e.getMessage());
+            return null;
+        }
     }
 
     /** Whether a decompiled-class response came from the per-class cache or a live CFR run. */
