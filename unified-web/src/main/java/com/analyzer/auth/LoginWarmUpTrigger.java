@@ -4,6 +4,7 @@ import com.analyzer.storage.sso.CapturedCredentials;
 import com.analyzer.storage.sso.CapturedStores;
 import com.analyzer.storage.sso.SsoCredentialsResolver;
 import com.analyzer.storage.sso.SsoStoreSwapper;
+import com.analyzer.usercfg.UserConnectionStore;
 import com.plsqlanalyzer.web.parser.service.SidecarWarmUpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,23 +47,31 @@ public class LoginWarmUpTrigger {
     private final SsoStoreSwapper storeSwapper;
     private final SsoCredentialsResolver credentialsResolver;
     private final SidecarWarmUpService warmUp;
+    private final UserConnectionStore userConnectionStore;
 
     public LoginWarmUpTrigger(SsoStoreSwapper storeSwapper,
                              SsoCredentialsResolver credentialsResolver,
-                             SidecarWarmUpService warmUp) {
+                             SidecarWarmUpService warmUp,
+                             UserConnectionStore userConnectionStore) {
         this.storeSwapper = storeSwapper;
         this.credentialsResolver = credentialsResolver;
         this.warmUp = warmUp;
+        this.userConnectionStore = userConnectionStore;
     }
 
     /**
-     * Snapshots the just-logged-in session and starts a warm sweep under it. Best-effort: never
-     * throws, never blocks.
+     * On a completed login: first reconnect this session to the AWS target it saved before (so a
+     * redeploy no longer silently drops the user's connection), then snapshot the session and start
+     * the warm sweep. Best-effort: never throws, never blocks.
+     *
+     * <p>Reconnect runs <em>before</em> the capture on purpose, so the warm sweep is handed the
+     * reconnected per-user stores rather than running without a target.
      *
      * @param sessionId the session whose login completed; used only for the (masked) log line
      */
     public void onLoginComplete(String sessionId) {
         try {
+            autoReconnect(sessionId);
             // Both captures read the request-bound session, so this must stay on the login thread.
             CapturedStores stores = storeSwapper.captureCurrent();
             CapturedCredentials credentials = credentialsResolver.captureCurrent();
@@ -71,6 +80,28 @@ public class LoginWarmUpTrigger {
             // Class name only: a capture can never carry credential material into a message.
             log.debug("[aws-sso] login warm-up could not be triggered ({})",
                     e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Re-runs the connect path for this session against the target stored under the user's
+     * <b>identity</b> (never the session id), so a redeploy — which wipes the in-memory binding but
+     * lets SSO re-login — no longer leaves the user silently disconnected. The connect's capability
+     * probe still gates the build, and a missing target or a failed probe is skipped silently here
+     * (the probe failure is logged by the swapper at WARN). Runs on the login thread, where the
+     * session's freshly-minted credentials are resolvable.
+     */
+    private void autoReconnect(String sessionId) {
+        try {
+            UserConnectionStore.AwsTarget target = userConnectionStore.findAwsTargetForCurrentUser();
+            if (target == null || target.bucket() == null || target.bucket().isBlank()) {
+                log.debug("[auto-reconnect] no saved AWS target for this login; manual connect required");
+                return;
+            }
+            storeSwapper.autoReconnect(sessionId, target.bucket(), target.region());
+        } catch (RuntimeException e) {
+            // A lookup or reconnect failure must never fail a login; the user can connect manually.
+            log.debug("[auto-reconnect] skipped ({})", e.getClass().getSimpleName());
         }
     }
 }

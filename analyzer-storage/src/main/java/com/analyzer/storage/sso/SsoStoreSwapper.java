@@ -119,6 +119,15 @@ public class SsoStoreSwapper {
     /** sessionId -> that user's built stores; written on connect, read on every routed operation. */
     private final ConcurrentHashMap<String, BuiltStores> storesBySession = new ConcurrentHashMap<>();
 
+    /**
+     * sessionId -> monitor that serialises {@link #connect} for that user. A manual connect from the
+     * modal and an {@link #autoReconnect} fired by a login completing can race; serialising on one
+     * monitor per session means the second entrant sees the stores the first just built (and for an
+     * auto-reconnect to the same target, {@link #autoReconnect} skips the rebuild entirely) instead
+     * of two probes and two builds interleaving.
+     */
+    private final ConcurrentHashMap<String, Object> connectLocks = new ConcurrentHashMap<>();
+
     /** Effective target when a user supplies none, and what {@code /session} reports before connect. */
     private final String defaultBucket;
     private final String defaultRegion;
@@ -174,6 +183,15 @@ public class SsoStoreSwapper {
         if (sessionId == null || sessionId.isBlank()) {
             throw new NotAuthenticatedException();
         }
+        // One monitor per session: a manual connect from the modal and an autoReconnect fired by a
+        // login completing cannot probe and build for the same user at the same time. See connectLocks.
+        synchronized (lockFor(sessionId)) {
+            return connectLocked(sessionId, bucket, region);
+        }
+    }
+
+    /** The body of {@link #connect}, run under that session's monitor. See {@link #connectLocks}. */
+    private ConnectResult connectLocked(String sessionId, String bucket, String region) {
         String effectiveBucket = (bucket == null || bucket.isBlank()) ? defaultBucket : bucket.trim();
         String effectiveRegion = (region == null || region.isBlank()) ? defaultRegion : region.trim();
         if (effectiveBucket.isBlank()) {
@@ -238,11 +256,96 @@ public class SsoStoreSwapper {
     }
 
     /**
+     * Reconnects a session that has just completed login to the target it previously verified,
+     * <b>without any user action</b> — the fix for a pod redeploy wiping the in-memory binding while
+     * the user's SSO login silently re-establishes.
+     *
+     * <p>The saved target is read from the durable per-identity config (by identity, never by session)
+     * and passed here; this method runs the <em>same</em> connect path a manual connect does, so the
+     * three-step capability probe still gates the build. A probe failure changes nothing and the user
+     * falls back to the manual connect, exactly as today.
+     *
+     * <p>Idempotent and race-safe: if the session is already connected to the same bucket/region this
+     * is a no-op, and the actual connect runs under this session's monitor (see {@link #connectLocks}),
+     * so it can never double-build against a manual connect happening at the same instant.
+     *
+     * @return true when the session ends up connected to the saved target (or already was); false when
+     *         there is nothing to do or the probe did not pass. Never throws.
+     */
+    public boolean autoReconnect(String sessionId, String bucket, String region) {
+        if (sessionId == null || sessionId.isBlank() || bucket == null || bucket.isBlank()) {
+            return false;
+        }
+        String effectiveBucket = bucket.trim();
+        String effectiveRegion = (region == null || region.isBlank()) ? defaultRegion : region.trim();
+        try {
+            synchronized (lockFor(sessionId)) {
+                BuiltStores current = storesBySession.get(sessionId);
+                if (current != null
+                        && effectiveBucket.equals(current.bucket())
+                        && (effectiveRegion.isBlank() || effectiveRegion.equals(current.region()))) {
+                    log.debug("[auto-reconnect] session {} already connected to s3://{} (region {}); "
+                                    + "nothing to do",
+                            stateLabel(sessionId), current.bucket(),
+                            current.region().isBlank() ? "default" : current.region());
+                    return true;
+                }
+                ConnectResult result = connectLocked(sessionId, effectiveBucket, effectiveRegion);
+                if (result != null && result.ok()) {
+                    // ONE INFO line per auto-reconnect, naming the masked session and the target only.
+                    log.info("[auto-reconnect] session {} reconnected to s3://{} (region {}) from saved config",
+                            stateLabel(sessionId), result.bucket(),
+                            result.region().isBlank() ? "default" : result.region());
+                    return true;
+                }
+                log.debug("[auto-reconnect] session {} could not reconnect to saved s3://{} "
+                                + "(capability probe did not pass); manual connect required",
+                        stateLabel(sessionId), effectiveBucket);
+                return false;
+            }
+        } catch (RuntimeException e) {
+            // Never let auto-reconnect fail a login; the user can always connect manually.
+            log.debug("[auto-reconnect] session {} skipped ({})",
+                    stateLabel(sessionId), e.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /**
+     * A store over the configured <b>default</b> bucket/region, signed with {@code sessionId}'s own
+     * credentials, for the small per-identity config document that has to be readable <em>before</em>
+     * a session has connected a bucket (see {@code UserConnectionStore}'s AWS-target persistence).
+     *
+     * <p>Returns {@code null} when there is no session, no default bucket, or no registered S3-backed
+     * builder (local/Mongo modes, where there is no per-user S3 target to remember) — callers treat
+     * {@code null} as "no durable target available" and degrade silently. Never throws.
+     */
+    public ArtifactStore sharedStoreFor(String name, String sessionId) {
+        if (sessionId == null || sessionId.isBlank() || defaultBucket.isBlank()) return null;
+        StoreBuilder builder = builders.get(name);
+        if (builder == null) return null;
+        try {
+            return builder.build(defaultBucket, defaultRegion, credentials.resolveFor(sessionId));
+        } catch (RuntimeException e) {
+            log.debug("[storage] no shared {} store available for per-identity config ({})",
+                    name, e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
      * Drops and forgets {@code sessionId}'s stores — called on logout so the user's S3 clients do
      * not linger. Safe for an unknown session.
      */
     public void forget(String sessionId) {
-        if (sessionId != null) storesBySession.remove(sessionId);
+        if (sessionId == null) return;
+        storesBySession.remove(sessionId);
+        connectLocks.remove(sessionId);
+    }
+
+    /** The per-session monitor {@link #connect} and {@link #autoReconnect} serialise on. */
+    private Object lockFor(String sessionId) {
+        return connectLocks.computeIfAbsent(sessionId, k -> new Object());
     }
 
     /**

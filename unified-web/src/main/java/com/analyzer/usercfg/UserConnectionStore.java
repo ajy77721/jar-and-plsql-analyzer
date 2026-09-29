@@ -5,8 +5,10 @@ import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.sso.CurrentHttpSession;
+import com.analyzer.storage.sso.SsoAuditEvent;
 import com.analyzer.storage.sso.SsoIdentity;
 import com.analyzer.storage.sso.SsoSessionRegistry;
+import com.analyzer.storage.sso.SsoStoreSwapper;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -18,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.Cipher;
@@ -35,8 +38,10 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Stream;
 
 /**
@@ -86,6 +91,17 @@ public class UserConnectionStore {
     static final String USERS_ROOT = "users";
 
     private static final String DOC_FILE = "connections.yaml";
+
+    /**
+     * The small per-identity record of the AWS S3 target a user last verified
+     * ({@code users/<identity-key>/aws-connection.yaml}). It is deliberately a separate document from
+     * {@link #DOC_FILE} and lives in the deployment's <b>default</b> store, not the user's own bucket:
+     * it must be read at login <em>before</em> the session has connected, and the user's own bucket is
+     * unreachable until then. See {@link #findAwsTargetForCurrentUser()} and
+     * {@link #onSsoAuditEvent(SsoAuditEvent)}.
+     */
+    static final String AWS_DOC_FILE = "aws-connection.yaml";
+
     private static final String CERTS_DIR = "certs";
 
     /** Payload prefix of an encrypted value; the {@code v1} names the format, not the key. */
@@ -109,6 +125,7 @@ public class UserConnectionStore {
     private final ArtifactStore store;
     private final SsoSessionRegistry ssoSessionRegistry;
     private final CurrentHttpSession currentSession;
+    private final SsoStoreSwapper storeSwapper;
 
     /** SHA-256(APP_CONFIG_KEY), or {@code null} when no key is configured (plaintext mode). */
     private final byte[] encryptionKey;
@@ -116,10 +133,12 @@ public class UserConnectionStore {
     public UserConnectionStore(@Qualifier("parserArtifactStore") ArtifactStore store,
                                SsoSessionRegistry ssoSessionRegistry,
                                CurrentHttpSession currentSession,
+                               SsoStoreSwapper storeSwapper,
                                @Value("${APP_CONFIG_KEY:}") String appConfigKey) {
         this.store = store;
         this.ssoSessionRegistry = ssoSessionRegistry;
         this.currentSession = currentSession;
+        this.storeSwapper = storeSwapper;
         this.encryptionKey = deriveKey(appConfigKey);
         if (this.encryptionKey == null) {
             log.warn("[user-conns] APP_CONFIG_KEY is not set — per-user connection passwords are "
@@ -171,6 +190,101 @@ public class UserConnectionStore {
             throw new IllegalStateException("No authenticated user — private connections require an SSO session");
         }
         return key;
+    }
+
+    // ── AWS S3 target (survives redeploys; enables auto-reconnect on login) ─────
+
+    /**
+     * A user's last verified AWS S3 target, remembered so a login can reconnect without user action.
+     * Non-sensitive: a bucket name and a region, never any credential material.
+     */
+    public record AwsTarget(String bucket, String region) {}
+
+    /**
+     * The current user's saved AWS target, or {@code null} when none is stored or it cannot be read
+     * (unauthenticated, local/Mongo mode, or the default store is unreachable) — the caller then
+     * silently skips auto-reconnect and the user connects manually as before.
+     *
+     * <p>Keyed by <b>identity</b> (the same {@link AdminAuditService#identityKey} chain the audit
+     * trail uses), never by session id, so it is found again after a redeploy hands the user a fresh
+     * session.
+     */
+    public AwsTarget findAwsTargetForCurrentUser() {
+        String key = currentIdentityKey();
+        if (key == null) return null;
+        return readAwsTarget(key, currentSession.currentSessionId());
+    }
+
+    /**
+     * Reads {@code users/<identityKey>/aws-connection.yaml} from the <b>default</b> store, signed
+     * with {@code sessionId}'s freshly-resolved credentials. Any absence or failure yields {@code null}
+     * so the login path degrades silently. No credential material is logged.
+     */
+    AwsTarget readAwsTarget(String identityKey, String sessionId) {
+        if (identityKey == null || identityKey.isBlank() || sessionId == null) return null;
+        ArtifactStore shared = storeSwapper.sharedStoreFor(SsoStoreSwapper.PARSER, sessionId);
+        if (shared == null) return null;
+        ArtifactKey key = ArtifactKey.of(USERS_ROOT, identityKey, AWS_DOC_FILE);
+        try {
+            if (!shared.exists(key)) return null;
+            try (InputStream in = shared.read(key)) {
+                Map<?, ?> doc = YAML_MAPPER.readValue(in, Map.class);
+                Object bucket = doc == null ? null : doc.get("bucket");
+                if (bucket == null || bucket.toString().isBlank()) return null;
+                Object region = doc.get("region");
+                return new AwsTarget(bucket.toString().trim(),
+                        region == null ? null : region.toString().trim());
+            }
+        } catch (RuntimeException | IOException e) {
+            log.debug("[user-conns] no saved AWS target readable for {} ({})",
+                    identityKey, e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * Persists a user's just-verified target into the default store, keyed by identity. Best-effort:
+     * a failure is a debug line so it can never break the connect it rides on.
+     */
+    void writeAwsTarget(String identityKey, String sessionId, String bucket, String region) {
+        if (identityKey == null || identityKey.isBlank() || bucket == null || bucket.isBlank()
+                || sessionId == null) {
+            return;
+        }
+        ArtifactStore shared = storeSwapper.sharedStoreFor(SsoStoreSwapper.PARSER, sessionId);
+        if (shared == null) return;
+        ArtifactKey key = ArtifactKey.of(USERS_ROOT, identityKey, AWS_DOC_FILE);
+        Map<String, String> doc = new LinkedHashMap<>();
+        doc.put("bucket", bucket.trim());
+        doc.put("region", region == null ? "" : region.trim());
+        doc.put("saved_at", Long.toString(System.currentTimeMillis()));
+        try (OutputStream out = shared.write(key)) {
+            YAML_MAPPER.writerWithDefaultPrettyPrinter().writeValue(out, doc);
+            log.info("[user-conns] remembered AWS target s3://{} (region {}) for {}",
+                    bucket.trim(), region == null || region.isBlank() ? "default" : region.trim(),
+                    identityKey);
+        } catch (RuntimeException | IOException e) {
+            log.debug("[user-conns] could not persist AWS target for {} ({})",
+                    identityKey, e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Remembers a successful CONNECT so the user's next login (on this pod or, after a redeploy, a
+     * fresh one) reconnects automatically. Listeners run synchronously on the connecting thread, so
+     * the session's credentials are still resolvable here. Never fails the connect.
+     */
+    @EventListener
+    public void onSsoAuditEvent(SsoAuditEvent event) {
+        if (event == null || !SsoAuditEvent.CONNECT.equals(event.type())) return;
+        String identityKey = AdminAuditService.identityKey(event.identity());
+        if (identityKey == null) return;
+        try {
+            writeAwsTarget(identityKey, event.sessionId(), event.bucket(), event.region());
+        } catch (RuntimeException e) {
+            log.debug("[user-conns] AWS-target persistence skipped for {} ({})",
+                    identityKey, e.getClass().getSimpleName());
+        }
     }
 
     // ── document read / write ───────────────────────────────────────────────────
