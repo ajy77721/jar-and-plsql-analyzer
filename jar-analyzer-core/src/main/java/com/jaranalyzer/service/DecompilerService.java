@@ -798,18 +798,8 @@ public class DecompilerService {
         return null;
     }
 
-    private void cleanTempDir(Path tempDir) {
-        if (tempDir == null) return;
-        try {
-            try (var stream = Files.walk(tempDir)) {
-                stream.sorted(Comparator.reverseOrder())
-                        .forEach(p -> {
-                            try { Files.deleteIfExists(p); }
-                            catch (Exception ex) { /* best effort */ }
-                        });
-            }
-        } catch (Exception e) {
-            log.debug("Temp cleanup failed: {}", tempDir);
-        }
-    }
+    // NOTE: the former cleanTempDir(Path) helper was dead code — nothing (including a shutdown hook)
+    // called it. Per-class temp files are already deleted in decompileBytes' finally; the per-thread
+    // temp directory itself is intentionally left to the OS temp reaper rather than walked and
+    // deleted on every call. Removed to avoid implying a cleanup that never ran.
 }

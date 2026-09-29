@@ -159,7 +159,6 @@ public class ClaudeAnalysisService {
      */
     public void enrichEndpoints(List<EndpointInfo> endpoints, String projectPath,
                                 String jarName, ProgressService progressService) {
-        PromptTemplates.setCurrentAnalysis(jarName);
         Path projectDir = Path.of(projectPath);
         if (!Files.isDirectory(projectDir)) {
             throw new IllegalArgumentException("Project path does not exist: " + projectPath);
@@ -344,7 +343,15 @@ public class ClaudeAnalysisService {
                                         }
                                     } catch (Exception e) {
                                         log.warn("    Chunk {} failed: {}", chunk.label(), e.getMessage());
-                                        fragmentStore.writeFragmentSafe(workDir, chunkFragName + "_error.txt", e.getMessage());
+                                        // The try-with-resources above has already closed the installed
+                                        // context by the time this catch runs, so the error fragment write
+                                        // would route/sign as the shared default target. Re-install the
+                                        // captured snapshot for the write.
+                                        try (AutoCloseable errCtx = chunkContext == null ? null : chunkContext.install()) {
+                                            fragmentStore.writeFragmentSafe(workDir, chunkFragName + "_error.txt", e.getMessage());
+                                        } catch (Exception ignored) {
+                                            // Best effort — the error fragment must not mask the original failure.
+                                        }
                                     }
                                 }));
                             }
@@ -408,7 +415,6 @@ public class ClaudeAnalysisService {
      */
     public void enrichFromAnalysis(List<EndpointInfo> endpoints, String jarName,
                                     ProgressService progressService, boolean resume) {
-        PromptTemplates.setCurrentAnalysis(jarName);
         if (!isConfigured()) {
             throw new IllegalStateException("Claude CLI is not installed or not in PATH");
         }
@@ -501,7 +507,7 @@ public class ClaudeAnalysisService {
                         index.register(epTraceId, inputFile, epDetails);
 
                         PromptTemplates.DbTechnology tech = PromptTemplates.detectTechnology(ep);
-                        String prompt = PromptTemplates.buildAnalysisPrompt(clusterContext, context, tech);
+                        String prompt = PromptTemplates.buildAnalysisPrompt(clusterContext, context, tech, jarName);
 
                         List<String> command = List.of(
                                 "claude", "-p", "--session-id", sessionId, "--no-session-persistence");
@@ -556,7 +562,7 @@ public class ClaudeAnalysisService {
                                     "chunkLabel", "overview", "nodes", skeletonChunk.nodeCount()));
 
                             progressService.detail("  Chunk 1/" + chunks.size() + ": skeleton overview");
-                            String skeletonPrompt = treeChunker.buildChunkPrompt(ep, skeletonChunk, 0, chunks.size(), clusterContext);
+                            String skeletonPrompt = treeChunker.buildChunkPrompt(ep, skeletonChunk, 0, chunks.size(), clusterContext, jarName);
                             String skSessionId = UUID.randomUUID().toString();
                             List<String> cmd = List.of("claude", "-p", "--session-id", skSessionId, "--no-session-persistence");
                             long _skCallStart = System.currentTimeMillis();
@@ -614,7 +620,7 @@ public class ClaudeAnalysisService {
                                                 "chunkIndex", globalIdx, "chunkType", chunk.type(),
                                                 "chunkLabel", chunkLabel, "nodes", chunk.nodeCount()));
 
-                                        String chunkPrompt = treeChunker.buildChunkPrompt(ep, chunk, globalIdx, totalChunks, clCtx);
+                                        String chunkPrompt = treeChunker.buildChunkPrompt(ep, chunk, globalIdx, totalChunks, clCtx, jarName);
                                         String chunkSessionId = UUID.randomUUID().toString();
                                         List<String> cmd = List.of("claude", "-p",
                                                 "--session-id", chunkSessionId, "--no-session-persistence");
@@ -651,7 +657,13 @@ public class ClaudeAnalysisService {
                                         }
                                     } catch (Exception e) {
                                         log.warn("    Chunk {} [{}] failed: {}", chunkLabel, cTraceId, e.getMessage());
-                                        fragmentStore.writeFragmentSafe(workDir, cTraceId + "_error.txt", e.getMessage());
+                                        // Context already closed by the try-with-resources — re-install the
+                                        // captured snapshot so this error fragment signs as the job submitter.
+                                        try (AutoCloseable errCtx = chunkContext == null ? null : chunkContext.install()) {
+                                            fragmentStore.writeFragmentSafe(workDir, cTraceId + "_error.txt", e.getMessage());
+                                        } catch (Exception ignored) {
+                                            // Best effort — the error fragment must not mask the original failure.
+                                        }
                                     }
                                 }));
                             }

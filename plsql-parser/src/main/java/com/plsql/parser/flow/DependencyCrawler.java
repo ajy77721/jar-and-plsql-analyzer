@@ -11,6 +11,8 @@ import org.slf4j.LoggerFactory;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 
 import java.io.IOException;
 import java.util.*;
@@ -1326,6 +1328,17 @@ public class DependencyCrawler {
      */
     private void prefetchSources(Set<String> depNames) {
         if (depNames == null || depNames.isEmpty()) return;
+        // This crawl runs on a worker whose installed job context (SsoJobContext, wrapped around
+        // ParserAnalysisExecutor) makes the submitter's stores and credentials resolvable; the
+        // "src-prefetch" pool threads below have neither, so SourceDownloader.checkLocalCache's
+        // store.list/store.read would route/sign as the shared default target. Capture HERE, on the
+        // crawl thread and before the pool exists, then re-install per task — mirroring
+        // jar-analyzer-core/SourceEnrichmentService. Capture both halves: the job snapshot
+        // (credentials + stores) and the store routing scope. Null-safe: nothing captured means
+        // install is a no-op, preserving legacy/no-SSO behaviour exactly.
+        final CapturedSsoContext prefetchContext = CapturedSsoContext.capture(null);
+        final RequestScopedArtifactStore.Scope prefetchScope = store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
         int threads = Math.min(6, depNames.size());
         ExecutorService pool = Executors.newFixedThreadPool(threads,
                 r -> { Thread t = new Thread(r, "src-prefetch"); t.setDaemon(true); return t; });
@@ -1335,7 +1348,10 @@ public class DependencyCrawler {
             if (isBuiltInPackage(name)) continue; // never prefetch Oracle system packages
             final String n = name;
             pool.submit(() -> {
-                try {
+                // try-with-resources close() can throw, but the catch below covers it: the per-task
+                // installs are best-effort and must never fail the prefetch.
+                try (AutoCloseable scoped = prefetchScope.install();
+                     AutoCloseable sso = prefetchContext == null ? null : prefetchContext.install()) {
                     String src = downloader.downloadSource(n, "PACKAGE BODY");
                     if (src == null) src = downloader.downloadSource(n, "PROCEDURE");
                     if (src == null) downloader.downloadSource(n, "FUNCTION");

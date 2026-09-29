@@ -42,8 +42,12 @@ public class SourceDownloader {
     private ArtifactStore store;
     private ArtifactKey localCacheDir;
 
-    // Index of cached source artifacts: "FILENAME.toUpperCase()" -> key (built lazily)
-    private Map<String, ArtifactKey> localCacheIndex = null;
+    // Index of cached source artifacts: "FILENAME.toUpperCase()" -> key (built lazily).
+    // Written from the ≤6 "src-prefetch" pool threads inside checkLocalCache, so it is volatile:
+    // a non-volatile lazy init could publish the map before its entries (or publish a torn/stale
+    // reference and rebuild it forever). Each builder builds a private HashMap and assigns once —
+    // the last assignment wins, and every reader sees a fully-constructed map.
+    private volatile Map<String, ArtifactKey> localCacheIndex = null;
 
     public SourceDownloader(DbConnectionManager connManager) {
         this.connManager = connManager;
@@ -126,24 +130,27 @@ public class SourceDownloader {
     private String checkLocalCache(String objectName, String objectType) {
         if (store == null || localCacheDir == null) return null;
         // Build filename index on first use: ONE listing, then O(1) per lookup. Never a stat
-        // per candidate — that is 25ms each against an object store.
-        if (localCacheIndex == null) {
-            Map<String, ArtifactKey> idx = new HashMap<>();
+        // per candidate — that is 25ms each against an object store. Read once into a local so a
+        // concurrent rebuild (or setLocalCacheDir reset) cannot swap it out under the iteration.
+        Map<String, ArtifactKey> idx = localCacheIndex;
+        if (idx == null) {
+            final Map<String, ArtifactKey> built = new HashMap<>();
             try (var stream = store.list(localCacheDir, false)) {
                 stream.filter(java.util.function.Predicate.not(ArtifactEntry::directory))
                       .map(ArtifactEntry::key)
-                      .forEach(k -> idx.put(k.leaf().toUpperCase(), k));
+                      .forEach(k -> built.put(k.leaf().toUpperCase(), k));
             } catch (IOException e) {
                 return null;
             }
-            localCacheIndex = idx;
-            log.info("[SourceDownloader] Built local cache index: {} files in {}", idx.size(), localCacheDir);
+            localCacheIndex = built;
+            idx = built;
+            log.info("[SourceDownloader] Built local cache index: {} files in {}", built.size(), localCacheDir);
         }
         String ext = typeToExtension(objectType);
         String exactSuffix = objectName + "." + ext.toUpperCase();
         // Try SCHEMA.NAME.ext first, then bare NAME.ext
         ArtifactKey match = null;
-        for (Map.Entry<String, ArtifactKey> e : localCacheIndex.entrySet()) {
+        for (Map.Entry<String, ArtifactKey> e : idx.entrySet()) {
             String fn = e.getKey();
             if (fn.equals(exactSuffix) || fn.endsWith("." + exactSuffix)) {
                 match = e.getValue();

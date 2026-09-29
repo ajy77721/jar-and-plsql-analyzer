@@ -56,12 +56,8 @@ public final class PromptTemplates {
     }
 
     private static volatile PromptExtrasProvider extrasProvider;
-    private static volatile String currentAnalysis;
 
     public static void setExtrasProvider(PromptExtrasProvider provider) { extrasProvider = provider; }
-
-    /** Set at the top of an enrichment/correction run so build* can resolve per-analysis extras. */
-    public static void setCurrentAnalysis(String analysisName) { currentAnalysis = analysisName; }
 
     private static String techLabel(DbTechnology tech) {
         return switch (tech) {
@@ -75,15 +71,20 @@ public final class PromptTemplates {
     /**
      * Prepend a short DETECTED STACK line and append the optional, clearly-delimited
      * global + per-analysis context/instruction blocks. Never alters the base template text.
+     *
+     * <p>{@code analysisName} is threaded explicitly from the calling job rather than read from a
+     * JVM-wide static: two concurrent jobs (different users) must never be able to inject each
+     * other's per-analysis extras. The {@link PromptExtrasProvider} itself stays static — it is a
+     * startup-registered, stateless lookup keyed by the name passed here.
      */
-    private static String decorate(String prompt, DbTechnology tech) {
+    private static String decorate(String prompt, DbTechnology tech, String analysisName) {
         StringBuilder sb = new StringBuilder();
         sb.append("DETECTED STACK: ").append(techLabel(tech)).append("\n\n");
         sb.append(prompt != null ? prompt : "");
         PromptExtrasProvider p = extrasProvider;
         if (p != null) {
             try {
-                String an = currentAnalysis;
+                String an = analysisName;
                 String ctx = p.contextBlock(an);
                 if (ctx != null && !ctx.isBlank()) {
                     sb.append("\n=== ADDITIONAL CONTEXT ===\n").append(ctx.trim()).append("\n");
@@ -241,18 +242,19 @@ public final class PromptTemplates {
 
     // ======================== ANALYSIS PROMPTS ========================
 
-    public static String buildAnalysisPrompt(String clusterContext, String treeContext, DbTechnology tech) {
+    public static String buildAnalysisPrompt(String clusterContext, String treeContext,
+            DbTechnology tech, String analysisName) {
         String template = loadTemplate(techPrefix(tech) + "-analysis");
         return decorate(fill(template, Map.of(
                 "CLUSTER_CONTEXT", clusterContext,
                 "TREE_CONTEXT", treeContext
-        )), tech);
+        )), tech, analysisName);
     }
 
     public static String buildChunkAnalysisPrompt(EndpointInfo ep, String chunkContext,
             String chunkType, String chunkLabel,
             int chunkIndex, int totalChunks,
-            String clusterContext, DbTechnology tech) {
+            String clusterContext, DbTechnology tech, String analysisName) {
         String template = loadTemplate(techPrefix(tech) + "-chunk-analysis");
 
         String chunkDesc;
@@ -274,12 +276,13 @@ public final class PromptTemplates {
                 "CHUNK_TYPE_DESCRIPTION", chunkDesc,
                 "CLUSTER_CONTEXT", clusterContext,
                 "CHUNK_DATA", chunkContext
-        )), tech);
+        )), tech, analysisName);
     }
 
     // ======================== CORRECTION PROMPTS ========================
 
-    public static String buildCorrectionPrompt(EndpointInfo ep, String callTreeJson, DbTechnology tech) {
+    public static String buildCorrectionPrompt(EndpointInfo ep, String callTreeJson,
+            DbTechnology tech, String analysisName) {
         String template = loadTemplate(techPrefix(tech) + "-correction");
         return decorate(fill(template, Map.of(
                 "HTTP_METHOD", ep.getHttpMethod() != null ? ep.getHttpMethod() : "",
@@ -288,12 +291,12 @@ public final class PromptTemplates {
                 "METHOD_NAME", ep.getMethodName() != null ? ep.getMethodName() : "",
                 "CHUNK_CONTEXT", "",
                 "CALL_TREE_JSON", callTreeJson
-        )), tech);
+        )), tech, analysisName);
     }
 
     public static String buildChunkedCorrectionPrompt(EndpointInfo ep, String chunkData,
             String chunkType, String chunkLabel, int nodeCount,
-            int chunkIndex, int totalChunks, DbTechnology tech) {
+            int chunkIndex, int totalChunks, DbTechnology tech, String analysisName) {
         String chunkContext = "The call tree is too large for a single prompt, so it has been split into " +
                 totalChunks + " chunks. This is chunk " + (chunkIndex + 1) + "/" + totalChunks + ".\n" +
                 "Chunk type: " + chunkType + " — " + chunkLabel + "\n" +
@@ -316,7 +319,7 @@ public final class PromptTemplates {
                 "METHOD_NAME", ep.getMethodName() != null ? ep.getMethodName() : "",
                 "CHUNK_CONTEXT", chunkContext,
                 "CALL_TREE_JSON", chunkData
-        )), tech);
+        )), tech, analysisName);
     }
 
     // ======================== PL/SQL VERIFICATION ========================

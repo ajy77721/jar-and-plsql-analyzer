@@ -340,11 +340,11 @@ class TreeChunker {
      * Build the prompt for a single chunk -- varies by chunk type.
      */
     String buildChunkPrompt(EndpointInfo ep, TreeChunk chunk, int chunkIndex,
-                            int totalChunks, String clusterContext) {
+                            int totalChunks, String clusterContext, String analysisName) {
         PromptTemplates.DbTechnology tech = PromptTemplates.detectTechnology(ep);
         String result = PromptTemplates.buildChunkAnalysisPrompt(
                 ep, chunk.context(), chunk.type(), chunk.label(),
-                chunkIndex, totalChunks, clusterContext, tech);
+                chunkIndex, totalChunks, clusterContext, tech, analysisName);
 
         if (result.length() > MAX_PROMPT_CHARS) {
             log.warn("Prompt exceeds {}KB limit ({} chars) for chunk '{}' — truncating",

@@ -92,7 +92,6 @@ public class ClaudeCorrectionService {
      */
     public void correctEndpoints(List<EndpointInfo> endpoints, String jarName,
                                   ProgressService progressService, boolean resume) {
-        PromptTemplates.setCurrentAnalysis(jarName);
         int total = endpoints.size();
         AtomicInteger done = new AtomicInteger(0);
         AtomicInteger errors = new AtomicInteger(0);
@@ -162,8 +161,19 @@ public class ClaudeCorrectionService {
                         String errMsg = e.getMessage() != null ? e.getMessage()
                                 : e.getClass().getSimpleName() + " (no message)";
                         log.warn("Correction failed for {}: {} [{}]", epKey, errMsg, e.getClass().getSimpleName());
-                        tracker.markEndpointError(jarName, epKey, errMsg);
-                        runLog(logPath, "[FAIL] " + epKey + " — " + errMsg + " (" + epMs + "ms)");
+                        // The try-with-resources above closed the installed context before this catch
+                        // runs, and both writes below (tracker state, run log via the store) need it.
+                        // Re-install the same captured snapshot, mirroring withSsoContext.
+                        try {
+                            withSsoContext(endpointContext, () -> {
+                                tracker.markEndpointError(jarName, epKey, errMsg);
+                                runLog(logPath, "[FAIL] " + epKey + " — " + errMsg + " (" + epMs + "ms)");
+                                return null;
+                            });
+                        } catch (Exception writeEx) {
+                            // Best effort — an error-path write failure must not mask the endpoint error.
+                            log.debug("Could not record correction error for {}: {}", epKey, writeEx.getMessage());
+                        }
                         errors.incrementAndGet();
                     }
                 }));
@@ -435,7 +445,7 @@ public class ClaudeCorrectionService {
                 final int ci = i;
                 final TreeChunker.TreeChunk chunk = chunks.get(i);
                 futures.add(chunkExecutor.submit(() -> withSsoContext(chunkContext, () -> {
-                    String chunkPrompt = buildChunkedCorrectionPrompt(ep, chunk, ci, chunks.size());
+                    String chunkPrompt = buildChunkedCorrectionPrompt(ep, chunk, ci, chunks.size(), jarName);
                     List<String> cmd = List.of("claude", "-p", "--no-session-persistence");
 
                     // Save chunk prompt input
@@ -526,7 +536,7 @@ public class ClaudeCorrectionService {
      * Original single-shot correction for small trees.
      */
     private CorrectionResult correctSingleEndpointSingleShot(EndpointInfo ep, String jarName, ArtifactKey workDir) throws Exception {
-        String prompt = buildCorrectionPrompt(ep);
+        String prompt = buildCorrectionPrompt(ep, jarName);
         List<String> cmd = List.of("claude", "-p", "--no-session-persistence");
 
         // Save prompt input
@@ -623,7 +633,7 @@ public class ClaudeCorrectionService {
      * Each chunk gets the same rules/format but only its portion of the tree.
      */
     String buildChunkedCorrectionPrompt(EndpointInfo ep, TreeChunker.TreeChunk chunk,
-                                         int chunkIndex, int totalChunks) {
+                                         int chunkIndex, int totalChunks, String analysisName) {
         PromptTemplates.DbTechnology tech = PromptTemplates.detectTechnology(ep);
         String chunkData = chunk.context();
         if (chunkData.length() > TreeChunker.MAX_PROMPT_CHARS - 4000) {
@@ -631,14 +641,14 @@ public class ClaudeCorrectionService {
         }
         return PromptTemplates.buildChunkedCorrectionPrompt(
                 ep, chunkData, chunk.type(), chunk.label(), chunk.nodeCount(),
-                chunkIndex, totalChunks, tech);
+                chunkIndex, totalChunks, tech, analysisName);
     }
 
     /**
      * Build the correction-focused prompt for Claude (single-shot for small trees).
      * Different from general analysis: specifically asks to verify/correct collections and operations.
      */
-    String buildCorrectionPrompt(EndpointInfo ep) {
+    String buildCorrectionPrompt(EndpointInfo ep, String analysisName) {
         PromptTemplates.DbTechnology tech = PromptTemplates.detectTechnology(ep);
         String treeJson;
         try {
@@ -649,7 +659,7 @@ public class ClaudeCorrectionService {
         } catch (Exception e) {
             treeJson = "{ \"error\": \"Failed to serialize call tree\" }";
         }
-        return PromptTemplates.buildCorrectionPrompt(ep, treeJson, tech);
+        return PromptTemplates.buildCorrectionPrompt(ep, treeJson, tech, analysisName);
     }
 
     /**
