@@ -66,12 +66,12 @@ Write cost: **near-zero** — 1a-1f are all built in the SAME scans the save pha
 ---
 
 ## Checklist (execution order — PL/SQL first per user)
-- [ ] 1a callers sidecar (one save-time scan, shared with existing facets)
-- [ ] 1b search facets precompute
-- [ ] 1c complexity variants
-- [ ] 1d per-table split (+ per-table lazy backfill fix)
-- [ ] 1e statements offset index
-- [ ] 1f layout manifest (parser) — written last, like index.json
+- [x] 1a callers sidecar — fe97830 (golden byte-equivalence ✓)
+- [x] 1b search facets precompute — fe97830 (search input cached; filter path unchanged)
+- [x] 1c complexity variants (linear default + balanced + logarithmic grid; custom = hashed LRU 8) — fe97830
+- [x] 1d per-table split (views/table-joins|columns/<TABLE>.json; backfill writes ONE file) — fe97830
+- [x] 1e statements offset index — 365944e (offsets built in the write pass; StatementsOffsetIndexReader tested; ADOPTION NOTE: no endpoint pages statements by ordinal yet — search streams by design and is fast via 1b; wire readPage when a paged statements endpoint lands)
+- [x] 1f layout manifest (parser) — 365944e (api/manifest.json, built during the write, KBs, written last)
 - [ ] Staging soak: all parser APIs ≤200ms warm; cold first-access acceptable
 - [ ] 2a jar offsets (in the streaming write)
 - [ ] 2b jar save-time summary + class-tree
