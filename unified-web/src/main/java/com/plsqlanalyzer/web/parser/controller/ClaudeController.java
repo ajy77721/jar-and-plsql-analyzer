@@ -9,7 +9,11 @@ import com.plsqlanalyzer.web.parser.service.ClaudeVerificationModels.Verificatio
 import com.plsqlanalyzer.web.parser.service.ClaudeVerificationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.page.Page;
+import com.analyzer.storage.sso.CapturedSsoContext;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -42,19 +46,26 @@ public class ClaudeController {
     private final ClaudeProcessRunner processRunner;
     private final AnalysisReaderFactory readerFactory;
     private final ClaudeCallLogger callLogger;
+    /**
+     * The parser's routing store, held only so the request thread can snapshot its routing scope
+     * for the background verification session (see {@link #startVerification}).
+     */
+    private final ArtifactStore store;
 
     public ClaudeController(ClaudeVerificationService verificationService,
                             ClaudeSessionManager sessionManager,
                             ClaudePersistenceService persistenceService,
                             ClaudeProcessRunner processRunner,
                             AnalysisReaderFactory readerFactory,
-                            ClaudeCallLogger callLogger) {
+                            ClaudeCallLogger callLogger,
+                            @Qualifier("parserArtifactStore") ArtifactStore store) {
         this.verificationService = verificationService;
         this.sessionManager = sessionManager;
         this.persistenceService = persistenceService;
         this.processRunner = processRunner;
         this.readerFactory = readerFactory;
         this.callLogger = callLogger;
+        this.store = store;
     }
 
     // ==================== CONFIG ====================
@@ -108,13 +119,31 @@ public class ClaudeController {
             String detail = force ? "Forced fresh verification (ignoring checkpoint)"
                     : (resume ? "Resuming from checkpoint" : "Full verification scan");
 
+            // The session runs on the manager's own pool, which has NO request context: every store
+            // write the verification makes (chunk/checkpoint fragments, the saved result) would
+            // otherwise fall through to the shared default target. Capture the request thread's
+            // routing scope and any installed job context HERE, before submit, and re-install them
+            // for the whole task below. Either capture may carry nothing (install is then a no-op).
+            final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
+                    ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+            final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+
             String sessionId = sessionManager.submit(name, type, detail, () -> {
-                VerificationResult result = verificationService.verify(name, force, msg ->
-                        log.info("[Session {}] {}", name, msg));
-                if (result != null && result.error == null) {
-                    persistenceService.saveClaudeResult(name, result);
-                    readerFactory.setMode(name, "claude");
-                    log.info("Auto-switched '{}' to Claude-enriched view", name);
+                try (AutoCloseable routed = routingScope.install();
+                     AutoCloseable ctx = jobContext == null ? null : jobContext.install()) {
+                    VerificationResult result = verificationService.verify(name, force, msg ->
+                            log.info("[Session {}] {}", name, msg));
+                    if (result != null && result.error == null) {
+                        persistenceService.saveClaudeResult(name, result);
+                        readerFactory.setMode(name, "claude");
+                        log.info("Auto-switched '{}' to Claude-enriched view", name);
+                    }
+                } catch (RuntimeException e) {
+                    throw e;
+                } catch (Exception e) {
+                    // Only the close of an install handle can reach here; surface it so the session
+                    // is recorded as FAILED rather than COMPLETE.
+                    throw new IllegalStateException("Claude verification context install failed", e);
                 }
             });
 

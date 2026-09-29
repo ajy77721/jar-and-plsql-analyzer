@@ -14,6 +14,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -235,6 +237,17 @@ public class CrossRefClaudeService {
         ChunkWork overallWork = workList.stream()
                 .filter(w -> w.type == ChunkType.OVERALL).findFirst().orElse(null);
 
+        // The cr-claude pool and the waiter thread below are created here and have NO request
+        // context of their own, so a request-bound routing store consulted by processChunk /
+        // flushChunkToResultJson (chunk + checkpoint writes, result.json flush) would fall through
+        // to the shared default target — a silent wrong-bucket write, or a failed one the caller
+        // reads as empty. Capture the caller's routing scope and any installed job context HERE, on
+        // the request thread that owns the answer, and re-install them inside every task below.
+        // Either capture may carry nothing, and install is then a no-op.
+        final RequestScopedArtifactStore.Scope routingScope = artifacts instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+
         ExecutorService executor = Executors.newFixedThreadPool(parallelChunks,
                 r -> { Thread t = new Thread(r, "cr-claude-" + crossRefId); t.setDaemon(true); return t; });
         runningExecutors.put(crossRefId, executor);
@@ -242,7 +255,7 @@ public class CrossRefClaudeService {
         List<Future<?>> futures = new ArrayList<>();
         for (ChunkWork w : individualWork) {
             if (checkpoint.contains(w.chunkId)) continue;
-            futures.add(executor.submit(() -> {
+            futures.add(executor.submit(() -> withContext(routingScope, jobContext, () -> {
                 if (cancel.get()) return;
                 try {
                     processChunk(w, claudeDir, checkpoint, verdictConverted, verdictPartial, verdictNotConverted, result);
@@ -256,10 +269,10 @@ public class CrossRefClaudeService {
                     log.warn("{} Chunk {} failed: {}", LOG_PREFIX, w.chunkId, e.getMessage());
                     completed.incrementAndGet();
                 }
-            }));
+            })));
         }
 
-        Thread waiter = new Thread(() -> {
+        Thread waiter = new Thread(() -> withContext(routingScope, jobContext, () -> {
             try {
                 for (Future<?> f : futures) {
                     try { f.get(600, TimeUnit.SECONDS); }
@@ -303,11 +316,27 @@ public class CrossRefClaudeService {
                     emitter.complete();
                 } catch (Exception ignored) {}
             }
-        }, "cr-claude-waiter-" + crossRefId);
+        }), "cr-claude-waiter-" + crossRefId);
         waiter.setDaemon(true);
         waiter.start();
 
         return emitter;
+    }
+
+    /**
+     * Runs {@code body} with the captured request routing and job context installed, so a pooled
+     * task's store calls resolve and sign as the submitter instead of the shared default target.
+     * Both captures are taken on the submitting thread; either may carry nothing, in which case
+     * {@code install} is a no-op and today's behaviour is preserved exactly.
+     */
+    private static void withContext(RequestScopedArtifactStore.Scope routingScope,
+                                    CapturedSsoContext jobContext, Runnable body) {
+        try (AutoCloseable routed = routingScope.install();
+             AutoCloseable ctx = jobContext == null ? null : jobContext.install()) {
+            body.run();
+        } catch (Exception e) {
+            log.warn("{} Background task failed under captured context: {}", LOG_PREFIX, e.getMessage());
+        }
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.jaranalyzer.service;
 
+import com.analyzer.storage.sso.CapturedSsoContext;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -51,22 +53,34 @@ public class ClaudeSessionManager {
         session.status = SessionStatus.RUNNING;
         session.startedAt = LocalDateTime.now().toString();
 
+        // Latent-hole guard: the task runs on this manager's own pool, which has no request context.
+        // Capture the submitter's context HERE (before submit) and re-install it around the task so
+        // any storage the submitted Runnable touches signs as the submitter, not the default chain.
+        CapturedSsoContext context = CapturedSsoContext.capture(null);
+
         Future<?> future = executor.submit(() -> {
-            session.thread = Thread.currentThread();
-            try {
-                task.run();
-                session.status = SessionStatus.COMPLETE;
-            } catch (Exception e) {
-                if (session.status == SessionStatus.KILLED) {
-                    log.info("Session {} was killed", sessionId);
-                } else {
-                    session.status = SessionStatus.FAILED;
-                    session.error = e.getMessage();
-                    log.warn("Session {} failed: {}", sessionId, e.getMessage());
+            // Install/uninstall is bounded to this task; a null context installs nothing.
+            try (AutoCloseable ctx = context == null ? null : context.install()) {
+                session.thread = Thread.currentThread();
+                try {
+                    task.run();
+                    session.status = SessionStatus.COMPLETE;
+                } catch (Exception e) {
+                    if (session.status == SessionStatus.KILLED) {
+                        log.info("Session {} was killed", sessionId);
+                    } else {
+                        session.status = SessionStatus.FAILED;
+                        session.error = e.getMessage();
+                        log.warn("Session {} failed: {}", sessionId, e.getMessage());
+                    }
+                } finally {
+                    session.completedAt = LocalDateTime.now().toString();
+                    session.thread = null;
                 }
-            } finally {
-                session.completedAt = LocalDateTime.now().toString();
-                session.thread = null;
+            } catch (Exception e) {
+                session.status = SessionStatus.FAILED;
+                session.error = e.getMessage();
+                log.warn("Session {} failed: {}", sessionId, e.getMessage());
             }
         });
         session.future = future;

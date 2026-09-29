@@ -5,6 +5,8 @@ import com.jaranalyzer.service.ConversionService;
 import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 import com.analyzer.storage.log.LineBufferTail;
 import com.analyzer.storage.log.LogTailBody;
 import com.plsqlanalyzer.web.service.ClaudeProcessRunner;
@@ -366,7 +368,23 @@ public class ConversionController {
         jobs.put(jobId, state);
         persistJob(state);
 
-        Thread t = new Thread(() -> runJob(state, action, req), "conversion-" + jobId);
+        // The bare worker below has no request context, so every persistJob → store.write(JOBS/…)
+        // it makes would fall through to the shared default target. Capture the request thread's
+        // routing scope and any installed job context HERE, before the thread starts, and
+        // re-install them around the whole runJob. Either capture may carry nothing (install is
+        // then a no-op), preserving the default-chain path exactly.
+        final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+
+        Thread t = new Thread(() -> {
+            try (AutoCloseable routed = routingScope.install();
+                 AutoCloseable ctx = jobContext == null ? null : jobContext.install()) {
+                runJob(state, action, req);
+            } catch (Exception e) {
+                log.warn("Conversion job {} failed to run under captured context: {}", jobId, e.getMessage());
+            }
+        }, "conversion-" + jobId);
         t.setDaemon(true);
         t.start();
 

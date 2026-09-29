@@ -12,6 +12,8 @@ import com.jaranalyzer.service.JarParserService;
 import com.jaranalyzer.service.MongoCatalogService;
 import com.jaranalyzer.service.PersistenceService;
 import com.plsqlanalyzer.web.service.ClaudeProcessRunner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -21,6 +23,8 @@ import org.springframework.web.bind.annotation.*;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.LocalHandle;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 
 import java.io.ByteArrayOutputStream;
 import java.io.StringReader;
@@ -49,6 +53,8 @@ import java.util.concurrent.atomic.AtomicLong;
 @RestController
 @RequestMapping("/api/jar/jars")
 public class FlowAnalysisController {
+
+    private static final Logger log = LoggerFactory.getLogger(FlowAnalysisController.class);
 
     private final JarDataPaths paths;
     private final PersistenceService persistenceService;
@@ -130,7 +136,18 @@ public class FlowAnalysisController {
         runs.put(runId, meta);
         store.writeStatus(meta);
 
+        // The bare worker below has no request context, so every store call it makes (writeStatus,
+        // appendLog, report writes, artifacts.exists) would fall through to the shared default
+        // target. Capture the request thread's routing scope and any installed job context HERE,
+        // before the thread starts, and re-install them around the whole run. Either capture may
+        // carry nothing (install is then a no-op), preserving the default-chain path exactly.
+        final RequestScopedArtifactStore.Scope routingScope = artifacts instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+
         new Thread(() -> {
+          try (AutoCloseable routed = routingScope.install();
+               AutoCloseable ctx = jobContext == null ? null : jobContext.install()) {
             try {
                 ArtifactKey analysisKey = paths.analysisKey(id);
                 if (!artifacts.exists(analysisKey)) {
@@ -259,6 +276,9 @@ public class FlowAnalysisController {
                 meta.fail(e.getMessage());
                 store.writeStatus(meta);
             }
+          } catch (Exception e) {
+            log.warn("Flow run {} failed to run under captured context: {}", runId, e.getMessage());
+          }
         }).start();
 
         return Map.of("runId", runId, "status", "running");

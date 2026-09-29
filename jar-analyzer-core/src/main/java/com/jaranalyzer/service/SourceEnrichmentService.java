@@ -30,7 +30,28 @@ public class SourceEnrichmentService {
      * into every CallNode. Decompiles each class once (cached per class), then
      * extracts individual methods. This ensures every level of the flow has real code.
      */
+    /**
+     * Enrich against a stored jar <b>key</b>. Preferred over {@link #enrichCallTreesWithSource(List,
+     * Path)}: the key is the artifact's stable identity, so decompilation goes through
+     * {@link DecompilerService#decompile(com.analyzer.storage.ArtifactKey, String)} — correct for
+     * the decompile cache, and immune to the remote-storage trap where {@code materialize()} hands
+     * back a temp path ({@code /tmp/artifact-*-stored.jar}) that the data-root containment check
+     * cannot key and so refuses for every class.
+     */
+    public int enrichCallTreesWithSource(List<EndpointInfo> endpoints,
+                                         com.analyzer.storage.ArtifactKey jarKey) {
+        return enrich(endpoints, jarKey, null);
+    }
+
+    /** Path-based variant, retained for callers that genuinely only have a local file. */
     public int enrichCallTreesWithSource(List<EndpointInfo> endpoints, Path jarPath) {
+        return enrich(endpoints, null, jarPath);
+    }
+
+    private int enrich(List<EndpointInfo> endpoints,
+                       com.analyzer.storage.ArtifactKey jarKey, Path jarPath) {
+        // Per-analysis rate limit: one bad path must not emit one identical WARN per class.
+        decompilerService.resetGuardWarnCounter();
         final int cacheLimit = 1500;
         ConcurrentHashMap<String, String> classSourceCache = new ConcurrentHashMap<>(1024);
         ConcurrentLinkedQueue<String> accessOrder = new ConcurrentLinkedQueue<>();
@@ -62,7 +83,7 @@ public class SourceEnrichmentService {
 
                 try {
                     Set<CallNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-                    enrichNodeWithSource(ep.getCallTree(), jarPath, classSourceCache,
+                    enrichNodeWithSource(ep.getCallTree(), jarKey, jarPath, classSourceCache,
                             accessOrder, cacheLimit,
                             methodCount, nodeCount, newClassCount, failedClassCount, visited,
                             ep.getFragments());
@@ -108,7 +129,8 @@ public class SourceEnrichmentService {
         return methodCount.get();
     }
 
-    private void enrichNodeWithSource(CallNode node, Path jarPath,
+    private void enrichNodeWithSource(CallNode node,
+                                      com.analyzer.storage.ArtifactKey jarKey, Path jarPath,
                                       ConcurrentHashMap<String, String> classSourceCache,
                                       ConcurrentLinkedQueue<String> accessOrder, int cacheLimit,
                                       AtomicInteger methodCount, AtomicInteger nodeCount,
@@ -126,7 +148,11 @@ public class SourceEnrichmentService {
                 boolean[] wasNew = {false};
                 String fullSource = classSourceCache.computeIfAbsent(className, cls -> {
                     wasNew[0] = true;
-                    String src = decompilerService.decompile(jarPath, cls);
+                    // Key-based when available: a materialized Path is a /tmp download in remote
+                    // storage mode, which the data-root guard refuses for every class.
+                    String src = jarKey != null
+                            ? decompilerService.decompile(jarKey, cls)
+                            : decompilerService.decompile(jarPath, cls);
                     if (src == null) {
                         failedClassCount.incrementAndGet();
                     }
@@ -164,7 +190,7 @@ public class SourceEnrichmentService {
 
         if (node.getChildren() != null) {
             for (CallNode child : node.getChildren()) {
-                enrichNodeWithSource(child, jarPath, classSourceCache,
+                enrichNodeWithSource(child, jarKey, jarPath, classSourceCache,
                         accessOrder, cacheLimit,
                         methodCount, nodeCount, newClassCount, failedClassCount, visited, fragments);
             }
@@ -175,7 +201,7 @@ public class SourceEnrichmentService {
             List<CallNode> overflow = fragments.get(node.getFragmentRef());
             if (overflow != null) {
                 for (CallNode child : overflow) {
-                    enrichNodeWithSource(child, jarPath, classSourceCache,
+                    enrichNodeWithSource(child, jarKey, jarPath, classSourceCache,
                             accessOrder, cacheLimit,
                             methodCount, nodeCount, newClassCount, failedClassCount, visited, fragments);
                 }

@@ -1,6 +1,7 @@
 package com.jaranalyzer.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.analyzer.storage.sso.CapturedSsoContext;
 import com.jaranalyzer.model.EndpointInfo;
 import com.jaranalyzer.service.TreeChunker.TreeChunk;
 import com.jaranalyzer.service.FragmentStore.FragmentIndex;
@@ -288,6 +289,11 @@ public class ClaudeAnalysisService {
                         // Parallel branches
                         List<TreeChunk> branchList = chunks.subList(1, chunks.size());
                         if (!branchList.isEmpty()) {
+                            // This job runs on a queue worker whose installed context makes the
+                            // submitter's credentials resolvable; the chunk pool threads have none.
+                            // Capture once, on the job thread, before the pool is created, and
+                            // re-install per task (null-safe: no context = legacy default path).
+                            CapturedSsoContext chunkContext = CapturedSsoContext.capture(null);
                             ExecutorService executor = Executors.newFixedThreadPool(
                                     Math.min(parallelChunks, branchList.size()));
                             int[] chunkDone = {1};
@@ -304,7 +310,7 @@ public class ClaudeAnalysisService {
                                 futures.add(executor.submit(() -> {
                                     TreeChunk chunk = branchList.get(idx);
                                     String chunkFragName = fragBase + "_chunk_" + globalIdx;
-                                    try {
+                                    try (AutoCloseable ctx = chunkContext == null ? null : chunkContext.install()) {
                                         String branchHint = "Analyzing branch " + (globalIdx + 1) + "/" + totalChunks
                                                 + " of " + ctrl + "." + mth + ". Focus on: " + chunk.label() + "\n\n"
                                                 + "/Flow-JSON-Analyzer " + ctrl + "." + mth
@@ -581,6 +587,9 @@ public class ClaudeAnalysisService {
 
                         List<TreeChunk> branchChunks = chunks.subList(1, chunks.size());
                         if (!branchChunks.isEmpty()) {
+                            // Same as the SOURCE_ENRICH branch above: capture on the job thread
+                            // before the pool exists, install per chunk task.
+                            CapturedSsoContext chunkContext = CapturedSsoContext.capture(null);
                             ExecutorService executor = Executors.newFixedThreadPool(
                                     Math.min(parallelChunks, branchChunks.size()));
                             int[] chunkDone = {1};
@@ -597,7 +606,7 @@ public class ClaudeAnalysisService {
                                     String chunkLabel = chunk.label();
                                     if (chunkLabel.length() > 80) chunkLabel = chunkLabel.substring(0, 80) + "...";
                                     String cTraceId = index.chunkId(epTraceId, globalIdx);
-                                    try {
+                                    try (AutoCloseable ctx = chunkContext == null ? null : chunkContext.install()) {
                                         String cInputFile = cTraceId + "_input.json";
                                         fragmentStore.writeFragment(workDir, cInputFile, chunk.context());
                                         index.register(cTraceId, cInputFile, Map.of(

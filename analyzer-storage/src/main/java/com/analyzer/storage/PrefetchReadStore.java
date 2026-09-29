@@ -1,5 +1,7 @@
 package com.analyzer.storage;
 
+import com.analyzer.storage.sso.CapturedSsoContext;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,6 +79,19 @@ public final class PrefetchReadStore implements ArtifactStore {
             s.filter(e -> !e.directory()).forEach(e -> all.put(e.key(), e));
         }
         if (all.isEmpty()) return 0;
+
+        // The pool threads below are created once and have NO request context, so a request-bound
+        // routing store would fall through to the shared default target on every read. Capture the
+        // caller's routing scope HERE — on the thread that owns the answer, before any task is
+        // submitted — and re-install it inside each task. A delegate with no request-scoped routing
+        // (local, MongoDB, in-memory) yields Scope.NONE; a non-routing delegate instead carries any
+        // installed job context via CapturedSsoContext, which is null-safe (install is a no-op).
+        final boolean delegateRouted = delegate instanceof RequestScopedArtifactStore;
+        final RequestScopedArtifactStore.Scope routingScope = delegateRouted
+                ? ((RequestScopedArtifactStore) delegate).captureScope()
+                : RequestScopedArtifactStore.Scope.NONE;
+        final CapturedSsoContext jobContext = delegateRouted ? null : CapturedSsoContext.capture(null);
+
         ExecutorService pool = Executors.newFixedThreadPool(DEFAULT_THREADS, r -> {
             Thread t = new Thread(r, "prefetch-reader");
             t.setDaemon(true);
@@ -90,7 +105,11 @@ public final class PrefetchReadStore implements ArtifactStore {
                 if (e.getValue().size() > 0 && totalBytes[0] + e.getValue().size() > MAX_CACHE_BYTES) break;
                 totalBytes[0] += e.getValue().size();
                 futures.put(e.getKey(), pool.submit((Callable<Cacheable>) () -> {
-                    try (InputStream in = delegate.read(e.getKey())) {
+                    // Re-install the caller's context on this pool thread for this one read, so a
+                    // routing delegate resolves the same target it would have on the calling thread.
+                    try (AutoCloseable routed = routingScope.install();
+                         AutoCloseable ctx = jobContext == null ? null : jobContext.install();
+                         InputStream in = delegate.read(e.getKey())) {
                         return new Cacheable(in.readAllBytes(), e.getValue().lastModified());
                     }
                 }));

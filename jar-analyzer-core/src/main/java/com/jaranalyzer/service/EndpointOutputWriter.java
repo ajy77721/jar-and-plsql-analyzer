@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -249,6 +250,12 @@ class EndpointOutputWriter {
         int total = endpoints.size();
         log.info("Writing per-endpoint output for {} endpoints...", total);
 
+        // The caller is a queue worker whose job context makes the submitter's credentials
+        // resolvable; the pool threads below have none. Capture the context HERE — before any task
+        // is submitted — and re-install it per task, or every fragment write routes/signs as the
+        // shared default target. Null-safe: no context means install is a no-op (legacy path).
+        CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+
         int threads = Math.min(4, Runtime.getRuntime().availableProcessors());
         ExecutorService pool = Executors.newFixedThreadPool(threads, r -> {
             Thread t = new Thread(r, "ep-output-writer");
@@ -260,7 +267,14 @@ class EndpointOutputWriter {
         for (int i = 0; i < total; i++) {
             final int idx = i;
             final EndpointInfo ep = endpoints.get(i);
-            pending.add(new PendingWrite(idx, ep, pool.submit(() -> writeEndpointOutput(jarName, ep, idx + 1))));
+            final CapturedSsoContext context = jobContext;
+            // Explicit Callable: the try-with-resources close() can throw, which a Runnable cannot.
+            pending.add(new PendingWrite(idx, ep, pool.submit((Callable<Void>) () -> {
+                try (AutoCloseable ctx = context == null ? null : context.install()) {
+                    writeEndpointOutput(jarName, ep, idx + 1);
+                }
+                return null;
+            })));
         }
 
         List<PendingWrite> failed = new ArrayList<>();

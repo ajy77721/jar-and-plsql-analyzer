@@ -198,8 +198,10 @@ public class WarAnalysisExecutor {
             var storedWarKey = warPersistenceService.getPaths().storedJarKey(warName);
             if (store.exists(storedWarKey)) storedWarHandle = store.materialize(storedWarKey);
             Path storedWar = storedWarHandle == null ? null : storedWarHandle.path();
-            if (storedWar != null) {
-                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedWar);
+            if (store.exists(storedWarKey)) {
+                // Key, not materialized Path: in remote mode that Path is a /tmp download outside
+                // the data root and the decompiler would refuse every class (see JarAnalysisExecutor).
+                sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedWarKey);
             }
             System.gc();
             checkCancelled(job);

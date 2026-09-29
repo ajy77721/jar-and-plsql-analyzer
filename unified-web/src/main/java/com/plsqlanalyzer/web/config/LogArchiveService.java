@@ -4,6 +4,7 @@ import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.sso.ActiveUserInfo;
+import com.analyzer.storage.sso.CurrentHttpSession;
 import com.analyzer.storage.sso.SessionRoutingArtifactStore;
 import com.analyzer.storage.sso.SsoSessionRegistry;
 import jakarta.annotation.PreDestroy;
@@ -90,6 +91,15 @@ public class LogArchiveService {
     @Autowired(required = false)
     private SsoSessionRegistry ssoSessionRegistry;
 
+    /**
+     * Binds a chosen connected user's session to the scheduler thread for one pass, so the routing
+     * store resolves that user's store and credentials instead of the shared default target. The
+     * same {@link CurrentHttpSession#propagate} mechanism a listing fan-out uses. Field-injected and
+     * optional like the registry, so tests and stripped-down contexts keep working untouched.
+     */
+    @Autowired(required = false)
+    private CurrentHttpSession currentHttpSession;
+
     /** Whether the "no authenticated user" skip has already been logged — one INFO, not one per tick. */
     private volatile boolean skipLogged = false;
 
@@ -104,6 +114,13 @@ public class LogArchiveService {
      * neither actionable nor changing, and it clears by itself once credentials exist.
      */
     private volatile long lastPruneWarnEpochMs = 0L;
+
+    /**
+     * Epoch millis of the last "archive pass could not run under a user context" WARN, throttled the
+     * same one-an-hour way as {@link #lastPruneWarnEpochMs}: a bad target fails on every tick and the
+     * line must not repeat every 60s.
+     */
+    private volatile long lastRunWarnEpochMs = 0L;
 
     /**
      * Which {@code ArtifactStore} this ships to is otherwise-arbitrary: log archiving is
@@ -138,45 +155,64 @@ public class LogArchiveService {
     /**
      * Runs one archive pass. Returns how many files were shipped, for tests.
      *
-     * <p>Nothing touches the store until a user with credentials is active: in a per-user (S3)
-     * deployment the routing store cannot be used from this scheduler thread before somebody has
-     * logged in and connected, and the owner's rule is that no store call happens without an
-     * authenticated user. Until then the pass is skipped cleanly — one INFO line — and shipping
-     * resumes by itself once a connected user appears.
+     * <p>The scheduler thread carries no user context, so a per-user (S3) routing store would fall
+     * through to the shared default target on every call. This pass therefore picks one connected
+     * user — logged in and with a verified bucket — from the registry and binds that session to the
+     * scheduler thread for the duration, so the routing store resolves that user's store and
+     * credentials. With no such user it is skipped cleanly (one INFO line) and shipping resumes by
+     * itself once somebody connects. A local or MongoDB store needs no user and is unaffected.
+     *
+     * <p>Best-effort: a failure is logged at WARN (throttled to one an hour) and never thrown —
+     * log housekeeping must not be able to break the application.
      */
     public int run() {
-        if (!storeUsableWithoutLogin()) {
+        String sessionId = connectedSessionId();
+        if (sessionId == null && needsConnectedUser()) {
             if (!skipLogged) {
                 skipLogged = true;
-                log.info("Log archiving paused: no authenticated AWS SSO user yet — shipping resumes "
-                        + "once a user with credentials is connected");
+                log.info("Log archiving paused: no authenticated AWS SSO user with a connected bucket yet "
+                        + "— shipping resumes once a user connects");
             }
             return 0;
         }
         skipLogged = false;
-        int shippedNow = shipRolledLogs();
-        pruneOldArchives();
-        return shippedNow;
+        AutoCloseable bound = (sessionId == null || currentHttpSession == null)
+                ? () -> { } : currentHttpSession.propagate(sessionId);
+        try (AutoCloseable ctx = bound) {
+            int shippedNow = shipRolledLogs();
+            pruneOldArchives();
+            return shippedNow;
+        } catch (Exception e) {
+            long now = System.currentTimeMillis();
+            if (now - lastRunWarnEpochMs >= PRUNE_WARN_INTERVAL_MS) {
+                lastRunWarnEpochMs = now;
+                log.warn("Log archive pass failed: {}", e.getMessage());
+            }
+            return 0;
+        }
     }
 
     /**
-     * True when this pass may talk to the store.
-     *
-     * <p>Only a per-user routing store needs a login first; a local or MongoDB store has no
-     * per-user auth step, so archiving there is unaffected. Also true when no registry is wired in
-     * (a unit test, or a context with SSO switched off), which keeps the pre-existing behaviour
-     * exactly as it was.
+     * True when this pass must run as a logged-in user: only a per-user routing store needs one, and
+     * only when a registry is wired in. A local or MongoDB store — or a unit test with no SSO
+     * wiring — has no per-user auth step, so the pre-existing behaviour is kept exactly.
      */
-    private boolean storeUsableWithoutLogin() {
-        if (!(store instanceof SessionRoutingArtifactStore)) return true;
+    private boolean needsConnectedUser() {
+        return store instanceof SessionRoutingArtifactStore && ssoSessionRegistry != null;
+    }
+
+    /**
+     * The session id of one logged-in, connected user, or {@code null} when there is none (or no
+     * registry is wired in). "Connected" means a verified bucket, i.e. credentials this deployment
+     * can actually write with. No token material is read or logged here.
+     */
+    private String connectedSessionId() {
         SsoSessionRegistry registry = ssoSessionRegistry;
-        if (registry == null) return true;
+        if (registry == null) return null;
         for (ActiveUserInfo user : registry.listActive()) {
-            // Logged in AND connected: a verified bucket means the user has credentials this
-            // deployment can actually write with. No token material is read or logged here.
-            if (user.identity() != null && user.bucket() != null) return true;
+            if (user.identity() != null && user.bucket() != null) return user.sessionId();
         }
-        return false;
+        return null;
     }
 
     /**
