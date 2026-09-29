@@ -13,6 +13,8 @@ import org.springframework.stereotype.Service;
 import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -429,10 +431,21 @@ public class ClaudeVerificationService {
         CompletionService<ChunkResult> cs = new ExecutorCompletionService<>(claudePool);
         Set<String> syncCompleted = Collections.synchronizedSet(completedChunks);
 
+        // The caller may be a request thread (routing scope) or a job thread (SsoJobContext); the
+        // pool threads have neither. Capture both HERE, before submitting, and re-install per task.
+        final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+        final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
+
         int submitted = 0;
         for (VerificationChunk chunk : pendingChunks) {
-            cs.submit(() -> processOneChunk(chunk, data, outputDir, syncCompleted,
-                    processed, total, progressCallback));
+            cs.submit(() -> {
+                try (AutoCloseable routed = routingScope.install();
+                     AutoCloseable ctx = jobContext == null ? null : jobContext.install()) {
+                    return processOneChunk(chunk, data, outputDir, syncCompleted,
+                            processed, total, progressCallback);
+                }
+            });
             submitted++;
         }
 

@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 import com.plsqlanalyzer.web.parser.service.AnalysisPaths;
 
 import java.io.IOException;
@@ -52,6 +54,22 @@ class ClaudeVerificationRunner {
         this.reporter = reporter;
         this.loader = loader;
         this.writer = writer;
+    }
+
+    /**
+     * Runs {@code body} on the calling (pool) thread with the captured request routing and job
+     * context installed, so a chunk task's fragment/checkpoint writes land in the same bucket and
+     * sign as the submitter instead of the shared default target. Both captures are captured on the
+     * submitting thread; either may carry nothing (install is then a no-op), preserving today's
+     * behaviour for a thread that has neither.
+     */
+    private static <T> T withContext(RequestScopedArtifactStore.Scope routingScope,
+                                     CapturedSsoContext jobContext,
+                                     Callable<T> body) throws Exception {
+        try (AutoCloseable routed = routingScope.install();
+             AutoCloseable ctx = jobContext == null ? null : jobContext.install()) {
+            return body.call();
+        }
     }
 
     /**
@@ -125,10 +143,15 @@ class ClaudeVerificationRunner {
             ExecutorService claudePool = Executors.newFixedThreadPool(Math.max(1, activeThreads));
             CompletionService<ChunkResult> completionService = new ExecutorCompletionService<>(claudePool);
             Set<String> syncCompletedChunks = Collections.synchronizedSet(completedChunks);
+            // Caller may be a request thread (routing scope) or a job thread (SsoJobContext); the
+            // pool threads have neither. Capture both before submitting, re-install per chunk task.
+            final RequestScopedArtifactStore.Scope routingScope = store instanceof RequestScopedArtifactStore routed
+                    ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+            final CapturedSsoContext jobContext = CapturedSsoContext.capture(null);
             int submitted = 0;
 
             for (VerificationChunk chunk : pendingChunks) {
-                completionService.submit(() -> {
+                completionService.submit(() -> withContext(routingScope, jobContext, () -> {
                     if (cancelled.get()) return ChunkResult.error(chunk.id, "Cancelled");
 
                     int num = processed.incrementAndGet();
@@ -173,7 +196,7 @@ class ClaudeVerificationRunner {
                         writer.saveCheckpoint(outputDir, syncCompletedChunks);
                     }
                     return cr;
-                });
+                }));
                 submitted++;
             }
 

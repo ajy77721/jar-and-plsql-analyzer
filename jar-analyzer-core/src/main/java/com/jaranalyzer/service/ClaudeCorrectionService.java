@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
@@ -72,6 +73,19 @@ public class ClaudeCorrectionService {
     }
 
     /**
+     * Runs {@code body} with {@code context} installed on the calling (pool) thread, so a chunk
+     * task's fragment/correction writes sign as the job submitter instead of falling through to the
+     * shared default target. A null context installs nothing (the legacy default-chain path); the
+     * handle's close restores this worker's previous — empty — binding before the next task runs.
+     */
+    private static <T> T withSsoContext(CapturedSsoContext context, java.util.concurrent.Callable<T> body)
+            throws Exception {
+        try (AutoCloseable ctx = context == null ? null : context.install()) {
+            return body.call();
+        }
+    }
+
+    /**
      * Correct all endpoints for a JAR. Called from background thread via ClaudeSessionManager.
      * Supports resume: skips endpoints that already have correction data.
      * Processes up to {@code parallelEndpoints} endpoints concurrently (default 3).
@@ -109,7 +123,10 @@ public class ClaudeCorrectionService {
             }
         }
 
-        // Phase 2: process remaining endpoints in parallel
+        // Phase 2: process remaining endpoints in parallel. The job thread below carries the
+        // submitter's context; these pool threads do not — capture once here, install per endpoint
+        // task, or every correction write routes/signs as the shared default target.
+        CapturedSsoContext endpointContext = CapturedSsoContext.capture(null);
         ExecutorService subExecutor = Executors.newFixedThreadPool(parallelEndpoints, r -> {
             Thread t = new Thread(r, "claude-ep-" + jarName.hashCode() + "-" + ENDPOINT_THREAD_SEQ.incrementAndGet());
             t.setDaemon(true);
@@ -122,7 +139,7 @@ public class ClaudeCorrectionService {
                 futures.add(subExecutor.submit(() -> {
                     String epKey = ep.getControllerSimpleName() + "." + ep.getMethodName();
                     long epStart = System.currentTimeMillis();
-                    try {
+                    try (AutoCloseable ctx = endpointContext == null ? null : endpointContext.install()) {
                         tracker.markProcessing(jarName, epKey);
                         int d = done.incrementAndGet();
                         if (progressService != null) {
@@ -404,6 +421,9 @@ public class ClaudeCorrectionService {
 
         // Process each chunk with a correction-specific prompt
         List<CorrectionResult> chunkResults = new ArrayList<>();
+        // Capture on the calling thread (the job thread, or an endpoint-pool thread that already
+        // installed the job context) before the chunk pool exists; install per chunk task.
+        CapturedSsoContext chunkContext = CapturedSsoContext.capture(null);
         ExecutorService chunkExecutor = Executors.newFixedThreadPool(
                 Math.min(parallelChunks, chunks.size()),
                 r -> { Thread t = new Thread(r, "corr-chunk-" + ep.getMethodName()); t.setDaemon(true); return t; });
@@ -414,7 +434,7 @@ public class ClaudeCorrectionService {
             for (int i = 0; i < chunks.size(); i++) {
                 final int ci = i;
                 final TreeChunker.TreeChunk chunk = chunks.get(i);
-                futures.add(chunkExecutor.submit(() -> {
+                futures.add(chunkExecutor.submit(() -> withSsoContext(chunkContext, () -> {
                     String chunkPrompt = buildChunkedCorrectionPrompt(ep, chunk, ci, chunks.size());
                     List<String> cmd = List.of("claude", "-p", "--no-session-persistence");
 
@@ -459,7 +479,7 @@ public class ClaudeCorrectionService {
                             ci + 1, chunks.size(),
                             rawOutput.length(), rawOutput.length() / 1024, callMs);
                     return parseCorrectionResult(rawOutput, ep);
-                }));
+                })));
             }
 
             for (Future<CorrectionResult> f : futures) {

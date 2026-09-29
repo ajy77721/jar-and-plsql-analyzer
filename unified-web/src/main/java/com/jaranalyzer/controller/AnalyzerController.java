@@ -22,6 +22,7 @@ import org.springframework.beans.factory.annotation.Value;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.page.Cursor;
 import com.analyzer.storage.page.PageRequest;
 import com.jaranalyzer.service.AbstractAnalysisDataProvider;
@@ -1094,14 +1095,25 @@ public class AnalyzerController {
                 provider.streamSummary(parser, gen);
                 gen.flush();
             }
-            // Async gzip — don't block the response on compression
+            // Async gzip — don't block the response on compression. The gzip runs on the common
+            // pool, which has no request context, so capture the routing scope HERE (on the request
+            // thread, before submitting) and re-install it inside the task — otherwise the summary
+            // write routes to the shared default target (a silent wrong-bucket write).
             ArtifactKey gzCache = gzOf(summaryCache);
+            RequestScopedArtifactStore.Scope scope = store instanceof RequestScopedArtifactStore routed
+                    ? routed.captureScope()
+                    : RequestScopedArtifactStore.Scope.NONE;
             java.util.concurrent.CompletableFuture.runAsync(() -> {
-                try (var in = new java.io.BufferedInputStream(openRead(summaryCache), 128 * 1024);
+                try (AutoCloseable routed = scope.install();
+                     var in = new java.io.BufferedInputStream(openRead(summaryCache), 128 * 1024);
                      var gzOut = new java.util.zip.GZIPOutputStream(
                              new java.io.BufferedOutputStream(store.write(gzCache), 64 * 1024))) {
                     in.transferTo(gzOut);
-                } catch (IOException ignored) {}
+                } catch (Exception e) {
+                    // Was silently swallowed; log at WARN with the cache key so a failed gzip
+                    // regeneration is visible (the summary itself is already written).
+                    log.warn("Async gzip of summary cache {} failed: {}", gzCache.leaf(), e.getMessage());
+                }
             });
         }
 
