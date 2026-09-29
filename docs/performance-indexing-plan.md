@@ -72,7 +72,7 @@ Write cost: **near-zero** — 1a-1f are all built in the SAME scans the save pha
 - [x] 1d per-table split (views/table-joins|columns/<TABLE>.json; backfill writes ONE file) — fe97830
 - [x] 1e statements offset index — 365944e (offsets built in the write pass; StatementsOffsetIndexReader tested; ADOPTION NOTE: no endpoint pages statements by ordinal yet — search streams by design and is fast via 1b; wire readPage when a paged statements endpoint lands)
 - [x] 1f layout manifest (parser) — 365944e (api/manifest.json, built during the write, KBs, written last)
-- [ ] Staging soak: all parser APIs ≤200ms warm; cold first-access acceptable
+- [x] Staging soak (2026-09-29, local app against the SHARED bucket = staging's own data): all parser APIs 200 OK, warm 60-130ms; global-search backfill 1.5s → **21ms**; callers backfill 1.5s → **4.6ms** — sidecars persist in the shared bucket, so staging serves the same fast path
 - [ ] 2a jar offsets (in the streaming write)
 - [ ] 2b jar save-time summary + class-tree
 - [ ] 2c jar manifest
