@@ -68,6 +68,9 @@ L4. THE INVARIANT       when work moves to another thread, the snapshot moves WI
 - [x] C: prefetch context + catch-path writes + prompt static removal (I1, I4) — 167097f
 - [x] D: auto-reconnect on login (I5) — 93aebf2 (9 new tests)
 - [x] Exception advice surfaces the real reason (`reason` field) + IO-gate budget 12→10 — 12c5fb4
+- [x] BOOT FIX: @Autowired on the resolver's primary constructor (two ctors broke Spring wiring — caught by LOCAL boot verification before it burned prod) — d386f4a
+- [x] Log-archive connected-user gate matched the wrong layer (cache wraps router) — pass ran context-less every minute — 464aadd
+- [x] LOCAL end-to-end verification (8085, S3 mode): connect → upload → COMPLETE (84 classes) → **0 context errors in the whole run**; log-archive skips cleanly pre-connect ✓
 - [ ] Full reactor suite (3,452+ tests) green on the merged tree
 - [ ] Staging deploy + live log verification (connect → upload → 5.6 fast → sources visible)
 - [ ] Multi-user spot check: two sessions concurrent uploads (per-entry credential test exists; verify live)
