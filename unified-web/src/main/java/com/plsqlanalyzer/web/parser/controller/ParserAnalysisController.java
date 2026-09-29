@@ -698,33 +698,35 @@ public class ParserAnalysisController {
         w.dynamicSql = wDynamicSql; w.depth = wDepth;
         ComplexityScoringService.Thresholds th = new ComplexityScoringService.Thresholds();
         th.medium = thMedium; th.high = thHigh;
-        // Only the default weights/thresholds/algorithm are precomputed (views/complexity.json);
-        // a custom request recomputes, exactly as before.
-        if (isDefaultComplexity(wLoc, wTables, wCallsOut, wCursors, wDynamicSql, wDepth,
-                thMedium, thHigh, algorithm, exponent)) {
-            return serveView(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.COMPLEXITY,
+        // The default parameters map to views/complexity.json (backward-compatible); a grid
+        // neighbour maps to its named variant; anything else maps to a hashed variant computed once
+        // and cached (capped, LRU by mtime). All three share the same serve-or-compute shape.
+        String view = com.plsqlanalyzer.web.parser.service.AnalysisViewStore.complexityViewName(
+                algorithm, exponent, wLoc, wTables, wCallsOut, wCursors, wDynamicSql, wDepth,
+                thMedium, thHigh);
+        if (com.plsqlanalyzer.web.parser.service.AnalysisViewStore.COMPLEXITY.equals(view)) {
+            return serveView(name, view,
                     () -> complexityScoringService.getScores(name, w, th, algorithm, exponent));
         }
-        return complexityScoringService.getScores(name, w, th, algorithm, exponent);
+        return serveComplexityVariant(name, view, w, th, algorithm, exponent);
     }
 
-    /** Whether the request is exactly the precomputed {@code /complexity/scores} default. */
-    private static boolean isDefaultComplexity(double wLoc, double wTables, double wCallsOut,
-                                               double wCursors, double wDynamicSql, double wDepth,
-                                               double thMedium, double thHigh, String algorithm,
-                                               double exponent) {
-        ComplexityScoringService.Weights d = new ComplexityScoringService.Weights();
-        ComplexityScoringService.Thresholds dt = new ComplexityScoringService.Thresholds();
-        return Double.compare(wLoc, d.loc) == 0
-                && Double.compare(wTables, d.tables) == 0
-                && Double.compare(wCallsOut, d.callsOut) == 0
-                && Double.compare(wCursors, d.cursors) == 0
-                && Double.compare(wDynamicSql, d.dynamicSql) == 0
-                && Double.compare(wDepth, d.depth) == 0
-                && Double.compare(thMedium, dt.medium) == 0
-                && Double.compare(thHigh, dt.high) == 0
-                && "linear".equalsIgnoreCase(algorithm)
-                && Double.compare(exponent, 1.3) == 0;
+    /**
+     * Serves a named-grid or hashed {@code /complexity/scores} variant from its sidecar when fresh;
+     * otherwise computes it and caches the body as that variant (pruning the hashed variants to the
+     * cap). The computed response is returned untouched, so a miss is today's response exactly.
+     */
+    private ResponseEntity<Object> serveComplexityVariant(
+            String name, String view, ComplexityScoringService.Weights w,
+            ComplexityScoringService.Thresholds th, String algorithm, double exponent) {
+        if (views == null) return complexityScoringService.getScores(name, w, th, algorithm, exponent);
+        JsonNode cached = views.read(name, view);
+        if (cached != null) return ResponseEntity.ok(cached);
+        ResponseEntity<Object> response = complexityScoringService.getScores(name, w, th, algorithm, exponent);
+        if (response != null && response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+            views.writeComplexityVariant(name, view, mapper.valueToTree(response.getBody()));
+        }
+        return response;
     }
 
     /**
@@ -1105,65 +1107,57 @@ public class ParserAnalysisController {
         String needle = q.toLowerCase(java.util.Locale.ROOT);
         com.fasterxml.jackson.databind.node.ArrayNode out = mapper.createArrayNode();
         int[] idx = {0};
+        // The unfiltered source rows: the save-time sidecar when fresh, else the 7-artifact scan
+        // (whose result is written back as the sidecar). Everything below — the per-facet filter
+        // and the normalization — is unchanged, so the response is byte-identical either way.
+        JsonNode facets = searchFacets(name);
 
         addMatches(out, idx, needle, "TABLE", ParserFacetSpecs.TABLES,
-                readArray(name, AnalysisQuery.Dataset.PLSQL_TABLES, "tables"),
+                facetArray(facets, ParserSearchFacets.TABLES),
                 row -> row.path("name").asText(""), row -> row.path("schema").asText(""));
         addMatches(out, idx, needle, "PROCEDURE", ParserFacetSpecs.PROCEDURES,
-                readArray(name, AnalysisQuery.Dataset.PLSQL_PROCEDURES, null),
+                facetArray(facets, ParserSearchFacets.PROCEDURES),
                 row -> row.path("name").asText(""), row -> row.path("schema").asText(""));
         addMatches(out, idx, needle, "SEQUENCE", ParserFacetSpecs.SEQUENCES,
-                readArray(name, AnalysisQuery.Dataset.PLSQL_SEQUENCES, null),
+                facetArray(facets, ParserSearchFacets.SEQUENCES),
                 row -> row.path("sequenceName").asText(""), row -> row.path("sequenceSchema").asText(""));
         addMatches(out, idx, needle, "CURSOR", ParserFacetSpecs.CURSORS,
-                readArray(name, AnalysisQuery.Dataset.PLSQL_CURSORS, null),
+                facetArray(facets, ParserSearchFacets.CURSORS),
                 row -> row.path("cursorName").asText(""), row -> "");
         addMatches(out, idx, needle, "JOIN", ParserFacetSpecs.JOINS,
-                readArray(name, AnalysisQuery.Dataset.PLSQL_JOINS, null),
+                facetArray(facets, ParserSearchFacets.JOINS),
                 row -> row.path("leftTable").asText("") + " ⋈ " + row.path("rightTable").asText(""),
                 row -> "");
         addMatches(out, idx, needle, "DYNAMIC_SQL", ParserFacetSpecs.DYNAMIC_SQL,
-                readArray(name, AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL, null),
+                facetArray(facets, ParserSearchFacets.DYNAMIC_SQL),
                 row -> row.path("procedureName").asText(""), row -> "");
         addMatches(out, idx, needle, "PREDICATE", ParserFacetSpecs.PREDICATES,
-                readPredicateRows(name), row -> row.path("tableName").asText(""),
-                row -> row.path("schemaName").asText(""));
+                facetArray(facets, ParserSearchFacets.PREDICATES),
+                row -> row.path("tableName").asText(""), row -> row.path("schemaName").asText(""));
         return out;
     }
 
-    /** One facet's raw row array for {@code name}, or {@code null} if the dataset can't be read. */
-    private com.fasterxml.jackson.databind.node.ArrayNode readArray(
-            String name, AnalysisQuery.Dataset dataset, String arrayField) {
-        try {
-            JsonNode document = repository.document(AnalysisQuery.of(dataset, name));
-            if (document == null || document.isNull() || document.isMissingNode()) return null;
-            if (document.isArray()) return (com.fasterxml.jackson.databind.node.ArrayNode) document;
-            if (arrayField != null && document.path(arrayField).isArray()) {
-                return (com.fasterxml.jackson.databind.node.ArrayNode) document.get(arrayField);
-            }
-            return null;
-        } catch (Exception e) {
-            return null;
+    /**
+     * The raw search-facet map from {@code views/search.json} when fresh, otherwise the 7-artifact
+     * scan — whose result is written back as the sidecar (lazy backfill). Absent sidecars, or no
+     * view store, fall straight through to today's scan.
+     */
+    private JsonNode searchFacets(String name) {
+        if (views != null) {
+            JsonNode cached = views.readSearch(name);
+            if (cached != null) return cached;
         }
+        com.fasterxml.jackson.databind.node.ObjectNode built =
+                ParserSearchFacets.build(repository, mapper, name);
+        if (views != null) views.writeSearch(name, built, true);
+        return built;
     }
 
-    /**
-     * Predicate rows for search, built exactly as {@link #getPredicates} builds them for its own
-     * grid (raw {@code usedBy[]} tables adapted via {@code ParserPredicatesAdapter}, then {@code
-     * PlsqlPredicatesFacet.build}) — not a new aggregation, the same one, called a second time.
-     */
-    private com.fasterxml.jackson.databind.node.ArrayNode readPredicateRows(String name) {
-        try {
-            JsonNode rawTables = repository.document(AnalysisQuery.of(AnalysisQuery.Dataset.PLSQL_TABLES, name));
-            JsonNode adapted = ParserPredicatesAdapter.adaptTables(mapper, rawTables);
-            JsonNode document = com.plsqlanalyzer.web.controller.PlsqlPredicatesFacet.build(mapper, adapted);
-            if (document != null && document.isArray()) {
-                return (com.fasterxml.jackson.databind.node.ArrayNode) document;
-            }
-            return null;
-        } catch (Exception e) {
-            return null;
-        }
+    /** One facet's array out of the search-facet map, or {@code null} to skip the facet. */
+    private static com.fasterxml.jackson.databind.node.ArrayNode facetArray(JsonNode facets, String key) {
+        JsonNode node = facets == null ? null : facets.get(key);
+        return (node != null && node.isArray())
+                ? (com.fasterxml.jackson.databind.node.ArrayNode) node : null;
     }
 
     /**

@@ -80,20 +80,51 @@ public class AnalysisViewStore {
     public static final String TABLE_JOINS = "table-joins.json";
     /** {@code {table -> rows}} for the table-scoped column-refs facet. */
     public static final String TABLE_COLUMNS = "table-columns.json";
+    /**
+     * Per-table split of {@link #TABLE_JOINS}: one small {@code <TABLE>.json} per table, written
+     * alongside the whole-map sidecar. A per-table request reads one small file; a lazy backfill
+     * writes one small file instead of rewriting the whole map. The map is kept for backward-compat
+     * reads — see {@link AnalysisViewWriter} and {@code ArtifactScanRepository#tableView}.
+     */
+    public static final String TABLE_JOINS_DIR = "table-joins";
+    /** Per-table split of {@link #TABLE_COLUMNS}; see {@link #TABLE_JOINS_DIR}. */
+    public static final String TABLE_COLUMNS_DIR = "table-columns";
     /** The default-weights {@code /complexity/scores} body. */
     public static final String COMPLEXITY = "complexity.json";
     /** The default-scope {@code /summary/stats} body. */
     public static final String SUMMARY_STATS = "summary-stats.json";
+    /** {@code {nodeId -> callers[]}} for the precomputed call-tree entry points. */
+    public static final String CALLERS = "callers.json";
+    /** The raw facet arrays {@code /global-search} normalizes and filters; see the controller. */
+    public static final String SEARCH = "search.json";
 
     /**
-     * The eight facets {@link AnalysisViewWriter#writeAll} produces, in the order it produces them.
+     * The {@code linear} grid neighbours precomputed at save time beside the default: the only two
+     * other algorithms {@code complexity.js} offers, both at the endpoint's default weights,
+     * thresholds and exponent. A custom request that matches neither computes once and is cached as
+     * a hashed variant, capped at {@link #COMPLEXITY_VARIANT_CAP}.
+     */
+    public static final String COMPLEXITY_BALANCED = "complexity-balanced.json";
+    /** See {@link #COMPLEXITY_BALANCED}. */
+    public static final String COMPLEXITY_LOGARITHMIC = "complexity-logarithmic.json";
+    /** How many hashed custom-weight variants to keep before the oldest (by mtime) is dropped. */
+    public static final int COMPLEXITY_VARIANT_CAP = 8;
+    /** File-name prefix every non-default complexity variant shares. */
+    public static final String COMPLEXITY_VARIANT_PREFIX = "complexity-";
+
+    /**
+     * The ten facets {@link AnalysisViewWriter#writeAll} produces, in the order it produces them.
      * {@link #HEADER} is deliberately not here: it is written at save time from the index root the
      * analysis already holds, and it is the one sidecar carrying {@code formatVersion}, so it is the
      * completeness <em>marker</em> rather than just another member of the set.
+     *
+     * <p>The per-table split files and the non-default complexity variants are not listed: they are
+     * members of the {@link #TABLE_JOINS}/{@link #TABLE_COLUMNS}/{@link #COMPLEXITY} facets rather
+     * than separate completeness markers, and the table set is unbounded.
      */
     private static final String[] FACET_VIEWS = {
             SEQUENCES, CURSORS, DYNAMIC_SQL, JOINS_SUMMARY,
-            TABLE_JOINS, TABLE_COLUMNS, COMPLEXITY, SUMMARY_STATS
+            TABLE_JOINS, TABLE_COLUMNS, COMPLEXITY, SUMMARY_STATS, CALLERS, SEARCH
     };
 
     private final ArtifactStore store;
@@ -299,6 +330,65 @@ public class AnalysisViewStore {
         write(name, CALL_TREE_DIR + "/" + callTreeFileName(nodeId), tree);
     }
 
+    /* ──────────────────────────── callers ──────────────────────────── */
+
+    /**
+     * The {@code /call-tree/{nodeId}/callers} array for one node out of {@link #CALLERS}, or
+     * {@code null} when the map is absent/stale or has no entry for {@code nodeId} — both of which
+     * mean "synthesise the legacy way", never "this node has no callers".
+     */
+    public JsonNode readCallers(String name, String nodeId) {
+        if (name == null || name.isBlank() || nodeId == null || nodeId.isBlank()) return null;
+        JsonNode doc = read(name, CALLERS);
+        if (doc == null || !doc.isObject()) return null;
+        JsonNode entry = doc.get(nodeId);
+        return (entry == null || entry.isNull()) ? null : entry;
+    }
+
+    /**
+     * Merges one node's callers array into {@link #CALLERS} (lazy backfill for a node the save-time
+     * entry-point selection did not cover). Only ever additive, so a concurrent reader sees a
+     * superset, never a false empty.
+     */
+    public void putCallersEntry(String name, String nodeId, JsonNode callers) {
+        if (name == null || name.isBlank() || nodeId == null || nodeId.isBlank() || callers == null) return;
+        synchronized (lockFor(name)) {
+            JsonNode existing = read(name, CALLERS);
+            ObjectNode map = (existing != null && existing.isObject())
+                    ? (ObjectNode) existing.deepCopy()
+                    : mapper.createObjectNode();
+            map.set(nodeId, callers);
+            write(name, CALLERS, map);
+        }
+    }
+
+    /** Replaces the whole {@code {nodeId -> callers[]}} sidecar, used by the writer at save time. */
+    public boolean writeCallers(String name, Map<String, ? extends JsonNode> byNode, boolean logFailure) {
+        ObjectNode map = mapper.createObjectNode();
+        byNode.forEach((nodeId, callers) -> {
+            if (nodeId != null && !nodeId.isBlank() && callers != null) map.set(nodeId, callers);
+        });
+        return write(name, CALLERS, map, logFailure);
+    }
+
+    /* ───────────────────────────── search ───────────────────────────── */
+
+    /**
+     * The raw per-facet arrays {@code /global-search} filters, or {@code null} when the sidecar is
+     * absent/stale. The document is <em>not</em> the endpoint response: it is the unfiltered source
+     * rows the controller's {@code buildSearchRows} normalizes and filters, so serving from it is
+     * byte-identical to reading the 7 artifacts it stands in for.
+     */
+    public JsonNode readSearch(String name) {
+        JsonNode doc = read(name, SEARCH);
+        return (doc != null && doc.isObject()) ? doc : null;
+    }
+
+    /** Stores the raw search-facet arrays. Best-effort — never throws. */
+    public boolean writeSearch(String name, JsonNode facets, boolean logFailure) {
+        return write(name, SEARCH, facets, logFailure);
+    }
+
     /* ──────────────────────── table-scoped facets ──────────────────────── */
 
     /**
@@ -313,17 +403,20 @@ public class AnalysisViewStore {
         return doc.get(normalizeTable(table));
     }
 
-    /** Merges one computed table's rows into the {@code {table -> rows}} sidecar. */
+    /**
+     * Lazy backfill of one computed table's rows. Writes <b>only</b> that table's split file
+     * ({@code views/<dir>/<TABLE>.json}) — never the whole-map sidecar — so the cost of a first
+     * access to an uncovered table is one small write, not a rewrite of every table's rows.
+     */
     public void putTableEntry(String name, String view, String table, JsonNode rows) {
-        if (table == null || table.isBlank() || rows == null) return;
-        synchronized (lockFor(name)) {
-            JsonNode existing = read(name, view);
-            ObjectNode map = (existing != null && existing.isObject())
-                    ? (ObjectNode) existing.deepCopy()
-                    : mapper.createObjectNode();
-            map.set(normalizeTable(table), rows);
-            write(name, view, map);
-        }
+        writeTableFile(name, tableDirForView(view), table, rows, true);
+    }
+
+    /** The per-table split directory backing a whole-map view name, or the view name itself. */
+    private static String tableDirForView(String view) {
+        if (TABLE_JOINS.equals(view)) return TABLE_JOINS_DIR;
+        if (TABLE_COLUMNS.equals(view)) return TABLE_COLUMNS_DIR;
+        return view;
     }
 
     /** Replaces a whole {@code {table -> rows}} sidecar, used by the writer at save time. */
@@ -346,5 +439,116 @@ public class AnalysisViewStore {
     /** Table keys are case-insensitive, matching the reader's own {@code upper(table)} matching. */
     private static String normalizeTable(String table) {
         return table.trim().toUpperCase(Locale.ROOT);
+    }
+
+    /* ────────────────────── per-table split files ────────────────────── */
+
+    /**
+     * The file name for one table's split sidecar, e.g. {@code ORDERS.json}. Upper-cased to match
+     * the map's own {@link #normalizeTable} key, and folded to the id alphabet because the table
+     * name is untrusted REST input that {@link ArtifactKey} would otherwise reject.
+     */
+    public static String tableFileName(String table) {
+        return normalizeTable(table).replaceAll("[^A-Za-z0-9._$-]", "_") + ".json";
+    }
+
+    /**
+     * One table's rows out of its own {@code views/<dir>/<TABLE>.json} split, or {@code null} when
+     * it is absent/stale. {@code dir} is {@link #TABLE_JOINS_DIR} or {@link #TABLE_COLUMNS_DIR}.
+     */
+    public JsonNode readTableFile(String name, String dir, String table) {
+        if (table == null || table.isBlank()) return null;
+        return read(name, dir + "/" + tableFileName(table));
+    }
+
+    /**
+     * Writes one table's split sidecar. The lazy backfill uses this — and only this — so a first
+     * access to an uncovered table writes one small file instead of rewriting the whole map.
+     */
+    public boolean writeTableFile(String name, String dir, String table, JsonNode rows, boolean logFailure) {
+        if (table == null || table.isBlank() || rows == null) return false;
+        return write(name, dir + "/" + tableFileName(table), rows, logFailure);
+    }
+
+    /* ────────────────────── complexity variants ────────────────────── */
+
+    /**
+     * The name of the precomputed sidecar for one {@code /complexity/scores} parameter set.
+     *
+     * <p>The default parameters keep {@link #COMPLEXITY} (the shape every existing golden test and
+     * reader already knows). A request matching one of the two precomputed grid neighbours maps to
+     * its named file. Anything else maps to a {@code complexity-<hash>.json} variant keyed by a hash
+     * of the canonical parameters — computed once on demand and cached, capped at
+     * {@link #COMPLEXITY_VARIANT_CAP} (LRU by mtime, pruned by {@link #writeComplexityVariant}).
+     */
+    public static String complexityViewName(String algorithm, double exponent,
+                                            double wLoc, double wTables, double wCallsOut,
+                                            double wCursors, double wDynamicSql, double wDepth,
+                                            double thMedium, double thHigh) {
+        String algo = algorithm == null ? "linear" : algorithm;
+        boolean defaultParams =
+                Double.compare(wLoc, 0.3) == 0 && Double.compare(wTables, 15) == 0
+                        && Double.compare(wCallsOut, 10) == 0 && Double.compare(wCursors, 8) == 0
+                        && Double.compare(wDynamicSql, 20) == 0 && Double.compare(wDepth, 5) == 0
+                        && Double.compare(thMedium, 50) == 0 && Double.compare(thHigh, 150) == 0
+                        && Double.compare(exponent, 1.3) == 0;
+        if (defaultParams && "linear".equalsIgnoreCase(algo)) return COMPLEXITY;
+        if (defaultParams && "balanced".equalsIgnoreCase(algo)) return COMPLEXITY_BALANCED;
+        if (defaultParams && "logarithmic".equalsIgnoreCase(algo)) return COMPLEXITY_LOGARITHMIC;
+        String canonical = algo.toLowerCase(Locale.ROOT) + "|" + exponent + "|" + wLoc + "|" + wTables
+                + "|" + wCallsOut + "|" + wCursors + "|" + wDynamicSql + "|" + wDepth + "|"
+                + thMedium + "|" + thHigh;
+        return COMPLEXITY_VARIANT_PREFIX + hash16(canonical) + ".json";
+    }
+
+    /**
+     * Writes a complexity variant sidecar and prunes the hashed variants to
+     * {@link #COMPLEXITY_VARIANT_CAP} by mtime. The named grid files and {@link #COMPLEXITY} are
+     * never pruned — the cap is on the unbounded custom-parameter space only.
+     */
+    public boolean writeComplexityVariant(String name, String view, JsonNode doc) {
+        boolean ok = write(name, view, doc);
+        if (ok) pruneComplexityVariants(name);
+        return ok;
+    }
+
+    /** Deletes the oldest hashed complexity variants once more than the cap are present. */
+    private void pruneComplexityVariants(String name) {
+        try {
+            ArtifactKey viewsDir = AnalysisPaths.resolveKey(name, VIEWS_DIR);
+            java.util.List<Map.Entry<ArtifactKey, com.analyzer.storage.ArtifactEntry>> variants =
+                    new java.util.ArrayList<>();
+            for (Map.Entry<ArtifactKey, com.analyzer.storage.ArtifactEntry> e
+                    : store.statPrefix(viewsDir).entrySet()) {
+                String leaf = e.getKey().leaf();
+                if (leaf.startsWith(COMPLEXITY_VARIANT_PREFIX) && leaf.endsWith(".json")) {
+                    variants.add(e);
+                }
+            }
+            if (variants.size() <= COMPLEXITY_VARIANT_CAP) return;
+            variants.sort(java.util.Comparator.comparingLong(e -> e.getValue().lastModified()));
+            int excess = variants.size() - COMPLEXITY_VARIANT_CAP;
+            for (int i = 0; i < excess; i++) {
+                store.delete(variants.get(i).getKey());
+            }
+        } catch (Exception e) {
+            log.debug("complexity variant prune {} failed: {}", name, e.getMessage());
+        }
+    }
+
+    /** A short, stable hex digest of {@code s} — the custom-variant cache key. */
+    private static String hash16(String s) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(16);
+            for (int i = 0; i < 8 && i < digest.length; i++) {
+                hex.append(String.format("%02x", digest[i]));
+            }
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 is mandated by the platform; this cannot happen. Fall back to a stable id.
+            return Integer.toHexString(s.hashCode());
+        }
     }
 }

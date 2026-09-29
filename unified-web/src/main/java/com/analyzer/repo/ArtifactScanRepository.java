@@ -207,9 +207,11 @@ public class ArtifactScanRepository implements AnalysisRepository {
             // not a node scan, and the Claude reader has nothing to add to it.
             case PLSQL_TABLES -> staticReader.getTables(name);
             case PLSQL_TABLE_JOINS -> tableView(name,
+                    com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TABLE_JOINS_DIR,
                     com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TABLE_JOINS, query.table(),
                     () -> staticReader.getTableJoins(name, query.table()));
             case PLSQL_TABLE_COLUMNS -> tableView(name,
+                    com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TABLE_COLUMNS_DIR,
                     com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TABLE_COLUMNS, query.table(),
                     () -> staticReader.getTableColumnRefs(name, query.table()));
             case PLSQL_TABLE_COLUMN_DETAIL -> staticReader.getTableColumnDetail(name, query.table());
@@ -231,19 +233,24 @@ public class ArtifactScanRepository implements AnalysisRepository {
     }
 
     /**
-     * One table's rows out of a {@code {table -> rows}} sidecar. An entry present is served as-is;
-     * absent means "not computed yet", so the legacy scan runs and its result is merged into the
-     * sidecar — never a false "this table has no rows".
+     * One table's rows out of its own split file first, then out of the {@code {table -> rows}} map
+     * (backward compat: an analysis written before the split still has only the map), then the
+     * legacy scan. A present file/entry is served as-is; an absent one means "not computed yet", so
+     * the legacy scan runs and its result is written as the <b>one</b> per-table file — never a
+     * whole-map rewrite.
+     *
+     * @param dir the per-table split directory ({@code table-joins} / {@code table-columns})
      */
-    private JsonNode tableView(String name, String view, String table,
+    private JsonNode tableView(String name, String dir, String view, String table,
                                com.plsqlanalyzer.web.parser.service.AnalysisViewStore.IoSupplier<JsonNode> legacy)
             throws IOException {
         if (views == null) return legacy.get();
-        JsonNode cached = views.readTableEntry(name, view, table);
+        JsonNode cached = views.readTableFile(name, dir, table);
+        if (cached == null) cached = views.readTableEntry(name, view, table);
         if (cached != null) return cached;
         JsonNode computed = legacy.get();
         if (computed != null) {
-            views.putTableEntry(name, view, table, computed);
+            views.writeTableFile(name, dir, table, computed, true);
         }
         return computed;
     }

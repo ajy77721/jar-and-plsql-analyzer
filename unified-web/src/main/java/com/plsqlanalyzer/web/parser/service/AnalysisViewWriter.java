@@ -3,7 +3,9 @@ package com.plsqlanalyzer.web.parser.service;
 import com.analyzer.storage.AnalysisRepository;
 import com.analyzer.storage.repo.AnalysisQuery;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.plsqlanalyzer.web.parser.controller.ParserSearchFacets;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -11,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Writes an analysis's precomputed view summaries after {@code AnalysisService.runAnalysis} has
@@ -58,8 +61,12 @@ public class AnalysisViewWriter {
         this.mapper = mapper;
     }
 
-    /** How many facets {@link #writeAll} attempts — 4 node-scan + 2 table maps + complexity + stats. */
-    public static final int VIEW_COUNT = 8;
+    /**
+     * How many facets {@link #writeAll} attempts — 4 node-scan + 2 table maps + complexity + stats
+     * + callers map + search facets. The per-table split files and the non-default complexity
+     * variants are members of their facets, not separate counts.
+     */
+    public static final int VIEW_COUNT = 10;
 
     /**
      * Computes and writes every parser-side view summary for {@code name}. Never throws — each view
@@ -89,16 +96,20 @@ public class AnalysisViewWriter {
         if (facet(name, AnalysisQuery.Dataset.PLSQL_JOINS, verbose)) written++;
 
         // The two table-scoped facets, grouped in one scan each — the endpoint is per-table, so a
-        // map is the only shape that serves every table without re-scanning per table.
+        // map is the only shape that serves every table without re-scanning per table. Beside each
+        // map, one small split file per table, so the per-table endpoint reads one file and a lazy
+        // backfill writes one file (not the whole map).
         try {
-            if (views.writeTableMap(name, AnalysisViewStore.TABLE_JOINS,
-                    staticReader.getAllTableJoins(name), verbose)) written++;
+            Map<String, JsonNode> joins = staticReader.getAllTableJoins(name);
+            if (views.writeTableMap(name, AnalysisViewStore.TABLE_JOINS, joins, verbose)) written++;
+            writeTableFiles(name, AnalysisViewStore.TABLE_JOINS_DIR, joins, verbose);
         } catch (Exception e) {
             logFacet(name, AnalysisViewStore.TABLE_JOINS, e, verbose);
         }
         try {
-            if (views.writeTableMap(name, AnalysisViewStore.TABLE_COLUMNS,
-                    staticReader.getAllTableColumnRefs(name), verbose)) written++;
+            Map<String, JsonNode> columns = staticReader.getAllTableColumnRefs(name);
+            if (views.writeTableMap(name, AnalysisViewStore.TABLE_COLUMNS, columns, verbose)) written++;
+            writeTableFiles(name, AnalysisViewStore.TABLE_COLUMNS_DIR, columns, verbose);
         } catch (Exception e) {
             logFacet(name, AnalysisViewStore.TABLE_COLUMNS, e, verbose);
         }
@@ -109,6 +120,7 @@ public class AnalysisViewWriter {
                     name, new ComplexityScoringService.Weights(),
                     new ComplexityScoringService.Thresholds(), DEFAULT_ALGORITHM, DEFAULT_EXPONENT);
             if (writeBody(name, AnalysisViewStore.COMPLEXITY, response, verbose)) written++;
+            writeComplexityVariants(name, verbose);
         } catch (Exception e) {
             logFacet(name, AnalysisViewStore.COMPLEXITY, e, verbose);
         }
@@ -121,30 +133,81 @@ public class AnalysisViewWriter {
             logFacet(name, AnalysisViewStore.SUMMARY_STATS, e, verbose);
         }
 
-        // The call trees for the analysis's entry points, built once here instead of synthesised
-        // from the three whole files on every request. Best-effort and capped; any entry point not
-        // written is backfilled by the read path on first access.
-        writeCallTrees(name);
+        // The raw search-facet arrays /global-search filters — the same reads the controller makes,
+        // stored once so a search stops re-reading the tables index and every node file per request.
+        try {
+            ObjectNode facets = ParserSearchFacets.build(repository, mapper, name);
+            if (views.writeSearch(name, facets, verbose)) written++;
+        } catch (Exception e) {
+            logFacet(name, AnalysisViewStore.SEARCH, e, verbose);
+        }
+
+        // The call trees and callers for the analysis's entry points, built once here instead of
+        // synthesised from the three whole files on every request. Best-effort and capped; any entry
+        // point not written is backfilled by the read path on first access.
+        if (writeCallTrees(name, verbose)) written++;
 
         return written;
     }
 
     /**
+     * Writes one small split file per table beside the whole-map sidecar. Best-effort per table: one
+     * unwritable table does not stop the rest, and the map still serves every table either way.
+     */
+    private void writeTableFiles(String name, String dir, Map<String, JsonNode> byTable, boolean verbose) {
+        for (Map.Entry<String, JsonNode> e : byTable.entrySet()) {
+            try {
+                views.writeTableFile(name, dir, e.getKey(), e.getValue(), verbose);
+            } catch (Exception ex) {
+                log.debug("table split precompute {} / {} / {} failed: {}", name, dir, e.getKey(),
+                        ex.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Precomputes the {@code /complexity/scores} bodies for the two precomputed grid neighbours —
+     * the other algorithms {@code complexity.js} offers, at the endpoint's default weights,
+     * thresholds and exponent. Custom parameters are not precomputed: the endpoint computes them
+     * once and caches a hashed variant. Never throws.
+     */
+    private void writeComplexityVariants(String name, boolean verbose) {
+        for (String algorithm : new String[]{"balanced", "logarithmic"}) {
+            try {
+                ResponseEntity<Object> response = complexityScoringService.getScores(
+                        name, new ComplexityScoringService.Weights(),
+                        new ComplexityScoringService.Thresholds(), algorithm, DEFAULT_EXPONENT);
+                String view = AnalysisViewStore.complexityViewName(algorithm, DEFAULT_EXPONENT,
+                        0.3, 15, 10, 8, 20, 5, 50, 150);
+                writeBody(name, view, response, verbose);
+            } catch (Exception e) {
+                logFacet(name, AnalysisViewStore.COMPLEXITY_VARIANT_PREFIX + algorithm, e, verbose);
+            }
+        }
+    }
+
+    /**
      * Precomputes the call-tree sidecar for each of {@link StaticAnalysisReader#callTreeEntryPoints}
-     * — the roots plus their depth-1 callees, capped. Each tree is the exact document the endpoint
-     * returns for that node, built through {@link StaticAnalysisReader#getCallTree(String, String)}
-     * (the same synthesis the read path uses), so serving the sidecar is byte-identical.
+     * — the roots plus their depth-1 callees, capped — and, in the same pass, the
+     * {@code views/callers.json} map for those same entry points. Each tree and each callers array
+     * is the exact document the endpoint returns for that node, built through the same reader
+     * synthesis the read path uses, so serving a sidecar is byte-identical.
+     *
+     * <p>The callers map is built with one index/call-graph/id-map read shared across every entry
+     * point (see {@link StaticAnalysisReader#getCallersForNodes}), not one graph parse per node.
      *
      * <p>Never throws: one node's failure (or the entry-point selection itself) is logged and the
      * remaining nodes still run.
+     *
+     * @return true when the callers sidecar was written
      */
-    private void writeCallTrees(String name) {
+    private boolean writeCallTrees(String name, boolean verbose) {
         List<String> entryPoints;
         try {
             entryPoints = staticReader.callTreeEntryPoints(name);
         } catch (Exception e) {
             log.warn("call-tree precompute {} failed to select entry points: {}", name, e.getMessage());
-            return;
+            return false;
         }
         int written = 0;
         for (String nodeId : entryPoints) {
@@ -160,6 +223,13 @@ public class AnalysisViewWriter {
         }
         if (written > 0) {
             log.debug("call-tree precompute {} wrote {} sidecar(s)", name, written);
+        }
+
+        try {
+            return views.writeCallers(name, staticReader.getCallersForNodes(name, entryPoints), verbose);
+        } catch (Exception e) {
+            logFacet(name, AnalysisViewStore.CALLERS, e, verbose);
+            return false;
         }
     }
 

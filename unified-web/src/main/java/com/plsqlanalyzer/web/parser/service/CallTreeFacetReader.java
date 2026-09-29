@@ -215,12 +215,39 @@ class CallTreeFacetReader {
     }
 
     JsonNode getCallers(String name, String nodeId, JsonNode suppliedCallGraph) throws IOException {
-        ObjectMapper mapper = r.mapper;
         JsonNode index = r.getIndex(name);
         JsonNode callGraph = suppliedCallGraph != null ? suppliedCallGraph : r.getCallGraph(name);
-        JsonNode edges = callGraph.get("edges");
-        Map<String, String> shortToFull = r.loadIdMap(name);
+        return callersFor(nodeId, callGraph, r.loadIdMap(name), indexNodeMetadata(index));
+    }
 
+    /**
+     * The callers arrays for several node ids in <b>one</b> pass — the index, call graph and id map
+     * are read once and shared, so the save-time writer can precompute the entry points' callers
+     * without re-reading {@code api/call_graph.json} per node. Each value is byte-for-byte
+     * {@link #getCallers(String, String)}'s result for that id.
+     */
+    Map<String, JsonNode> getCallersForNodes(String name, List<String> nodeIds) throws IOException {
+        JsonNode index = r.getIndex(name);
+        JsonNode callGraph;
+        try {
+            callGraph = r.getCallGraph(name);
+        } catch (IOException e) {
+            // No api/call_graph.json — an old run, or one whose crawl recorded no edges. Every
+            // node's callers list is empty then, which is the correct reading of "nothing calls it".
+            callGraph = null;
+        }
+        Map<String, String> shortToFull = r.loadIdMap(name);
+        Map<String, JsonNode> nodeMetadata = indexNodeMetadata(index);
+        Map<String, JsonNode> out = new LinkedHashMap<>();
+        for (String nodeId : nodeIds) {
+            if (nodeId == null || nodeId.isBlank()) continue;
+            out.put(nodeId, callersFor(nodeId, callGraph, shortToFull, nodeMetadata));
+        }
+        return out;
+    }
+
+    /** {@code nodeId} -> its index node, for every node with a non-blank id. */
+    private static Map<String, JsonNode> indexNodeMetadata(JsonNode index) {
         Map<String, JsonNode> nodeMetadata = new HashMap<>();
         JsonNode nodes = index.get("nodes");
         if (nodes != null && nodes.isArray()) {
@@ -229,7 +256,14 @@ class CallTreeFacetReader {
                 if (fullId != null) nodeMetadata.put(fullId, n);
             }
         }
+        return nodeMetadata;
+    }
 
+    /** The {@code /callers} array for one node over prebuilt index metadata and call-graph edges. */
+    private JsonNode callersFor(String nodeId, JsonNode callGraph, Map<String, String> shortToFull,
+                                Map<String, JsonNode> nodeMetadata) {
+        ObjectMapper mapper = r.mapper;
+        JsonNode edges = callGraph == null ? null : callGraph.get("edges");
         String resolvedId = nav.resolveToFullId(nodeId, shortToFull, nodeMetadata.keySet());
 
         ArrayNode result = mapper.createArrayNode();

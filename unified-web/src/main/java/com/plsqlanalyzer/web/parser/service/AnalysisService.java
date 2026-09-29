@@ -324,8 +324,20 @@ public class AnalysisService {
         return readerFactory.getReader(name).getCallTree(name, nodeId, maxDepth);
     }
 
+    /**
+     * The {@code /call-tree/{nodeId}/callers} array — served from the {@code views/callers.json}
+     * sidecar (the entry points the save-time writer precomputed) when it has an entry for
+     * {@code nodeId}, otherwise synthesised from {@code api/index.json} + {@code api/call_graph.json}
+     * exactly as before and written back into the map so the next request is served from it. Same
+     * staleness contract as {@link #getCallTree}: a sidecar older than {@code api/index.json} is
+     * ignored, and the correction path's {@code invalidate} drops the whole {@code views/} prefix.
+     */
     public JsonNode getCallers(String name, String nodeId) throws IOException {
-        return readerFactory.getReader(name).getCallers(name, nodeId);
+        JsonNode cached = viewStore == null ? null : viewStore.readCallers(name, nodeId);
+        if (cached != null) return cached;
+        JsonNode computed = readerFactory.getReader(name).getCallers(name, nodeId);
+        if (computed != null && viewStore != null) viewStore.putCallersEntry(name, nodeId, computed);
+        return computed;
     }
 
     /** Clear the in-memory synthesized cache: one analysis if {@code name} given, else all. */

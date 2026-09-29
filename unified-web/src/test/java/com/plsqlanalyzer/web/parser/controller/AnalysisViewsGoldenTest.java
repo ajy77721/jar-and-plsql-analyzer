@@ -184,13 +184,25 @@ class AnalysisViewsGoldenTest {
      * again (served from the sidecar) and requires the two responses to be byte-identical.
      */
     private void golden(String view, Supplier<ResponseEntity<?>> call) throws IOException {
+        golden(view, call, ArtifactKey.of(AnalysisPaths.PARSE_ROOT)
+                .resolve(NAME.split("~")).resolve("views", view));
+    }
+
+    /** As {@link #golden(String, Supplier)} for a sidecar at an explicit key (e.g. a table split). */
+    private void golden(String label, Supplier<ResponseEntity<?>> call, ArtifactKey sidecar)
+            throws IOException {
         views.invalidate(NAME);
         byte[] legacy = bytes(call.get());
-        assertTrue(store.exists(ArtifactKey.of(AnalysisPaths.PARSE_ROOT)
-                        .resolve(NAME.split("~")).resolve("views", view)),
-                "sidecar " + view + " was not written on the legacy call");
+        assertTrue(store.exists(sidecar),
+                "sidecar " + label + " was not written on the legacy call");
         byte[] cached = bytes(call.get());
-        assertArrayEquals(legacy, cached, "sidecar response differs from legacy for " + view);
+        assertArrayEquals(legacy, cached, "sidecar response differs from legacy for " + label);
+    }
+
+    /** The per-table split file for one table, e.g. {@code views/table-joins/ORDERS.json}. */
+    private ArtifactKey tableSidecar(String dir, String table) {
+        return AnalysisPaths.resolveKey(NAME, "views/" + dir + "/"
+                + AnalysisViewStore.tableFileName(table));
     }
 
     @Test
@@ -250,40 +262,104 @@ class AnalysisViewsGoldenTest {
     }
 
     @Test
+    void complexityBalancedVariantIsByteIdenticalFromSidecar() throws Exception {
+        writeFixture();
+        golden(AnalysisViewStore.COMPLEXITY_BALANCED,
+                () -> controller.getComplexityScores(NAME, 0.3, 15, 10, 8, 20, 5, 50, 150,
+                        "balanced", 1.3));
+    }
+
+    /**
+     * A custom-parameter request that is neither the default nor a grid neighbour is computed once
+     * and cached as a hashed variant; the second call is byte-identical from that file.
+     */
+    @Test
+    void complexityCustomVariantIsByteIdenticalFromSidecar() throws Exception {
+        writeFixture();
+        String view = AnalysisViewStore.complexityViewName("linear", 1.3, 0.3, 16, 10, 8, 20, 5,
+                50, 150);
+        assertTrue(view.startsWith(AnalysisViewStore.COMPLEXITY_VARIANT_PREFIX));
+        golden(view, () -> controller.getComplexityScores(NAME, 0.3, 16, 10, 8, 20, 5, 50, 150,
+                "linear", 1.3));
+    }
+
+    @Test
     void summaryStatsDefaultIsByteIdenticalFromSidecar() throws Exception {
         writeFixture();
         golden(AnalysisViewStore.SUMMARY_STATS,
                 () -> controller.getSummaryStats(NAME, null, null, null));
     }
 
+    /* ------------------------------ callers ------------------------------ */
+
+    /**
+     * {@code /call-tree/{nodeId}/callers} served from {@code views/callers.json} must be
+     * byte-identical to the call-graph synthesis it replaces, and an absent sidecar must backfill
+     * the same array into the map.
+     */
+    @Test
+    void callersIsByteIdenticalFromSidecar() throws Exception {
+        writeFixture();
+        golden(AnalysisViewStore.CALLERS, () -> controller.getCallers(NAME, "ERP$P2"));
+    }
+
+    /* --------------------------- global search --------------------------- */
+
+    /**
+     * {@code /global-search} served from the {@code views/search.json} raw-facet sidecar must be
+     * byte-identical to the 7-artifact scan, since only the unfiltered source rows are cached and
+     * the {@code q} filter runs identically either way.
+     */
+    @Test
+    void globalSearchIsByteIdenticalFromSidecar() throws Exception {
+        writeFixture();
+        golden(AnalysisViewStore.SEARCH,
+                () -> controller.getSearch(NAME, "P1", null, null, null, null, null));
+    }
+
     @Test
     void tableJoinsEndpointIsByteIdenticalFromSidecar() throws Exception {
         writeFixture();
-        golden(AnalysisViewStore.TABLE_JOINS,
-                () -> tableController.tableJoins(NAME, "ORDERS", null, null, null, null, null, null,
-                        null, null));
+        golden("table-joins/ORDERS", () -> tableController.tableJoins(NAME, "ORDERS", null, null,
+                null, null, null, null, null, null), tableSidecar(AnalysisViewStore.TABLE_JOINS_DIR, "ORDERS"));
     }
 
     @Test
     void tableColumnsEndpointIsByteIdenticalFromSidecar() throws Exception {
         writeFixture();
-        golden(AnalysisViewStore.TABLE_COLUMNS,
-                () -> tableController.tableColumns(NAME, "ORDERS", null, null, null, null, null, null,
-                        null, null, null));
+        golden("table-columns/ORDERS", () -> tableController.tableColumns(NAME, "ORDERS", null, null,
+                null, null, null, null, null, null, null),
+                tableSidecar(AnalysisViewStore.TABLE_COLUMNS_DIR, "ORDERS"));
     }
 
     @Test
     void tableJoinsSummaryIsByteIdenticalFromSidecar() throws Exception {
         writeFixture();
-        golden(AnalysisViewStore.TABLE_JOINS,
-                () -> tableController.tableJoinsSummary(NAME, "ORDERS", null, null));
+        golden("table-joins/ORDERS", () -> tableController.tableJoinsSummary(NAME, "ORDERS", null, null),
+                tableSidecar(AnalysisViewStore.TABLE_JOINS_DIR, "ORDERS"));
     }
 
     @Test
     void tableColumnsSummaryIsByteIdenticalFromSidecar() throws Exception {
         writeFixture();
-        golden(AnalysisViewStore.TABLE_COLUMNS,
-                () -> tableController.tableColumnsSummary(NAME, "ORDERS", null, null));
+        golden("table-columns/ORDERS", () -> tableController.tableColumnsSummary(NAME, "ORDERS", null, null),
+                tableSidecar(AnalysisViewStore.TABLE_COLUMNS_DIR, "ORDERS"));
+    }
+
+    /**
+     * The per-table split's own lazy backfill writes only the one table's file — the legacy scan's
+     * result — and the whole-map sidecar is never created by the read path.
+     */
+    @Test
+    void tableBackfillWritesOnlyThePerTableFile() throws Exception {
+        writeFixture();
+        views.invalidate(NAME);
+        bytes(tableController.tableJoins(NAME, "ORDERS", null, null, null, null, null, null, null, null));
+        assertTrue(store.exists(tableSidecar(AnalysisViewStore.TABLE_JOINS_DIR, "ORDERS")),
+                "the per-table split file must be written");
+        assertTrue(!store.exists(AnalysisPaths.resolveKey(NAME,
+                        "views/" + AnalysisViewStore.TABLE_JOINS)),
+                "the lazy backfill must not rewrite the whole table map");
     }
 
     @Test

@@ -278,6 +278,15 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         return callTreeFacet.getCallers(name, nodeId, suppliedCallGraph);
     }
 
+    /**
+     * The callers arrays for several node ids in one pass, sharing the index/call-graph/id-map read
+     * — the save-time writer's precompute of the entry points' callers. Each value equals
+     * {@link #getCallers(String, String)} for that id.
+     */
+    public Map<String, JsonNode> getCallersForNodes(String name, List<String> nodeIds) throws IOException {
+        return callTreeFacet.getCallersForNodes(name, nodeIds);
+    }
+
     // --- helpers (package-visible for reuse by Claude reader) ---
 
     Map<String, String> loadIdMap(String name) {

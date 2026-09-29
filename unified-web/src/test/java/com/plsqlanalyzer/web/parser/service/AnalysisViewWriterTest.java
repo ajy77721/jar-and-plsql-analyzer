@@ -108,9 +108,37 @@ class AnalysisViewWriterTest {
         for (String view : new String[]{AnalysisViewStore.SEQUENCES, AnalysisViewStore.CURSORS,
                 AnalysisViewStore.DYNAMIC_SQL, AnalysisViewStore.JOINS_SUMMARY,
                 AnalysisViewStore.TABLE_JOINS, AnalysisViewStore.TABLE_COLUMNS,
-                AnalysisViewStore.COMPLEXITY, AnalysisViewStore.SUMMARY_STATS}) {
+                AnalysisViewStore.COMPLEXITY, AnalysisViewStore.SUMMARY_STATS,
+                AnalysisViewStore.CALLERS, AnalysisViewStore.SEARCH}) {
             assertTrue(store.exists(viewKey(view)), "missing sidecar " + view);
         }
+    }
+
+    /** The per-table split files are written beside the maps at save time. */
+    @Test
+    void writeAllWritesThePerTableSplits() throws Exception {
+        writer.writeAll(NAME);
+        for (String table : new String[]{"ORDERS", "CUSTOMER"}) {
+            assertTrue(store.exists(AnalysisPaths.resolveKey(NAME, "views/"
+                            + AnalysisViewStore.TABLE_JOINS_DIR + "/"
+                            + AnalysisViewStore.tableFileName(table))),
+                    "missing per-table joins split for " + table);
+        }
+        assertTrue(store.exists(AnalysisPaths.resolveKey(NAME, "views/"
+                        + AnalysisViewStore.TABLE_COLUMNS_DIR + "/"
+                        + AnalysisViewStore.tableFileName("ORDERS"))),
+                "missing per-table columns split for ORDERS");
+        // The split equals the map entry it mirrors.
+        assertArrayEquals(M.writeValueAsBytes(views.readTableEntry(NAME, AnalysisViewStore.TABLE_JOINS, "ORDERS")),
+                M.writeValueAsBytes(views.readTableFile(NAME, AnalysisViewStore.TABLE_JOINS_DIR, "ORDERS")));
+    }
+
+    /** The two precomputed grid neighbours are written beside the default complexity body. */
+    @Test
+    void writeAllWritesTheComplexityGridVariants() {
+        writer.writeAll(NAME);
+        assertTrue(store.exists(viewKey(AnalysisViewStore.COMPLEXITY_BALANCED)));
+        assertTrue(store.exists(viewKey(AnalysisViewStore.COMPLEXITY_LOGARITHMIC)));
     }
 
     @Test
@@ -199,6 +227,30 @@ class AnalysisViewWriterTest {
         assertArrayEquals(M.writeValueAsBytes(staticReader.getCallTree(NAME, "ERP$P1")),
                 M.writeValueAsBytes(views.readCallTree(NAME, "ERP$P1")),
                 "precomputed call tree differs from the synthesis it replaces");
+
+        // The same pass writes the callers map for those entry points, each entry equal to the
+        // /call-tree/{id}/callers array the endpoint synthesises.
+        assertTrue(store.exists(viewKey(AnalysisViewStore.CALLERS)), "callers sidecar missing");
+        for (String nodeId : new String[]{"ERP$P1", "ERP$P2"}) {
+            assertArrayEquals(M.writeValueAsBytes(staticReader.getCallers(NAME, nodeId)),
+                    M.writeValueAsBytes(views.readCallers(NAME, nodeId)),
+                    "precomputed callers differ for " + nodeId);
+        }
+    }
+
+    /**
+     * The search sidecar holds exactly the raw facet rows the controller's own scan would build, so
+     * serving from it and filtering afterwards is byte-identical.
+     */
+    @Test
+    void searchSidecarMatchesTheControllerScan() throws IOException {
+        writer.writeAll(NAME);
+        JsonNode cached = views.readSearch(NAME);
+        assertNotNull(cached, "search sidecar missing");
+        JsonNode expected = com.plsqlanalyzer.web.parser.controller.ParserSearchFacets
+                .build(repository, M, NAME);
+        assertArrayEquals(M.writeValueAsBytes(expected), M.writeValueAsBytes(cached),
+                "search sidecar differs from the raw facet scan");
     }
 
     private ArtifactKey callTreeKey(String nodeId) {
