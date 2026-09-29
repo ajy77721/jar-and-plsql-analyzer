@@ -31,14 +31,14 @@
         <file>${LOG_PATH}/unified-analyzer.log</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
             <!--
-                The .gz suffix makes logback compress each rolled file itself, so LogArchiveService
-                only has to ship it. Rolling at 20MB is what triggers the hand-off: the active file
-                is never touched, because logback holds it open and only a rolled file is complete.
+                Self-contained rotation (no shipping): rolling at 10MB archives the active file and
+                maxHistory=1 deletes the previous rolled file as soon as a newer one appears — only
+                the current file plus at most one rolled .gz ever exist, nothing is uploaded.
             -->
             <fileNamePattern>${LOG_PATH}/unified-analyzer.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>20MB</maxFileSize>
-            <maxHistory>5</maxHistory>
-            <totalSizeCap>50MB</totalSizeCap>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>1</maxHistory>
+            <totalSizeCap>20MB</totalSizeCap>
         </rollingPolicy>
         <encoder>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5level [%thread] %logger{36} - %msg%n</pattern>
