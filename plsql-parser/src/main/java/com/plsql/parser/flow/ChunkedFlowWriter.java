@@ -36,6 +36,12 @@ public class ChunkedFlowWriter {
     private final ObjectMapper mapper;
     private final AtomicInteger chunkCounter = new AtomicInteger(0);
 
+    /**
+     * Layout manifest (plan 1f) — built incrementally as this writer emits artifacts, written last.
+     * Fed lengths and counts the write pass already knows; it never re-reads a large file.
+     */
+    private final LayoutManifest manifest;
+
     private final Map<String, String> progressMap = new LinkedHashMap<>();
     private List<Map<String, Object>> discoveredTriggers = new ArrayList<>();
 
@@ -77,15 +83,26 @@ public class ChunkedFlowWriter {
         // restores it for a debugging run.
         if (ArtifactFormatting.pretty()) mapper.enable(SerializationFeature.INDENT_OUTPUT);
 
+        // Initialised before the first write so every artifact this writer emits is registered.
+        this.manifest = new LayoutManifest(buildKey.toString());
+
         writeString(tablesKey, "{}");
         writeProgress();
     }
 
-    /** Serialises {@code value} straight into the store — never buffered as a byte[] here. */
-    private void writeJson(ArtifactKey key, Object value) throws IOException {
-        try (OutputStream out = store.write(key)) {
+    /**
+     * Serialises {@code value} straight into the store — never buffered as a byte[] here. The byte
+     * count is captured on the way out (no second pass, no stat) and recorded in the layout
+     * manifest.
+     */
+    private long writeJson(ArtifactKey key, Object value) throws IOException {
+        long bytes;
+        try (CountingOutputStream out = new CountingOutputStream(store.write(key))) {
             mapper.writeValue(out, value);
+            bytes = out.count();
         }
+        manifest.recordArtifact(key, bytes);
+        return bytes;
     }
 
     private <T> T readJson(ArtifactKey key, Class<T> type) throws IOException {
@@ -95,9 +112,11 @@ public class ChunkedFlowWriter {
     }
 
     private void writeString(ArtifactKey key, String content) throws IOException {
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
         try (OutputStream out = store.write(key)) {
-            out.write(content.getBytes(StandardCharsets.UTF_8));
+            out.write(bytes);
         }
+        manifest.recordArtifact(key, bytes.length);
     }
 
     private String readString(ArtifactKey key) throws IOException {
@@ -504,7 +523,7 @@ public class ChunkedFlowWriter {
      * LightNode}, so no extension was needed this time (unlike {@code writeTableIndex}'s own
      * {@code cursors} finding).
      */
-    private void writeStatementIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
+    private int writeStatementIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
         final int MAX_SQL_TEXT = 2000;
 
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -659,13 +678,21 @@ public class ChunkedFlowWriter {
             }
         }
 
-        Map<String, Object> doc = new LinkedHashMap<>();
-        doc.put("totalStatements", rows.size());
-        doc.put("statementsWithColumns", withColumns);
-        doc.put("statements", rows);
-        writeJson(apiDir.resolve("statements", "index.json"), doc);
+        // Plan 1e — the row offsets are captured as this same document is written, so paging can
+        // seek to row N instead of parsing the whole file. No second pass, no re-read.
+        Map<String, Object> leading = new LinkedHashMap<>();
+        leading.put("totalStatements", rows.size());
+        leading.put("statementsWithColumns", withColumns);
+        ArtifactKey docKey = apiDir.resolve("statements", "index.json");
+        ArtifactKey offsetsKey = apiDir.resolve("statements", "index.offsets.json");
+        RowArrayOffsetWriter.Result written =
+                RowArrayOffsetWriter.write(store, docKey, offsetsKey, leading, "statements", rows);
+        manifest.recordArtifact(docKey, written.docLength(), (long) written.rowCount());
+        manifest.recordArtifact(offsetsKey, written.offsetsLength(), (long) written.rowCount());
         System.err.println("[ChunkedFlowWriter] statements/index.json: " + rows.size()
-                + " rows, " + withColumns + " with column detail");
+                + " rows, " + withColumns + " with column detail"
+                + " (+index.offsets.json, " + written.offsetsLength() + " bytes)");
+        return rows.size();
     }
 
     @SuppressWarnings("unchecked")
@@ -1008,7 +1035,9 @@ public class ChunkedFlowWriter {
         indexRoot.put("dbCallCount", result.getDbCallCount());
         indexRoot.put("nodes", indexNodes);
 
-        writeJson(apiDir.resolve("index.json"), indexRoot);
+        ArtifactKey indexKey = apiDir.resolve("index.json");
+        long indexBytes = writeJson(indexKey, indexRoot);
+        manifest.recordArtifact(indexKey, indexBytes, (long) indexNodes.size());
 
         // ── 2. nodes/{nodeId}.json: full detail per node (on-demand) ──
         for (ResolvedNode rn : resolvedNodes) {
@@ -1299,7 +1328,7 @@ public class ChunkedFlowWriter {
         // `nodes` list unchanged (this remains additive, not a replacement of that).
 
         // ── 3. tables/index.json: all tables, who uses them, which operations ──
-        writeTableIndex(apiDir, lightNodes);
+        int tableCount = writeTableIndex(apiDir, lightNodes);
 
         // ── 4. call_graph.json: deduplicated edges for graph rendering ──
         writeCallGraph(apiDir, edges, cycles);
@@ -1311,10 +1340,28 @@ public class ChunkedFlowWriter {
         // map or the full FlowNode map.
         writeNodeIdMap(apiDir, nodeIndex);
 
-        // ── 6. statements/index.json: one row per statement, for cross-analysis search ──
-        writeStatementIndex(apiDir, lightNodes);
+        // ── 6. statements/index.json (+ index.offsets.json): one row per statement ──
+        int statementCount = writeStatementIndex(apiDir, lightNodes);
+
+        // ── 7. manifest.json: written LAST, after index.json (the staleness anchor) ──
+        // The routing artifact every API can use to answer in one small read. Counts are the ones
+        // this pass already computed; nothing is re-read to produce it.
+        manifest.setCount("nodes", lightNodes.size());
+        manifest.setCount("tables", tableCount);
+        manifest.setCount("statements", statementCount);
+        manifest.setCount("edges", edges.size());
+        writeManifest();
 
         System.err.println("[ChunkedFlowWriter] API files written: " + apiDir);
+    }
+
+    /**
+     * Writes {@code api/manifest.json} (plan 1f). Called at the end of the API write and again after
+     * the resolver data, so the manifest always reflects the most recent write and stays the last
+     * artifact committed.
+     */
+    public void writeManifest() throws IOException {
+        manifest.writeTo(store, buildKey.resolve("api", "manifest.json"));
     }
 
     @SuppressWarnings("unchecked")
@@ -1662,7 +1709,7 @@ public class ChunkedFlowWriter {
     }
 
     @SuppressWarnings("unchecked")
-    private void writeTableIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
+    private int writeTableIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
         ArtifactKey tablesDir = apiDir.resolve("tables");
 
         Map<String, String> tableObjectTypes = new LinkedHashMap<>();
@@ -1883,7 +1930,10 @@ public class ChunkedFlowWriter {
         tableIndex.put("operationSummary", opSummary);
         tableIndex.put("tables", tableList);
 
-        writeJson(tablesDir.resolve("index.json"), tableIndex);
+        ArtifactKey key = tablesDir.resolve("index.json");
+        long bytes = writeJson(key, tableIndex);
+        manifest.recordArtifact(key, bytes, (long) tableList.size());
+        return tableList.size();
     }
 
     /**
@@ -2236,6 +2286,10 @@ public class ChunkedFlowWriter {
         writeJson(resolverDir.resolve("q4_direct_dependencies.json"), resolver.exportDirectDependencies());
         writeJson(resolverDir.resolve("q3_reverse_dependencies.json"), resolver.exportReverseDependencies());
         writeJson(resolverDir.resolve("q1_ambiguous_objects.json"), resolver.exportAmbiguousObjects());
+
+        // Resolver artifacts are written after writeFinalResult, so refresh the manifest to include
+        // them — it stays the last artifact committed.
+        writeManifest();
 
         System.err.println("[ChunkedFlowWriter] Resolver data written to: " + resolverDir);
     }
