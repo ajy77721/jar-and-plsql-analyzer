@@ -63,10 +63,11 @@ L4. THE INVARIANT       when work moves to another thread, the snapshot moves WI
 - [x] Batch-1: 7 silent wrong-bucket async sites — commit 378f78c
 - [x] Batch-2: 5 feature-broken background jobs — commit 64b34f9
 - [x] Source-enrich decompile reads + jar-read-once — commit 407a169
-- [ ] A: routing never silently falls back (I3) — agent A, in flight
-- [ ] B: connect-guard on all work endpoints + per-user cache keys + ownership (I2, I4) — agent B, in flight
-- [ ] C: prefetch context + catch-path writes + prompt static removal (I1, I4) — agent C, in flight
-- [ ] D: auto-reconnect on login (I5) — agent D, in flight
+- [x] A: routing never silently falls back (I3) — 7da7442 (16 new tests)
+- [x] B: connect-guard on all work endpoints + per-user cache keys + ownership (I2, I4) — 6bf85a9 (ConnectionGuard, 7 tests)
+- [x] C: prefetch context + catch-path writes + prompt static removal (I1, I4) — 167097f
+- [x] D: auto-reconnect on login (I5) — 93aebf2 (9 new tests)
+- [x] Exception advice surfaces the real reason (`reason` field) + IO-gate budget 12→10 — 12c5fb4
 - [ ] Full reactor suite (3,452+ tests) green on the merged tree
 - [ ] Staging deploy + live log verification (connect → upload → 5.6 fast → sources visible)
 - [ ] Multi-user spot check: two sessions concurrent uploads (per-entry credential test exists; verify live)
