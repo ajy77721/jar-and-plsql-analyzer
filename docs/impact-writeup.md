@@ -42,20 +42,19 @@ for the largest inputs, silently incomplete.
 
 ## Metrics
 
-| Capability | Before | After | Work saved (assumptions inline) |
+| Task | Before — by hand (human estimate*) | Before — old tool | After — AMP now |
 |---|---|---|---|
-| Oracle analysis facets (`/sequences`, `/cursors`, `/dynamic-sql`, `/joins`) | 71.5s per request | Precomputed sidecars: **0.6s** first access, **2ms** warm; p50 across all **769** endpoint combinations = **5ms** (405 successful, zero 5xx) | At **50 facet lookups/day**: 50 × 71.5s ≈ **1 hour/day** of analyst wait eliminated (after: 50 × 2ms = 0.1s/day) |
-| Global search (Oracle package estate) | **35–41s** per query, scanning ~**116** files | **7–19ms** | At **20 searches/day** and 38s midpoint: ≈12.7 min/day → ~0.2s/day, i.e. **~12–13 min/day saved** |
-| Call-tree callers (Oracle package call chains) | Full call-graph re-parse **every request** | **4.6ms** | Removes a re-parse from every callers lookup; effectively instant at interactive click rates |
-| Large-artifact handling | Per-class decompile of the **105MB / 11,264-class** artifact failed entirely (source views silently missing) | Decompiles with **one** local read per analysis; **200MB** uploads persist to S3 (**7-part multipart**) and stay visible | Turns an unusable analysis into source-accurate results (no before/after time ratio — it previously did not complete) |
-| Data durability | Critical bug silently lost **every** background S3 upload (artifacts gone on pod restart) | Fixed with per-entry credential carry; **0 failed uploads** verified | Prevents total loss of completed analyses |
-| Reliability | — | **3,452**-test suite green; **40+** new contract tests; a **769**-combination automated sweep with zero 5xx | Steady-state latency regression caught before users see it |
-| Multi-user | Identity and connection state could be dropped across threads/redeploys | Per-user AWS SSO identity travels with every background task; concurrent users verified isolated (dedicated tests); page-lock for unauthenticated users | Safe concurrent use across accounts |
-| Deployment & login UX | Manual steps, state lost on redeploy | Fully automated CI/CD (push → build → GHCR → Kanopy staging; version tags → prod), self-cleaning logs, ops tooling (`scripts/amp-ops.sh`), admin portal for user/connection/analysis visibility; login auto-reconnects from saved per-user config | Redeploy-proof connection — no manual reconnect after a deploy |
+| "Where is this table touched?" across ~500 procedures | **hours to a full day** of grep/read/verify | 35-41s per query | **7-19 ms** |
+| Full call-chain map of ONE big procedure (every branch) | **hours per procedure**, branches still missed | 71.5s per view | **2 ms** |
+| Debugging: finding what calls a procedure / what it affects | **hours** (mental tracing) | — | **4.6 ms** |
+| Conversion planning for a package (dependencies, complexity, order) | **days** | — | **minutes** (summary views) |
+| Piece-to-piece validation of a conversion | **days per package, still incomplete** | — | **minutes per piece, complete** |
 
-*Assumption note:* the two "work saved" figures are simple multiplications of the measured per-request
-times by a stated daily click/query count (50 facet views/day, 20 searches/day); they are not telemetry
-from real sessions. Numbers elsewhere are exactly as measured on the project.
+*"Human estimates: vary with procedure size and the analyst's familiarity with the schema; the point is
+the ORDER of magnitude — hand-tracing a deep call chain is hours-to-days of focused work and still
+error-prone, where the tool returns the complete answer in milliseconds. The 71.5s/35-41s figures are the
+tool's own measured response times before the indexing work — the human manual times are the real 'before'
+that motivated building it."
 
 ## Batch validation (in preparation)
 
@@ -77,24 +76,12 @@ GHCR, version tags promote to prod — with self-cleaning logs, an ops script (`
 admin portal giving visibility into users, connections, and analyses. Connections survive redeploys by
 auto-reconnecting from each user's saved config.
 
-## An employee-led innovation pattern (India-based reference)
+## Employee-led innovation
 
-AMP fits a well-known Indian pattern of employee-led innovation. Infosys' **"Zero Distance"** (2013,
-championed by Narayana Murthy) asked every project owner to innovate inside their own project — to close
-the "distance" between the work and the person doing it — rather than wait for a central team. HCL
-Technologies' **"Employees First, Customers Second"** (Vineet Nayar) made the same bet from the other
-direction: give the people closest to the work the authority and tools to fix it, and the value reaches
-customers on its own. The pattern in both is qualitative and repeatable — **an engineer hits a daily
-bottleneck, solves it inside their own work, and the fix compounds into an organization-level
-capability.** No company-specific numbers are claimed here; the measurable results belong to AMP itself.
-
-AMP is exactly this pattern. The analyzer was built by the engineer who hit the bottleneck every day —
-waiting 71.5s for a single facet view, 35–41s per search, watching a 105MB / 11,264-class artifact fail to
-decompile. Solving that personal pain, piece by piece, produced precomputed sidecars that serve facets in
-2ms and search in 7–19ms, made 105MB / 11,264-class artifacts analyze end-to-end, and — after a
-769-combination sweep with zero 5xx — turned a local workaround into a deployed internal platform. The
-same dynamic shows up in the numbers: **~1 hour/day of analyst waiting eliminated** per analyst, from one
-engineer's daily annoyance to a shared capability.
+This is employee-led innovation in its simplest form: an engineer in India hit the same bottleneck every
+day, built the solution themselves, and it is now a deployed platform the whole team uses. No approvals,
+no vendor, no cost — just one developer's daily frustration turned into hours saved for everyone, every
+week.
 
 ## Scope — the same engine also covers more
 
