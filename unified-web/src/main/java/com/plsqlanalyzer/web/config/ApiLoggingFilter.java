@@ -101,6 +101,7 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
                 byte[] reqBody = request.getContentAsByteArray();
                 if (reqBody.length > 0) {
                     String body = new String(reqBody, StandardCharsets.UTF_8);
+                    body = redactSecrets(body);
                     if (body.length() > MAX_BODY_LOG) body = body.substring(0, MAX_BODY_LOG) + "...(truncated)";
                     sb.append(" | REQ: ").append(body);
                 }
@@ -125,6 +126,26 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
         } catch (Exception e) {
             log.debug("Error logging API request: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Masks the values of secret-shaped JSON fields in a request body before it is logged.
+     *
+     * <p>The request logging above records POST/PUT/PATCH bodies verbatim, and bodies like
+     * {@code /api/auth/aws/iam-connect}'s carry live AWS temporary credentials (accessKeyId,
+     * secretKey, sessionToken) — plaintext in the log means the log archive ships live secrets into
+     * the artifact store. Field names are matched case-insensitively by JSON-field-aware regexes
+     * (an AKIA/ASIA pattern alone misses the STS "ASIA" prefix and the colon-separated JSON shape),
+     * plus a last-resort pattern for any long base64ish value following a secret-ish key in a
+     * non-JSON body. Only the VALUE is masked; the field name and the rest of the body stay
+     * intact, so debugging keeps its context.
+     */
+    private static final java.util.regex.Pattern SECRET_FIELD = java.util.regex.Pattern.compile(
+            "(\"(?i)(accessKeyId|secretKey|secretAccessKey|sessionToken|password|passphrase|token|api[_-]?key|clientSecret)\"\\s*:\\s*\")([^\"]*)(\")");
+
+    private static String redactSecrets(String body) {
+        if (body == null || body.isEmpty()) return body;
+        return SECRET_FIELD.matcher(body).replaceAll("$1***REDACTED***$4");
     }
 
     private static class CappedResponseWrapper extends HttpServletResponseWrapper {
