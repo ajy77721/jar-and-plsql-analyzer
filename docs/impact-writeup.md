@@ -31,4 +31,6 @@ The gains are concentrated where analysts lose the most time: routine lookups dr
 
 The platform was built using Java 17, Spring Boot 3.2, custom parsers for five SQL dialects and Java bytecode, JDBC, AWS S3, AWS SSO/STS, Kubernetes/Kanopy, Docker, Drone CI/CD, Helm, and GHCR. It was validated through a 3,452-test automated quality gate and a 769-combination API verification sweep with zero server errors.
 
+We also feed this static analysis into our Claude-based workflows: instead of running tasks randomly, tasks are chunked intelligently based on the static analysis output — which gives far more accurate steps for validation, the batch-optimize skill, and other tasks as well.
+
 The solution was employee-led from identifying the daily analysis bottleneck through architecture, implementation, deployment, quality validation, and team adoption. It transformed a highly manual and expertise-dependent analysis process into a fast, repeatable, and evidence-based workflow, enabling analysts to plan conversions, understand dependencies, debug call chains, and validate changes significantly faster while returning several days of engineering effort on every large validation batch.
