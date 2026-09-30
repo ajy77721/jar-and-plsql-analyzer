@@ -459,9 +459,29 @@ public class DbConnectionManager implements AutoCloseable {
         discoveredSchemas.add(schema.toUpperCase().trim());
     }
 
+    /**
+     * Every owner an owner-IN clause should search: the schemas each login declares, each login's
+     * <b>own</b> schema, and foreign owners discovered mid-crawl.
+     *
+     * <p>The login's own schema is included unconditionally (Fix C). A {@link DbUser} with an
+     * explicit {@code schemas} list used to contribute ONLY those, so a login whose declared schemas
+     * named cross-schema grants but not itself could not find an object sitting in its own default
+     * schema — the "wrong owner" half of the entry-object lookup failure. For Oracle the login
+     * username IS the default schema, and the login's grants always cover it. The addition is
+     * additive: nothing that was searchable before stops being searched, and a connection is still
+     * only ever opened for a schema some {@link DbUser#getSchemas()} declares (see
+     * {@link #getConnection(String)}), so this widens what can be <em>read</em>, not what can be
+     * logged in as.
+     */
     public List<String> getAvailableSchemas() {
         List<String> schemas = new ArrayList<>();
-        for (DbUser u : dbUsers) for (String s : u.getSchemas()) if (!schemas.contains(s)) schemas.add(s);
+        for (DbUser u : dbUsers) {
+            for (String s : u.getSchemas()) if (!schemas.contains(s)) schemas.add(s);
+            if (u.getUsername() != null) {
+                String own = u.getUsername().toUpperCase();
+                if (!schemas.contains(own)) schemas.add(own);
+            }
+        }
         for (String s : discoveredSchemas) if (!schemas.contains(s)) schemas.add(s);
         return schemas;
     }

@@ -151,6 +151,25 @@ public class AnalysisService {
     public Path getFlowOutputDir() { return flowOutputDir; }
 
     /**
+     * {@code plsql-parse/manifest.json} — the root listing manifest (Fix B).
+     *
+     * <p>One small document listing every analysis: its identity, the index mtime and the exact
+     * header scalars the listing row is built from. Rewritten at each analysis save (see
+     * {@link #updateRootManifest}), so a listing request can be answered from this one read instead
+     * of a header read (and an index HEAD) per analysis.
+     *
+     * <p>Deliberately NOT authoritative: {@link #listAnalyses} still asks the repository which
+     * analyses exist — the manifest cannot be trusted to know about one it has not seen, and a
+     * missing row must never drop an analysis from the screen. It is used only to replace the
+     * per-analysis reads, never the listing, and only when every analysis the repository reports has
+     * a row whose recorded index mtime matches the mtime the repository reports. A save caught
+     * mid-write (index rewritten, manifest not yet) therefore falls back to the full path for that
+     * request. Old deployments without the manifest take the fallback every time, unchanged.
+     */
+    private static final ArtifactKey ROOT_MANIFEST_KEY =
+            ArtifactKey.of(AnalysisPaths.PARSE_ROOT, "manifest.json");
+
+    /**
      * The analysis history, newest first.
      *
      * <p>The <b>listing</b> — which analyses exist, where each index document is, and in what order
@@ -170,6 +189,12 @@ public class AnalysisService {
     public List<AnalysisInfo> listAnalyses() throws IOException {
         List<com.analyzer.storage.repo.AnalysisRef> refs =
                 repository.analyses(com.analyzer.storage.repo.AnalysisQuery.Dataset.PLSQL_ANALYSES);
+
+        // Fast path: every analysis the repository reports is described by the root manifest, with
+        // the index mtime it was described at. Then no per-analysis read is needed at all.
+        List<AnalysisInfo> fromManifest = tryBuildFromRootManifest(refs);
+        if (fromManifest != null) return fromManifest;
+
         // Concurrently, because each row is an independent round trip to the store: the listing
         // wants one small document per analysis, and paying for them back-to-back is what made the
         // screen's latency the sum of every analysis ever run. Order is preserved by the map.
@@ -778,6 +803,9 @@ public class AnalysisService {
         var opts = new com.plsql.parser.flow.FlowAnalysisMain.Options();
         opts.configPath = effectiveConfigPath;
         opts.entryPoints.add(target);
+        // Advisory only: lets the depth-0 lookup fall back from the requested type to a PACKAGE and
+        // report what it tried when the entry still cannot be found (Fix C).
+        opts.entryObjectType = objectType;
         // Output into the nested <DBTYPE>/<PROJECT>/<ENV>/ parent, naming the leaf folder
         // after the OBJECT — this yields plsql-parse/<DBTYPE>/<PROJECT>/<ENV>/<OBJECT>/.
         opts.outputKey = AnalysisPaths.parentDirKey(baseFolderName);
@@ -997,6 +1025,11 @@ public class AnalysisService {
             if (viewStore != null) {
                 viewStore.writeHeader(baseFolderName, headerScalars(root));
             }
+            // Root listing manifest (Fix B): one row for this analysis, carrying the index mtime and
+            // the exact header scalars the listing builds from. Written AFTER the index (whose
+            // patched root is in hand, so no re-read) so it is never older than the row it
+            // describes. Best-effort — updateRootManifest swallows its own failures.
+            updateRootManifest(baseFolderName, root, store.lastModified(indexFile));
         } catch (Exception e) {
             org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
                 .warn("[AnalysisService] Could not patch connection meta for {}: {}", baseFolderName, e.getMessage());
@@ -1086,7 +1119,18 @@ public class AnalysisService {
         if (root == null) {
             root = readIndexHeader(indexKey);
         }
+        return buildInfoFrom(name, root, store.lastModified(indexKey));
+    }
 
+    /**
+     * The row itself, from header scalars and an index mtime the caller already holds.
+     *
+     * <p>Split out of {@link #buildInfo} so the root-manifest fast path feeds it the scalars and
+     * mtime the manifest recorded (both of which are exactly what {@code buildInfo} would have read)
+     * — the row is produced by the same code either way, so the two paths cannot drift field by
+     * field. Deliberately takes no store: this method must make zero round trips.
+     */
+    private AnalysisInfo buildInfoFrom(String name, JsonNode root, long mtime) {
         AnalysisInfo info = new AnalysisInfo();
         info.setName(name);
         info.setEntryPoint(textOrDefault(root, "entryPoint", AnalysisPaths.leaf(name)));
@@ -1110,7 +1154,6 @@ public class AnalysisService {
 
         // The analysis timestamp. Was the directory mtime; object stores have no directories, so
         // the index.json mtime stands in — it is written last, so the value is equivalent.
-        long mtime = store.lastModified(indexKey);
         if (mtime > 0) info.setTimestamp(mtime);
 
         List<String> errors = new ArrayList<>();
@@ -1121,6 +1164,105 @@ public class AnalysisService {
         info.setErrors(errors);
 
         return info;
+    }
+
+    /**
+     * The listing built from {@code plsql-parse/manifest.json}, or {@code null} when the manifest is
+     * absent, unreadable, or not provably current.
+     *
+     * <p>The conservative freshness rule, in full: the manifest is used only when, for <b>every</b>
+     * analysis the repository reports, the manifest carries a row whose recorded {@code indexMtime}
+     * equals the mtime the repository reports. Consequences, all intentional:
+     * <ul>
+     *   <li>An analysis saved after the manifest was last rewritten — its index mtime is newer than
+     *       the row's, so the comparison fails and the request takes the full path (which sees it).
+     *       A save caught between its index write and its manifest update therefore never loses a
+     *       row.</li>
+     *   <li>An analysis the manifest has never seen has no row → full path.</li>
+     *   <li>Rows for analyses the repository no longer reports are simply never consulted — the rows
+     *       are keyed by identity and we iterate the repository's refs, so a stale extra row is
+     *       inert rather than a phantom.</li>
+     *   <li>A repository that reports an unknown ({@code -1}) mtime takes the full path, because the
+     *       manifest could not be proven current against it.</li>
+     * </ul>
+     * Any parse problem returns {@code null} rather than throwing: a broken manifest degrades the
+     * listing to its previous cost, never to an error.
+     */
+    private List<AnalysisInfo> tryBuildFromRootManifest(
+            List<com.analyzer.storage.repo.AnalysisRef> refs) {
+        if (refs.isEmpty()) return null;
+        try {
+            if (!store.exists(ROOT_MANIFEST_KEY)) return null;
+            JsonNode analyses;
+            try (InputStream in = openRead(ROOT_MANIFEST_KEY)) {
+                JsonNode doc = READ_HEADER_MAPPER.readTree(in);
+                analyses = doc == null ? null : doc.get("analyses");
+            }
+            if (!(analyses instanceof ObjectNode rows)) return null;
+            List<AnalysisInfo> out = new ArrayList<>(refs.size());
+            for (com.analyzer.storage.repo.AnalysisRef ref : refs) {
+                JsonNode row = rows.get(ref.name());
+                if (row == null) return null;                       // an analysis the manifest has not seen
+                long recorded = row.path("indexMtime").asLong(-1L);
+                // A non-negative recorded mtime that matches what the repository reports is the
+                // whole proof. A negative one is "unknown" and takes the full path, so the fast path
+                // can never omit a timestamp the fallback would have set.
+                if (recorded < 0 || recorded != ref.lastModified()) return null;
+                JsonNode header = row.get("header");
+                if (!(header instanceof ObjectNode)) return null;
+                out.add(buildInfoFrom(ref.name(), header, recorded));
+            }
+            return out;
+        } catch (Exception e) {
+            return null;    // never fail the listing on the manifest's account
+        }
+    }
+
+    /**
+     * Upserts this analysis's row into {@code plsql-parse/manifest.json} and rewrites it.
+     *
+     * <p>Called at the end of a save, after {@code api/index.json} was patched, so the index mtime
+     * recorded here is the one a later {@link #listAnalyses} will compare against. The manifest is
+     * written LAST in the save, so it is never older than the index it describes.
+     *
+     * <p>Read-modify-write rather than rebuild-from-listing: a rebuild would cost the very listing
+     * the manifest exists to avoid, on every save. Two saves racing may lose one row (last writer
+     * wins); that only makes the freshness check fail for the missing identity, which falls back to
+     * the full path — a slower listing, never a wrong one. Best-effort throughout: a manifest
+     * failure must not fail an analysis that is otherwise complete.
+     */
+    private void updateRootManifest(String name, JsonNode indexRoot, long indexMtime) {
+        try {
+            ObjectNode manifest;
+            if (store.exists(ROOT_MANIFEST_KEY)) {
+                try (InputStream in = openRead(ROOT_MANIFEST_KEY)) {
+                    JsonNode existing = READ_HEADER_MAPPER.readTree(in);
+                    manifest = existing instanceof ObjectNode o ? o : READ_HEADER_MAPPER.createObjectNode();
+                }
+            } else {
+                manifest = READ_HEADER_MAPPER.createObjectNode();
+            }
+            ObjectNode analyses;
+            JsonNode existingAnalyses = manifest.get("analyses");
+            if (existingAnalyses instanceof ObjectNode o) {
+                analyses = o;
+            } else {
+                analyses = READ_HEADER_MAPPER.createObjectNode();
+                manifest.set("analyses", analyses);
+            }
+            ObjectNode row = READ_HEADER_MAPPER.createObjectNode();
+            row.put("name", name);
+            row.put("indexMtime", indexMtime);
+            row.set("header", headerScalars(indexRoot));
+            analyses.set(name, row);
+            manifest.put("generatedAt", System.currentTimeMillis());
+            try (OutputStream out = openWrite(ROOT_MANIFEST_KEY)) {
+                READ_HEADER_MAPPER.writeValue(out, manifest);
+            }
+        } catch (Exception e) {
+            org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
+                    .warn("[AnalysisService] Could not update root listing manifest: {}", e.getMessage());
+        }
     }
 
     private static String textOrDefault(JsonNode node, String field, String def) {

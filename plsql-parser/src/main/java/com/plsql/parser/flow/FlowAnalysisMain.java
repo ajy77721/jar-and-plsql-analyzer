@@ -67,6 +67,14 @@ public class FlowAnalysisMain {
          */
         public boolean allowEmptyAnalysis = false;
 
+        /**
+         * The object type the caller asked for (e.g. {@code PROCEDURE}, {@code PACKAGE}), or null
+         * when unspecified. Advisory only — it feeds the depth-0 entry lookup's package fallback and
+         * its error message; the downloader already probes every relevant type. See
+         * {@link DependencyCrawler#setEntryObjectType(String)}.
+         */
+        public String entryObjectType;
+
         /** CLI only: local directory the LOCAL store is rooted at. Ignored by in-process callers. */
         public String dataRoot = "data";
     }
@@ -239,6 +247,9 @@ public class FlowAnalysisMain {
             DependencyCrawler crawler = new DependencyCrawler(engine, downloader, schemaResolver);
             crawler.setMaxDepth(opts.maxDepth);
             crawler.setAllowEmptyAnalysis(opts.allowEmptyAnalysis);
+            // Advisory: lets the depth-0 lookup fall back from e.g. PROCEDURE to PACKAGE and name
+            // what it tried when it still finds nothing (Fix C).
+            crawler.setEntryObjectType(opts.entryObjectType);
             if (opts.outputKey != null) {
                 crawler.setOutputDir(store, opts.outputKey);
                 if (opts.outputName != null && !opts.outputName.isBlank()) {

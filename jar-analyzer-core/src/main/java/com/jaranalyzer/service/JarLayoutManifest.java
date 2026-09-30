@@ -43,6 +43,12 @@ public final class JarLayoutManifest {
     private final Map<String, ArtifactKey> keys = new LinkedHashMap<>();
     private final Map<String, Long> lengths = new LinkedHashMap<>();
     private final Map<String, Long> rowCounts = new LinkedHashMap<>();
+    /**
+     * Last-modified millis supplied by a caller that already has them (a single
+     * {@link ArtifactStore#statPrefix} listing carries every key's size AND mtime), so
+     * {@link #toDocument} does not have to issue one HEAD per recorded artifact.
+     */
+    private final Map<String, Long> lastModified = new LinkedHashMap<>();
     private final Map<String, Long> counts = new LinkedHashMap<>();
     private final Map<String, Object> sections = new LinkedHashMap<>();
     /** Prefix aggregates recorded via {@link #recordPrefix}, merged into the document's collections. */
@@ -65,11 +71,21 @@ public final class JarLayoutManifest {
 
     /** As above, with a record count where the writer knows it. */
     public JarLayoutManifest recordArtifact(ArtifactKey key, long byteLength, Long rows) {
+        return recordArtifact(key, byteLength, rows, null);
+    }
+
+    /**
+     * As above, with a last-modified millis the caller already holds from a listing. When supplied
+     * (and non-negative) {@link #toDocument} uses it instead of a per-key {@code lastModified} HEAD,
+     * which is what lets a whole manifest be built from one {@code statPrefix}.
+     */
+    public JarLayoutManifest recordArtifact(ArtifactKey key, long byteLength, Long rows, Long mtime) {
         if (key == null) return this;
         String k = key.toString();
         keys.put(k, key);
         lengths.put(k, byteLength);
         if (rows != null) rowCounts.put(k, rows);
+        if (mtime != null && mtime >= 0) lastModified.put(k, mtime);
         return this;
     }
 
@@ -126,7 +142,11 @@ public final class JarLayoutManifest {
                     a.put("length", lengths.get(k));
                     Long rows = rowCounts.get(k);
                     if (rows != null) a.put("rows", rows);
-                    long lastModified = store.lastModified(keys.get(k));
+                    // Prefer the mtime the caller already read from the listing; only fall back to a
+                    // HEAD when it did not supply one. Same value either way — a listing's mtime IS
+                    // the object's last-modified — so the document bytes are unchanged.
+                    Long known = lastModified.get(k);
+                    long lastModified = known != null ? known : store.lastModified(keys.get(k));
                     if (lastModified >= 0) a.put("lastModified", lastModified);
                     artifacts.add(a);
                 }
@@ -151,9 +171,20 @@ public final class JarLayoutManifest {
      */
     public JarLayoutManifest recordPrefix(ArtifactStore store, ArtifactKey prefix) throws IOException {
         if (prefix == null) return this;
+        return recordPrefix(store.statPrefix(prefix), prefix);
+    }
+
+    /**
+     * As {@link #recordPrefix(ArtifactStore, ArtifactKey)}, but from a listing the caller already
+     * holds — so a save that needs both the artifact probes and the prefix aggregate pays for ONE
+     * {@code statPrefix} rather than one per family.
+     */
+    public JarLayoutManifest recordPrefix(Map<ArtifactKey, ArtifactEntry> tree, ArtifactKey prefix) {
+        if (prefix == null || tree == null) return this;
         long count = 0;
         long totalBytes = 0;
-        for (Map.Entry<ArtifactKey, ArtifactEntry> e : store.statPrefix(prefix).entrySet()) {
+        for (Map.Entry<ArtifactKey, ArtifactEntry> e : tree.entrySet()) {
+            if (!isUnder(e.getKey(), prefix)) continue;
             ArtifactEntry entry = e.getValue();
             if (entry != null && entry.directory()) continue;
             count++;
@@ -166,5 +197,13 @@ public final class JarLayoutManifest {
         c.put("totalBytes", totalBytes);
         prefixCollections.add(c);
         return this;
+    }
+
+    /** True when {@code key} is {@code prefix} itself or sits under it. */
+    private static boolean isUnder(ArtifactKey key, ArtifactKey prefix) {
+        if (key == null) return false;
+        List<String> k = key.segments();
+        List<String> p = prefix.segments();
+        return k.size() >= p.size() && k.subList(0, p.size()).equals(p);
     }
 }

@@ -79,6 +79,23 @@ class FragmentStore {
      *                 callers sanitize first and {@link ArtifactKey} rejects any separator or
      *                 {@code ".."} outright, which is what the old {@code dir.resolve} did not.
      */
+    /**
+     * Writes one fragment through the length-aware {@link ArtifactStore#write(ArtifactKey, long)}.
+     *
+     * <p>The declared length is load-bearing, not an optimisation hint: it is what keeps every
+     * small fragment (the per-endpoint {@code endpoint.json} / {@code nodes.json} / {@code
+     * node_*.json}, the Claude work fragments) on the write-behind <b>buffered</b> path. With S3
+     * write-behind enabled ({@code app.storage.s3.write-behind=true}), a write whose declared length
+     * is under {@code WriteBehindStore.ROLLOVER_THRESHOLD} is buffered on the heap and uploaded on
+     * the bounded pool, so {@code close()} returns without an S3 round trip and the analysis thread
+     * moves on to the next artifact. Dropping the length (calling {@code write(key)}) would still
+     * buffer here, but a large body would then also be buffered whole instead of rolling over into a
+     * direct upload; passing the exact length is what lets the store pick the right path for both.
+     *
+     * <p>This is the single write site for every per-endpoint fragment, so a save with 317 endpoints
+     * issues ~1,000 small PUTs on the pool rather than ~1,000 serialised round trips on the crawl
+     * thread.
+     */
     void writeFragment(ArtifactKey dir, String fileName, String content) throws IOException {
         byte[] body = content.getBytes(StandardCharsets.UTF_8);
         try (OutputStream out = store.write(dir.resolve(fileName), body.length)) {

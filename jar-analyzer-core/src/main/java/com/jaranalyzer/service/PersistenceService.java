@@ -1,5 +1,6 @@
 package com.jaranalyzer.service;
 
+import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -1102,26 +1103,25 @@ public class PersistenceService {
             m.setCount("endpoints", stats.endpointCount);
             m.setCount("packages", stats.packageCount);
 
-            m.recordArtifact(analysisKey, store.size(analysisKey), (long) stats.classCount);
-            if (store.exists(offsetsKey)) {
-                m.recordArtifact(offsetsKey, store.size(offsetsKey),
-                        (long) stats.classCount + stats.endpointCount);
-            }
-            ArtifactKey headerKey = paths.headerKey(jarName);
-            if (store.exists(headerKey)) m.recordArtifact(headerKey, store.size(headerKey));
+            // ONE recursive listing of the jar root answers every presence/size/mtime question the
+            // manifest asks. The previous form issued a HEAD (exists + size) per artifact — ~14
+            // round trips on S3 for a manifest whose whole purpose is to save the reader round
+            // trips — plus a second listing for the endpoints aggregate. The listing drains any
+            // pending write-behind uploads first, so it sees the summary/class-tree/chunk artifacts
+            // written moments earlier in this same save. Its payload is the endpoints subtree either
+            // way, because the endpoints aggregate already listed it.
+            Map<ArtifactKey, ArtifactEntry> tree = store.statPrefix(paths.jarRootKey(jarName));
+
+            recordIfPresent(m, tree, analysisKey, (long) stats.classCount);
+            recordIfPresent(m, tree, offsetsKey, (long) stats.classCount + stats.endpointCount);
+            recordIfPresent(m, tree, paths.headerKey(jarName), null);
 
             ArtifactKey summaryKey = isStatic
                     ? paths.summaryCacheStaticKey(jarName) : paths.summaryCacheKey(jarName);
-            if (store.exists(summaryKey)) m.recordArtifact(summaryKey, store.size(summaryKey));
-            ArtifactKey summaryGz = summaryKey.parent().resolve(summaryKey.leaf() + ".gz");
-            if (store.exists(summaryGz)) m.recordArtifact(summaryGz, store.size(summaryGz));
-
-            ArtifactKey treeKey = paths.classTreeCacheKey(jarName, null);
-            if (store.exists(treeKey)) {
-                m.recordArtifact(treeKey, store.size(treeKey), (long) stats.classCount);
-            }
-            ArtifactKey storedJarKey = paths.storedJarKey(jarName);
-            if (store.exists(storedJarKey)) m.recordArtifact(storedJarKey, store.size(storedJarKey));
+            recordIfPresent(m, tree, summaryKey, null);
+            recordIfPresent(m, tree, summaryKey.parent().resolve(summaryKey.leaf() + ".gz"), null);
+            recordIfPresent(m, tree, paths.classTreeCacheKey(jarName, null), (long) stats.classCount);
+            recordIfPresent(m, tree, paths.storedJarKey(jarName), null);
 
             // Offset refs: which key holds the index, and how many rows it addresses.
             Map<String, Object> offsets = new LinkedHashMap<>();
@@ -1140,13 +1140,25 @@ public class PersistenceService {
                 m.setSection("classTreeChunks", chunks);
             }
 
-            // Per-endpoint output folders, collapsed to one aggregate (one listing, no per-key HEADs).
-            m.recordPrefix(store, paths.endpointsDirKey(jarName));
+            // Per-endpoint output folders, collapsed to one aggregate — from the SAME listing.
+            m.recordPrefix(tree, paths.endpointsDirKey(jarName));
 
             m.writeTo(store, paths.manifestKey(jarName));
         } catch (Exception e) {
             log.warn("Failed to write jar manifest for {}: {}", jarName, e.getMessage());
         }
+    }
+
+    /**
+     * Records {@code key} in the manifest when the (already-taken) listing saw it, with the size and
+     * mtime that listing carried — no per-key HEAD. Absent keys are skipped, exactly as the previous
+     * {@code exists}-guarded form skipped them.
+     */
+    private static void recordIfPresent(JarLayoutManifest m, Map<ArtifactKey, ArtifactEntry> tree,
+                                        ArtifactKey key, Long rows) {
+        ArtifactEntry entry = tree.get(key);
+        if (entry == null) return;
+        m.recordArtifact(key, entry.size(), rows, entry.lastModified());
     }
 
     private static Map<String, Object> offsetRef(com.analyzer.storage.ArtifactKey key, int rowCount) {

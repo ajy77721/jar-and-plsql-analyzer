@@ -56,6 +56,14 @@ public class DependencyCrawler {
      */
     private boolean allowEmptyAnalysis = false;
 
+    /**
+     * The object type the caller asked for (e.g. {@code PROCEDURE}, {@code PACKAGE}), or null when
+     * it was not supplied. Purely advisory: it never selects the fetch path (the downloader already
+     * tries every relevant type), it is what lets the depth-0 lookup explain itself — and what tells
+     * the package fallback that the caller did <em>not</em> already ask for a package.
+     */
+    private String entryObjectType;
+
     // Cache of parse results: "OBJECT_NAME" -> ParseResult
     private final Map<String, ParseResult> parseCache = new ConcurrentHashMap<>();
 
@@ -107,6 +115,14 @@ public class DependencyCrawler {
 
     public void setMaxDepth(int maxDepth) {
         this.maxDepth = maxDepth;
+    }
+
+    /**
+     * The object type the caller asked for, used only for the depth-0 lookup's package fallback and
+     * its error message. Null is allowed and means "unspecified". See {@link #entryObjectType}.
+     */
+    public void setEntryObjectType(String entryObjectType) {
+        this.entryObjectType = entryObjectType;
     }
 
     public void setTimeoutPerEntryMs(long timeoutPerEntryMs) {
@@ -385,6 +401,24 @@ public class DependencyCrawler {
                 long parseStart = System.currentTimeMillis();
                 ParseResult parseResult = downloadAndParse(item.packageName, item.subprogramName, item.schema);
                 log.info("[Crawler] downloadAndParse({}) took {}ms", visitKey, System.currentTimeMillis() - parseStart);
+
+                // Entry-object resolution (Fix C). A bare name that downloaded nothing is retried as
+                // a PACKAGE before it is declared missing: the UI routinely submits a package name
+                // with objectType PROCEDURE (or an owner that does not match), and the object is
+                // right there under the same name — just not as a standalone routine. The retry
+                // fetches only PACKAGE BODY / PACKAGE, so it cannot misread a genuine standalone
+                // PROCEDURE, and it is skipped entirely when the caller already asked for a package.
+                if (parseResult == null && item.depth == 0 && item.packageName == null) {
+                    ParseResult asPackage = tryPackageFallback(item.subprogramName, item.schema);
+                    if (asPackage != null) {
+                        log.info("[Crawler] Entry '{}' is not a standalone {} — resolved as a PACKAGE "
+                                        + "instead (entry-object fallback)",
+                                item.subprogramName,
+                                entryObjectType != null ? entryObjectType : "object");
+                        parseResult = asPackage;
+                    }
+                }
+
                 if (parseResult == null) {
                     // Last chance: check if SourceDownloader found it was a TYPE via DB
                     String srcObj = item.packageName != null ? item.packageName : item.subprogramName;
@@ -422,10 +456,14 @@ public class DependencyCrawler {
                         String entryDisplay = item.packageName != null
                                 ? item.packageName + "." + item.subprogramName
                                 : item.subprogramName;
-                        String schemaHint = (item.schema != null && !item.schema.isBlank())
-                                ? " in schema " + item.schema : "";
-                        errors.add("Entry object '" + entryDisplay + "' not found" + schemaHint
-                                + " on the selected connection — verify the name exists in this database.");
+                        // Say exactly what was attempted, so a wrong objectType or owner is
+                        // self-correctable from the message alone: which types were probed, and
+                        // which owners were searched. A genuinely missing object still fails — the
+                        // message just stops being a dead end.
+                        errors.add("Entry object '" + entryDisplay + "' not found on the selected "
+                                + "connection — tried " + String.join(" and ", entryTypesTried(item.packageName != null))
+                                + " in schemas: " + describeSchemasSearched(item.schema)
+                                + " — verify the name, its type and its owner.");
                     }
                     continue;
                 }
@@ -1267,6 +1305,17 @@ public class DependencyCrawler {
     }
 
     private ParseResult downloadAndParse(String packageName, String subprogramName, String schema) {
+        return downloadAndParse(packageName, subprogramName, schema, false);
+    }
+
+    /**
+     * @param packageOnly when {@code packageName} is null, fetch ONLY PACKAGE BODY / PACKAGE for the
+     *                    name instead of the all-types probe {@code downloadAny} does. Used by the
+     *                    depth-0 entry fallback, which must not reinterpret a bare name that is
+     *                    genuinely something else.
+     */
+    private ParseResult downloadAndParse(String packageName, String subprogramName, String schema,
+                                         boolean packageOnly) {
         String objectName = packageName != null ? packageName : subprogramName;
         // Standalone objects: qualify the cache key by schema so same-named objects in
         // different schemas don't reuse each other's parse. The FETCH name is schema-qualified
@@ -1277,8 +1326,10 @@ public class DependencyCrawler {
         String fetchName = (standaloneWithSchema && isSqlServer) ? schema + "." + subprogramName : subprogramName;
         String cacheKey = (standaloneWithSchema ? (schema + "$" + subprogramName) : objectName).toUpperCase();
 
-        // Fast-skip: confirmed absent from Oracle via prior ALL_OBJECTS batch check
-        if (knownMissingObjects.contains(cacheKey)) {
+        // Fast-skip: confirmed absent from Oracle via prior ALL_OBJECTS batch check. Deliberately
+        // bypassed for the entry package fallback: that is an explicit second attempt, and skipping
+        // it would make the "tried ..." error message claim a probe that never happened.
+        if (!packageOnly && knownMissingObjects.contains(cacheKey)) {
             log.debug("[Crawler] Skipping confirmed-missing object: {}", objectName);
             return null;
         }
@@ -1301,6 +1352,9 @@ public class DependencyCrawler {
         if (packageName != null) {
             source = downloader.downloadPackageBody(packageName);
             if (source == null) source = downloader.downloadPackageSpec(packageName);
+        } else if (packageOnly) {
+            source = downloader.downloadPackageBody(fetchName);
+            if (source == null) source = downloader.downloadPackageSpec(fetchName);
         } else {
             source = downloader.downloadAny(fetchName);
         }
@@ -1359,6 +1413,82 @@ public class DependencyCrawler {
         }
 
         return result;
+    }
+
+    /**
+     * The depth-0 entry fallback: fetch {@code name} as a PACKAGE BODY (then PACKAGE) and return its
+     * parse result when the source really is a package.
+     *
+     * <p>Returns null when the caller already asked for a package (nothing to fall back from), when
+     * nothing was fetched, or when what was fetched does not carry a PACKAGE-typed object — the last
+     * check is what keeps a genuinely-missing standalone routine from being silently re-read as
+     * something it is not.
+     */
+    private ParseResult tryPackageFallback(String name, String schema) {
+        if (isPackageType(entryObjectType)) return null;
+        ParseResult asPackage = downloadAndParse(null, name, schema, true);
+        if (asPackage == null || asPackage.getObjects() == null || asPackage.getObjects().isEmpty()) {
+            return null;
+        }
+        for (ParsedObject obj : asPackage.getObjects()) {
+            if (isPackageType(obj.getType())) return asPackage;
+        }
+        return null;
+    }
+
+    /** True when {@code type} names a package (spec or body), case-insensitively. */
+    private static boolean isPackageType(String type) {
+        return type != null && type.toUpperCase().contains("PACKAGE");
+    }
+
+    /**
+     * The object types the depth-0 lookup probed, in the order it probed them — what the error
+     * message reports so a wrong {@code objectType} is visible.
+     *
+     * <p>For a package member the package body and spec are what was fetched. For a bare name the
+     * all-types fetch covers PACKAGE BODY, PROCEDURE, FUNCTION and PACKAGE; when the caller named a
+     * type that is reported first, because it is the one the user believes they asked for.
+     */
+    private List<String> entryTypesTried(boolean packageMember) {
+        LinkedHashSet<String> types = new LinkedHashSet<>();
+        if (packageMember) {
+            types.add("PACKAGE BODY");
+            types.add("PACKAGE");
+            return new ArrayList<>(types);
+        }
+        String requested = normalizeType(entryObjectType);
+        if (requested != null) types.add(requested);
+        else { types.add("PROCEDURE"); types.add("FUNCTION"); }
+        types.add("PACKAGE BODY");
+        types.add("PACKAGE");
+        return new ArrayList<>(types);
+    }
+
+    private static String normalizeType(String type) {
+        if (type == null || type.isBlank()) return null;
+        String t = type.trim().toUpperCase().replace('_', ' ');
+        return t.equals("PACKAGE BODY") || t.equals("PACKAGE") || t.equals("PROCEDURE")
+                || t.equals("FUNCTION") || t.equals("VIEW") || t.equals("TRIGGER") ? t : null;
+    }
+
+    /**
+     * The owners the lookup searched, as a comma-separated list for the error message: the
+     * connection's configured schemas plus the crawl's explicitly-supplied schema, when it was not
+     * already among them. Never throws — a resolver that cannot answer produces a "(none
+     * configured)" note rather than masking the original lookup failure.
+     */
+    private String describeSchemasSearched(String explicitSchema) {
+        LinkedHashSet<String> schemas = new LinkedHashSet<>();
+        try {
+            if (schemaResolver != null && schemaResolver.getConfiguredSchemas() != null) {
+                schemas.addAll(schemaResolver.getConfiguredSchemas());
+            }
+        } catch (Exception ignored) {
+            // fall through with whatever we have
+        }
+        if (explicitSchema != null && !explicitSchema.isBlank()) schemas.add(explicitSchema.toUpperCase());
+        if (schemas.isEmpty()) return "(none configured — check the connection's schema list)";
+        return String.join(", ", schemas);
     }
 
     /**
