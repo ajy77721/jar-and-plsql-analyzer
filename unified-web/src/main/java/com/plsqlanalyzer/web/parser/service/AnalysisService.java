@@ -54,6 +54,15 @@ public class AnalysisService {
     @Value("${app.parser-config-path:config/plsql-config.yaml}")
     private String configPath;
 
+    /**
+     * When false (the default) a parse that crawls 0 sources fails loud instead of writing an
+     * empty analysis over an existing one — see {@code DependencyCrawler}'s empty-crawl guard.
+     * Only a caller that genuinely wants an empty analysis written should set
+     * {@code app.parser.allow-empty-analysis=true}.
+     */
+    @Value("${app.parser.allow-empty-analysis:false}")
+    private boolean allowEmptyAnalysis;
+
     private final AnalysisReaderFactory readerFactory;
     private final StaticAnalysisReader staticReader;
     /** Precomputed listing-scalar sidecars ({@code views/header.json}) — see {@link AnalysisViewStore}. */
@@ -467,6 +476,33 @@ public class AnalysisService {
         store.deletePrefix(from);
     }
 
+    /**
+     * Undo the re-run archive after a failed crawl.
+     *
+     * <p>A re-analysis first moves any existing analysis of the same identity aside into a
+     * timestamped archive, so the fresh run writes into a clean folder. If that fresh run then
+     * fails — above all the empty-crawl guard firing on a dead database — leaving the archive in
+     * place would empty the identity (its {@code api/index.json} would be gone from the live path)
+     * even though nothing was written in its place. Discard whatever the failed run left behind and
+     * move the archive back so the existing analysis is untouched.
+     *
+     * <p>Best-effort and only when a populated analysis was actually archived ({@code archivedKey}
+     * non-null); the failure itself is rethrown by the caller either way.
+     */
+    private void restoreArchivedOnFailure(ArtifactKey resultKey, ArtifactKey archivedKey) {
+        if (archivedKey == null) return;
+        org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(AnalysisService.class);
+        try {
+            store.deletePrefix(resultKey);      // drop any partial output of the failed crawl
+            movePrefix(archivedKey, resultKey);
+            logger.warn("[AnalysisService] Crawl failed; restored prior analysis {} from archive {}",
+                    resultKey, archivedKey);
+        } catch (Exception restoreEx) {
+            logger.warn("[AnalysisService] Could not restore archived analysis {} after a failed crawl: {}",
+                    archivedKey, restoreEx.getMessage());
+        }
+    }
+
     /** Total bytes under a prefix. One recursive listing carries every size — no stat per file. */
     private long dirSize(ArtifactKey prefix) {
         try (Stream<ArtifactEntry> s = store.list(prefix, true)) {
@@ -701,6 +737,9 @@ public class AnalysisService {
         // opts.outputKey below, and every merge/read in this class addresses resultKey.
         Path resultDir = AnalysisPaths.dir(flowOutputDir, baseFolderName);
         ArtifactKey resultKey = AnalysisPaths.dirKey(baseFolderName);
+        // Set only when a populated analysis was actually moved aside, so a failed crawl below can
+        // put it back (see restoreArchivedOnFailure) instead of leaving the identity empty.
+        ArtifactKey archivedKey = null;
         if (hasAnyArtifact(resultKey)) {
             String oldTs = java.time.LocalDateTime.now()
                     .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
@@ -712,6 +751,7 @@ public class AnalysisService {
             claudePersistenceService.archiveClaudeData(baseFolderName, archivedName);
             try {
                 movePrefix(resultKey, archived);
+                archivedKey = archived;
             } catch (IOException moveEx) {
                 // On Windows, files with open handles can't be moved.
                 // Fall through — FlowAnalysisMain will overwrite individual proc subfolders.
@@ -748,8 +788,18 @@ public class AnalysisService {
         opts.cacheScope = cacheScope;
         opts.cacheRootKey = CACHE_ROOT_KEY;
         opts.pretty = true;
+        // Fail loud on an empty crawl (dead DB / empty schema) unless explicitly overridden.
+        opts.allowEmptyAnalysis = allowEmptyAnalysis;
 
-        com.plsql.parser.flow.FlowAnalysisMain.run(store, opts);
+        try {
+            com.plsql.parser.flow.FlowAnalysisMain.run(store, opts);
+        } catch (RuntimeException crawlFailure) {
+            // The crawl failed (e.g. the empty-crawl guard, or an unreachable DB). The prior
+            // analysis was already moved to its archive above; put it back so a failed re-run
+            // leaves the existing good data untouched rather than emptying the identity.
+            restoreArchivedOnFailure(resultKey, archivedKey);
+            throw crawlFailure;
+        }
         // Validation runs as a follow-up queue job — no inline runTableValidation call here.
 
         // Enrich tables (columns / indexes / constraints / triggers / view defs) INLINE for

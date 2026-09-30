@@ -47,6 +47,15 @@ public class DependencyCrawler {
     private NodeParseCache nodeCache;
     private ParseResultCache parseResultCache;
 
+    /**
+     * When {@code false} (the default), a crawl that produces ZERO nodes is a failure: the writer
+     * refuses to persist an empty analysis. This is the guard against the live incident where a
+     * dead database (ORA-12541 "no listener") yielded 0 sources and the pipeline happily wrote a
+     * 0-node analysis OVER a populated one of the same identity. Set {@code true} only for callers
+     * that genuinely want an empty result written (see {@code app.parser.allow-empty-analysis}).
+     */
+    private boolean allowEmptyAnalysis = false;
+
     // Cache of parse results: "OBJECT_NAME" -> ParseResult
     private final Map<String, ParseResult> parseCache = new ConcurrentHashMap<>();
 
@@ -128,6 +137,14 @@ public class DependencyCrawler {
 
     public void setParseResultCache(ParseResultCache parseResultCache) {
         this.parseResultCache = parseResultCache;
+    }
+
+    /**
+     * Opt out of the empty-crawl guard. Default {@code false}: a crawl that finds no sources throws
+     * rather than writing an empty analysis. See {@link #allowEmptyAnalysis}.
+     */
+    public void setAllowEmptyAnalysis(boolean allowEmptyAnalysis) {
+        this.allowEmptyAnalysis = allowEmptyAnalysis;
     }
 
     /**
@@ -801,6 +818,23 @@ public class DependencyCrawler {
         // Final flush for any names accumulated in the last BFS level
         flushPendingResolve();
         flushMissingBatch();
+
+        // Fail loud on an empty crawl — BEFORE any artifact for this analysis is written.
+        //
+        // This is the earliest point at which the crawled-source count is known: the BFS has
+        // drained and every node that could be found has been chunked. If it is zero the database
+        // had nothing to give (down — e.g. ORA-12541 "no listener" — or the schema holds no
+        // objects, or the entry point does not exist on this connection), and the writer is about
+        // to persist an EMPTY analysis (0 nodes, empty sidecars) under whatever identity it was
+        // handed. Live incident: exactly that ran over an existing 51-node analysis with the same
+        // identity and destroyed it. Refuse to write the empty result unless explicitly allowed
+        // (app.parser.allow-empty-analysis / Options.allowEmptyAnalysis) — the in-memory/stdout
+        // path (no chunkedWriter) is unaffected and still returns an empty FlowResult.
+        if (chunkedWriter != null && !allowEmptyAnalysis && chunkedWriter.getChunkCount() == 0) {
+            throw new IllegalStateException(
+                    "Crawled 0 sources — the database had nothing to analyze (is it up and does the "
+                    + "schema contain objects?). Refusing to write an empty analysis.");
+        }
 
         // Write tables once after all nodes processed (was previously per-node — unnecessary rewrites)
         if (chunkedWriter != null) {

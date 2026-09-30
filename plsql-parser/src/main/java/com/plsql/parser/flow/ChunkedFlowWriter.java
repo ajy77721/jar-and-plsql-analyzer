@@ -141,6 +141,15 @@ public class ChunkedFlowWriter {
         return sourcesKey;
     }
 
+    /**
+     * How many node chunks this writer has written — i.e. how many nodes the crawl produced.
+     * Zero means the crawl found nothing to analyze; {@code DependencyCrawler} refuses to
+     * persist that as an analysis (see its empty-crawl guard).
+     */
+    public int getChunkCount() {
+        return chunkCounter.get();
+    }
+
     public void setDiscoveredTriggers(List<Map<String, Object>> triggers) {
         this.discoveredTriggers = triggers != null ? triggers : new ArrayList<>();
     }

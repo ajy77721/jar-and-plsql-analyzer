@@ -59,6 +59,14 @@ public class FlowAnalysisMain {
         public boolean pretty = false;
         public boolean clearCache = false;
 
+        /**
+         * When false (the default) a crawl that produces zero nodes throws instead of writing an
+         * empty analysis over the output key. Wired from {@code app.parser.allow-empty-analysis}
+         * by the web layer; {@code --allow-empty-analysis} on the CLI. See
+         * {@link DependencyCrawler#setAllowEmptyAnalysis(boolean)}.
+         */
+        public boolean allowEmptyAnalysis = false;
+
         /** CLI only: local directory the LOCAL store is rooted at. Ignored by in-process callers. */
         public String dataRoot = "data";
     }
@@ -133,6 +141,9 @@ public class FlowAnalysisMain {
                     break;
                 case "--clear-cache":
                     o.clearCache = true;
+                    break;
+                case "--allow-empty-analysis":
+                    o.allowEmptyAnalysis = true;
                     break;
                 default:
                     if (args[i].startsWith("-")) fail("Unknown flow option: " + args[i]);
@@ -227,6 +238,7 @@ public class FlowAnalysisMain {
 
             DependencyCrawler crawler = new DependencyCrawler(engine, downloader, schemaResolver);
             crawler.setMaxDepth(opts.maxDepth);
+            crawler.setAllowEmptyAnalysis(opts.allowEmptyAnalysis);
             if (opts.outputKey != null) {
                 crawler.setOutputDir(store, opts.outputKey);
                 if (opts.outputName != null && !opts.outputName.isBlank()) {
@@ -309,6 +321,12 @@ public class FlowAnalysisMain {
             // runCli() catches this and is the only place that still terminates the process.
             System.err.println("Fatal error in flow analysis: " + e.getMessage());
             e.printStackTrace(System.err);
+            // The empty-crawl guard is an IllegalStateException by contract (see DependencyCrawler).
+            // Rethrow it unwrapped so the queue/web layer sees the exact type and message rather
+            // than a generic "Fatal error in flow analysis: ..." wrapper.
+            if (e instanceof IllegalStateException ise) {
+                throw ise;
+            }
             throw new RuntimeException("Fatal error in flow analysis: " + e.getMessage(), e);
         }
     }
@@ -339,6 +357,7 @@ public class FlowAnalysisMain {
         System.err.println("  --cache-root-key <k>  Base prefix for the schema-resolver cache");
         System.err.println("                        (default: cache)");
         System.err.println("  --clear-cache         Delete the schema-resolver cache before running");
+        System.err.println("  --allow-empty-analysis  Permit writing a 0-node analysis (default: fail loud)");
         System.err.println("  --max-depth <N>       Maximum recursion depth (default: -1 = unlimited)");
         System.err.println("  --pretty              Pretty-print the JSON output");
         System.err.println();

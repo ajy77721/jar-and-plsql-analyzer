@@ -140,6 +140,16 @@ public class JarAnalysisExecutor {
             long t0 = System.nanoTime();
             JarParserService.ParseResult parseResult = parserService.parseJarToFile(tempJar.toFile(), basePackage, jarName);
             classesFile = parseResult.classesFile();
+            // Fail loud on a JAR that yielded no classes — BEFORE any artifact is written. Mirrors
+            // the PL/SQL empty-crawl guard (DependencyCrawler): a 0-class parse (an empty/invalid
+            // archive, or a fat JAR whose classes are all outside the base package) must not be
+            // persisted as a successful empty analysis, which would overwrite good data for the
+            // same jar name. classesFile is set first so the finally block still cleans the temp.
+            if (parseResult.totalClasses() == 0) {
+                throw new IllegalStateException(
+                        "Crawled 0 classes — the JAR had nothing to analyze (is it a valid JAR "
+                        + "containing .class files?). Refusing to write an empty analysis.");
+            }
             classesFile = repositoryStereotypeResolver.resolveTransitiveRepositoryStereotypes(classesFile);
             parseNanos += System.nanoTime() - t0;
             checkCancelled(job);
