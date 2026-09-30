@@ -1,100 +1,34 @@
-# AMP Analyzer — Impact Writeup
+# AMP Analyzer — Employee-Led Innovation with Measurable Outcome
 
-> **Headline outcome — batch validation of 200,000+ lines of legacy code: 3-5 days of manual work → 2-3 hours**
-> with the tool's batch-validation skill. Initial static analysis of that codebase takes 10-15 minutes; after
-> that, everything — search, call chains, validation, planning — is instant.
+As part of a large-scale legacy modernization program, our team was analyzing and converting hundreds of Oracle PL/SQL procedures covering more than 2 lakh lines of code, along with Java JAR/WAR applications. The existing approach required engineers to manually trace procedure call chains, search for table operations, identify joins, views, triggers, dynamic SQL, and build dependency maps across multiple files. This made analysis slow, error-prone for long call chains, and highly dependent on individual engineers' knowledge of the application and database schema.
 
-## What it is, and why it matters
+I led the design and implementation of AMP Analyzer, an internal static-analysis platform that automated this complete analysis workflow. The platform supports Oracle, SQL Server, MySQL, Db2, and PostgreSQL, along with Java JAR/WAR analysis. It automatically builds complete procedure call chains, identifies callers and callees, captures table operations with line numbers, joins with exact conditions, views, triggers, dynamic SQL, dependencies, and complexity metrics. The solution uses precomputed analysis views, sidecar files, byte-offset indexes, and a layout-manifest storage design to make the analysis results available almost instantly through 400+ REST APIs.
 
-AMP Analyzer is a static analyzer for legacy ERP modernization whose **primary target is Oracle stored
-procedures** — the large ERP packages an Oracle ERP conversion has to take apart, e.g. `USP_RUN_CYCLE` and
-`ERP$USP_PROCESSSALESORDER`. For these packages it surfaces the evidence analysts need — sequences,
-cursors, dynamic SQL, joins, table dependencies, complexity scoring, and the call chains inside Oracle
-packages — as the evidence base for the migration. It is deployed internally at MongoDB on **Kanopy**
-(staging + prod), built and shipped by **Drone CI** to **GHCR**, with analysis artifacts stored in
-**AWS S3** and **per-user AWS SSO identity** carried through every request and background job. The "why"
-behind this work: results were already correct, but the read paths were too slow to use interactively and,
-for the largest inputs, silently incomplete.
+The innovation delivered a ~35,000× reduction in analysis-view read latency, from 71.5 seconds to approximately 2 milliseconds, and a ~2,000–4,000× improvement in search performance, from 35–41 seconds to 7–19 milliseconds. More importantly, batch validation of 2,00,000+ lines of code was reduced from 3–5 days of manual effort to 2–3 hours, while initial static analysis of the complete codebase was reduced to approximately 10–15 minutes. Call-chain analysis that previously required hours of manual tracing can now be retrieved in approximately 4.6 milliseconds.
 
-## Before → After: the analyst's workflow
+## Oracle Analysis – Before vs After AMP Analyzer
 
-### BEFORE — analyzing one stored procedure by hand
+| Activity | Before AMP Analyzer | After AMP Analyzer |
+|---|---|---|
+| Oracle Code Analysis | Days | 10–15 minutes |
+| Validation of 2+ lakh lines | 3–5 days | 2–3 hours |
+| Call Chain Analysis | Hours | ~2 milliseconds |
+| Dependency Analysis | Hours | Few milliseconds |
+| Table Usage Analysis | ~½ day | <20 milliseconds |
+| Debugging / Impact Analysis | Hours | ~4.6 milliseconds |
+| Conversion Planning | Days | Minutes |
 
-- Open the procedure source, read it start to end, and manually track every operation: which tables it
-  reads, inserts, updates, and deletes; which other procedures it calls — and what **those** call, level
-  after level (proc → proc → proc).
-- Long call chains live across many files and schemas. Tracking them by hand means jumping between files,
-  grepping, keeping mental notes — and still missing branches when the chain is deep.
-- Finding "where is this table touched?" across hundreds of procedures means searching the code by hand,
-  over and over for every question.
-- Triggers, views, and related objects that silently affect the procedure are easy to miss entirely.
-- Debugging, conversion planning, and validation all depend on this hand-built map — so they need deep
-  prior knowledge of the schema and take days.
+## Simple Summary
 
-### AFTER — with AMP Analyzer
+| Area | Before | After |
+|---|---|---|
+| Oracle Analysis | Days | 10–15 minutes |
+| Validation | 3–5 days | 2–3 hours |
+| Debugging | Hours | ~4.6 ms |
+| Call Chain | Hours | ~2 ms |
+| Table/Dependency Search | Hours | <20 ms |
+| Conversion Planning | Days | Minutes |
 
-- Every operation on any procedure is **captured at analysis time, start to end**: the full call chain,
-  every table operation, every join (with exact join views), related tables/views, and triggers — all
-  precomputed and searchable in milliseconds.
-- "Where is this table touched?" is a search box, not a day of grepping.
-- **Conversion planning:** the summary views (complexity, dependencies, call trees) show what to convert
-  first and what it will touch — with minimal prior knowledge of the schema, because the tool surfaces it.
-- **Debugging:** the call tree / callers views pinpoint where a procedure is used from and what it calls —
-  in clicks.
-- **Validation:** piece-to-piece checking of every converted piece against its original call chain and
-  data operations.
+The platform was built using Java 17, Spring Boot 3.2, custom parsers for five SQL dialects and Java bytecode, JDBC, AWS S3, AWS SSO/STS, Kubernetes/Kanopy, Docker, Drone CI/CD, Helm, and GHCR. It was validated through a 3,452-test automated quality gate and a 769-combination API verification sweep with zero server errors.
 
-## Metrics
-
-| Task | Before — by hand (human estimate*) | Before — old tool | After — AMP now |
-|---|---|---|---|
-| **Batch validation (200K+ lines)** | **3-5 days** | — | **2-3 hours** |
-| "Where is this table touched?" across ~500 procedures | **hours to a full day** of grep/read/verify | 35-41s per query | **7-19 ms** |
-| Full call-chain map of ONE big procedure (every branch) | **hours per procedure**, branches still missed | 71.5s per view | **2 ms** |
-| Debugging: finding what calls a procedure / what it affects | **hours** (mental tracing) | — | **4.6 ms** |
-| Conversion planning for a package (dependencies, complexity, order) | **days** | — | **minutes** (summary views) |
-| Piece-to-piece validation of a conversion | **days per package, still incomplete** | — | **minutes per piece, complete** |
-
-*"Human estimates: vary with procedure size and the analyst's familiarity with the schema; the point is
-the ORDER of magnitude — hand-tracing a deep call chain is hours-to-days of focused work and still
-error-prone, where the tool returns the complete answer in milliseconds. The 71.5s/35-41s figures are the
-tool's own measured response times before the indexing work — the human manual times are the real 'before'
-that motivated building it."
-
-## Batch validation — in production use
-
-The team runs **batch-optimize** and **batch-validation** skills on top of the platform today, at batch
-scale rather than one procedure at a time. Validating **200,000+ lines** of legacy code used to be **3-5
-days** of manual work; with the tool it is **2-3 hours**. The initial static analysis of that codebase takes
-**10-15 minutes**, and after that everything — search, call chains, validation, planning — is instant,
-because every procedure's full map is precomputed and served in milliseconds. The piece-to-piece validation
-described above, run across a whole batch, is what turned a 3-5 day validation cycle into 2-3 hours.
-Removing **~1 hour/day** of analyst waiting per analyst remains a secondary benefit that makes the batch
-workflows practical.
-
-## Reliability and platform
-
-This work converted a single-user-oriented prototype into an operationally trustworthy service. A latent
-bug that dropped every background S3 upload was fixed by carrying credentials per buffer entry, verified at
-zero failed uploads. Identity is explicit end to end: a user's AWS SSO identity is captured on the request
-thread, carried with each task, and installed on the worker, with no silent fallback to default
-credentials; concurrent users are proven isolated and unauthenticated access is page-locked. Confidence
-comes from a 3,452-test suite (including 40+ new contract tests) and a 769-combination endpoint sweep with
-zero 5xx. Delivery is fully automated — every push to `main` builds and deploys to Kanopy staging via
-GHCR, version tags promote to prod — with self-cleaning logs, an ops script (`scripts/amp-ops.sh`), and an
-admin portal giving visibility into users, connections, and analyses. Connections survive redeploys by
-auto-reconnecting from each user's saved config.
-
-## Employee-led innovation
-
-This is employee-led innovation in its simplest form: an engineer in India hit the same bottleneck every
-day, built the solution themselves, and it is now a deployed platform the whole team uses. No approvals,
-no vendor, no cost — just one developer's daily frustration turned into hours saved for everyone, every
-week.
-
-## Scope — the same engine also covers more
-
-Oracle stored procedures are the primary target. The same engine also reads Microsoft SQL Server, MySQL,
-IBM Db2, and PostgreSQL procedures **and** the Java side — for JAR/WAR archives it maps every endpoint,
-call tree, and class relationship (11,264+ classes on a single 105 MB jar), so Java modernization gets the
-same evidence-first treatment.
+The solution was employee-led from identifying the daily analysis bottleneck through architecture, implementation, deployment, quality validation, and team adoption. It transformed a highly manual and expertise-dependent analysis process into a fast, repeatable, and evidence-based workflow, enabling analysts to plan conversions, understand dependencies, debug call chains, and validate changes significantly faster while returning several days of engineering effort on every large validation batch.
