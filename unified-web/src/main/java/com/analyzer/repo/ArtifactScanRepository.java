@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jaranalyzer.service.AnalysisDataProvider;
 import com.jaranalyzer.service.AnalysisDataProviderFactory;
+import com.jaranalyzer.service.ClassTreeChunks;
 import com.jaranalyzer.service.JarDataPaths;
 import com.plsqlanalyzer.web.page.JsonArrayRows;
 import com.plsqlanalyzer.web.parser.service.AnalysisPaths;
@@ -283,6 +284,14 @@ public class ArtifactScanRepository implements AnalysisRepository {
      */
     private RowStream classTreeRows(AnalysisQuery query, Function<JsonNode, JsonNode> projection)
             throws IOException {
+        // Plan 2d: prefer the chunked sidecar. It carries the same rows in the same order as the
+        // monolithic array, so concatenating the chunks yields byte-identical pages, but it is read
+        // one chunk at a time and gives a future index-aware pager the bounds to seek by. Only the
+        // default (unversioned) cache is chunked at save; a versioned request keeps the old path.
+        if (query.version() == null || query.version().isBlank()) {
+            RowStream chunked = chunkedClassTreeRows(query, projection);
+            if (chunked != null) return chunked;
+        }
         AnalysisDataProvider provider = providerFactory.resolve(query.analysis(), query.version());
         ArtifactKey cache = jarPaths.classTreeCacheKey(query.analysis(), query.version());
         if (!isCompleteJsonArray(cache)) {
@@ -296,6 +305,73 @@ public class ArtifactScanRepository implements AnalysisRepository {
             }
         }
         return arrayRows(cache, null, projection);
+    }
+
+    /**
+     * A lazy row stream over the chunk files (plan 2d), or {@code null} when there is no usable
+     * chunk index — in which case the caller keeps the monolithic path unchanged.
+     *
+     * <p>Chunks are opened one at a time and closed as soon as they are exhausted, so peak heap is
+     * one chunk rather than the whole array. The rows are the same rows in the same order as the
+     * monolithic cache, so the paged envelope is byte-identical.
+     *
+     * <p><b>Why this still visits the earlier chunks.</b> The pager reports an exact {@code total}
+     * over the filtered set ({@code JsonFacetPager} counts every matching row regardless of the
+     * cursor), so it must see every row; skipping to the chunk covering a cursor would undercount
+     * that total and change the response. The index's recorded bounds exist so a future pager that
+     * can accept an index-supplied total can seek; until then the win is bounded per-open size.
+     */
+    private RowStream chunkedClassTreeRows(AnalysisQuery query, Function<JsonNode, JsonNode> projection)
+            throws IOException {
+        ClassTreeChunks.Index idx = ClassTreeChunks.loadIndex(jarStore,
+                jarPaths.classTreeChunkIndexKey(query.analysis()));
+        if (idx == null || idx.chunkCount() == 0) return null;
+        return new ChunkConcatStream(query, idx, projection);
+    }
+
+    /** Concatenates the chunk files into one row sequence, opening each only when it is reached. */
+    private final class ChunkConcatStream implements RowStream {
+        private final AnalysisQuery query;
+        private final ClassTreeChunks.Index idx;
+        private final Function<JsonNode, JsonNode> projection;
+        private int nextChunk;
+        private RowStream current;
+
+        ChunkConcatStream(AnalysisQuery query, ClassTreeChunks.Index idx,
+                          Function<JsonNode, JsonNode> projection) {
+            this.query = query;
+            this.idx = idx;
+            this.projection = projection;
+        }
+
+        @Override public boolean hasNext() {
+            try {
+                while (true) {
+                    if (current != null && current.hasNext()) return true;
+                    if (current != null) {
+                        current.close();
+                        current = null;
+                    }
+                    if (nextChunk >= idx.chunkCount()) return false;
+                    current = arrayRows(jarPaths.classTreeChunkKey(query.analysis(), nextChunk++),
+                            null, projection);
+                }
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+
+        @Override public JsonNode next() {
+            if (!hasNext()) throw new java.util.NoSuchElementException();
+            return current.next();
+        }
+
+        @Override public void close() throws IOException {
+            if (current != null) {
+                current.close();
+                current = null;
+            }
+        }
     }
 
     /**

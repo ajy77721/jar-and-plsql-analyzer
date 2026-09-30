@@ -73,10 +73,10 @@ Write cost: **near-zero** — 1a-1f are all built in the SAME scans the save pha
 - [x] 1e statements offset index — 365944e (offsets built in the write pass; StatementsOffsetIndexReader tested; ADOPTION NOTE: no endpoint pages statements by ordinal yet — search streams by design and is fast via 1b; wire readPage when a paged statements endpoint lands)
 - [x] 1f layout manifest (parser) — 365944e (api/manifest.json, built during the write, KBs, written last)
 - [x] Staging soak (2026-09-29, local app against the SHARED bucket = staging's own data): all parser APIs 200 OK, warm 60-130ms; global-search backfill 1.5s → **21ms**; callers backfill 1.5s → **4.6ms** — sidecars persist in the shared bucket, so staging serves the same fast path
-- [ ] 2a jar offsets (in the streaming write)
-- [ ] 2b jar save-time summary + class-tree
-- [ ] 2c jar manifest
-- [ ] 2d class-tree chunking
+- [x] 2a jar offsets (in the streaming write) — analysis.offsets.json (classes+endpoints), byte offsets recorded while the two arrays are written; AnalysisOffsetIndexReader seeks one record. Golden test: writer offsets == Jackson's own element byte positions.
+- [x] 2b jar save-time summary + class-tree — preGenerateSummaryCache (already) + preGenerateClassTreeCache, both at save; lazy paths remain the fallback for old analyses.
+- [x] 2c jar manifest — jar/<id>/manifest.json built from counts/sizes known at save (no second pass over analysis.json); LayoutManifest design, KBs.
+- [x] 2d class-tree chunking — _class-tree/<n>.json (500 rows) + _class-tree-index.json; monolithic _class-tree.json still written; the paged reader prefers chunks (concatenation is byte-identical). NOTE: page-seeking is not wired — JsonFacetPager reports an exact total over the whole filtered set, so skipping preceding chunks would change the response; the index bounds are recorded for a future total-aware pager.
 - [x] Full reactor suite green + golden byte-equivalence tests for every sidecar
 - [x] FULL ENDPOINT SWEEP (769 combinations, real bucket data): 405 successful, p50=5ms, ZERO 5xx; every first-hit backfill proven to drop to 3-21ms on repeat (global-search 2.1s→7-19ms, custom complexity 1s→3-5ms, table-joins 3s→3.7ms, callers 1.5s→4.6ms); the only >200ms steady-state items are the claude-test endpoints (spawn a real CLI process — by design). CSV: ~/endpoint-sweep-results.csv
 - [ ] Staging live: 200MB-jar class paging ≤200ms/page (Phase 2)

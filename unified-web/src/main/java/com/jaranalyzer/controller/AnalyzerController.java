@@ -1139,11 +1139,13 @@ public class AnalyzerController {
      * {@code cls.methods}, a field this response has never had. So the page is 72% smaller and
      * renders identically.
      *
-     * <p>Pages are served from {@code _class-tree.json}, built once on the first paged request.
-     * Without it, page 2 would re-stream the whole multi-megabyte {@code analysis.json} to reach
-     * the cursor. The cache is already invalidated on re-analysis by
-     * {@code PersistenceService.invalidateSummaryCache}; a cursor survives the rebuild anyway
-     * because it is keyed on the class's package and name rather than on an array position.
+     * <p>Pages are served from {@code _class-tree.json}, written at save time (plan 2b) and split
+     * into {@code _class-tree/<n>.json} chunks (plan 2d) which the serving path prefers. Without it,
+     * page 2 would re-stream the whole multi-megabyte {@code analysis.json} to reach the cursor. The
+     * lazy build remains the fallback for analyses written before save-time precompute. The cache is
+     * invalidated on re-analysis by {@code PersistenceService.invalidateSummaryCache}; a cursor
+     * survives the rebuild anyway because it is keyed on the class's package and name rather than on
+     * an array position.
      */
     /**
      * UI-003 (§134) — the Code Structure tab's package view no longer needs to fetch every class

@@ -129,6 +129,27 @@ public class JarDataPaths {
     public ArtifactKey analysisKey(String jarName)       { return jarRootKey(jarName).resolve("analysis.json"); }
     public ArtifactKey correctedKey(String jarName)      { return jarRootKey(jarName).resolve("analysis_corrected.json"); }
     public ArtifactKey correctedPrevKey(String jarName)  { return jarRootKey(jarName).resolve("analysis_corrected_prev.json"); }
+
+    /**
+     * {@code analysis.offsets.json} — the byte-offset index for {@code analysis.json}'s classes[]
+     * and endpoints[] (plan 2a). Written in the same pass as the document; absent for old analyses,
+     * in which case readers fall back to the full streaming path.
+     */
+    public ArtifactKey analysisOffsetsKey(String jarName) { return jarRootKey(jarName).resolve("analysis.offsets.json"); }
+    /** Offset index twin for {@code analysis_corrected.json}. */
+    public ArtifactKey correctedOffsetsKey(String jarName) { return jarRootKey(jarName).resolve("analysis_corrected.offsets.json"); }
+
+    /** {@code manifest.json} — the per-JAR layout manifest (plan 2c). */
+    public ArtifactKey manifestKey(String jarName) { return jarRootKey(jarName).resolve("manifest.json"); }
+
+    /** {@code _class-tree/} — chunked class-tree sidecar (plan 2d). */
+    public ArtifactKey classTreeChunksDirKey(String jarName) { return jarRootKey(jarName).resolve("_class-tree"); }
+    /** {@code _class-tree-index.json} — the chunk index for the default class-tree. */
+    public ArtifactKey classTreeChunkIndexKey(String jarName) { return jarRootKey(jarName).resolve("_class-tree-index.json"); }
+    /** {@code _class-tree/<i>.json} — one chunk of the default class-tree. */
+    public ArtifactKey classTreeChunkKey(String jarName, int chunkIndex) {
+        return classTreeChunksDirKey(jarName).resolve(chunkIndex + ".json");
+    }
     public ArtifactKey summaryCacheKey(String jarName)   { return jarRootKey(jarName).resolve("_summary.json"); }
     public ArtifactKey summaryCacheStaticKey(String jarName) { return jarRootKey(jarName).resolve("_summary_static.json"); }
     public ArtifactKey headerKey(String jarName)         { return jarRootKey(jarName).resolve("_header.json"); }

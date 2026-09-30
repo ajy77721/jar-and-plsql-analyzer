@@ -1,5 +1,6 @@
 package com.jaranalyzer.service;
 
+import com.analyzer.storage.ArtifactKey;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -160,10 +161,19 @@ public class PersistenceService {
                                        List<EndpointInfo> endpoints, String analysisMode,
                                        String basePackage, String scopeTarget) throws IOException {
         paths.ensureJarRoot(jarName);
-        writeAnalysisStreamingTo(paths.analysisFile(jarName), jarName, projectName, jarSize, analyzedAt,
-                totalClasses, totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage, scopeTarget);
+        // Invalidate FIRST: the rewrite below is about to replace every derived sidecar, and doing
+        // this after it would delete the offsets/manifest just written. save()/correction paths also
+        // call this, which is how a document written without offsets (the POJO save) drops a stale
+        // index that would otherwise point into the new bytes.
         invalidateSummaryCache(jarName);
+        WriteStats stats = writeAnalysisStreamingTo(paths.analysisFile(jarName), jarName, projectName, jarSize, analyzedAt,
+                totalClasses, totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage, scopeTarget);
+        // Save-time precompute (plan 2b): the summary and the class tree are the first-hit penalties
+        // a fresh analysis used to make its first visitor pay. Both are built here, from the same
+        // builder code the lazy read paths use, so the first request is a small read.
         preGenerateSummaryCache(jarName, true);
+        preGenerateClassTreeCache(jarName, true);
+        writeManifest(jarName, true, stats);
     }
 
     public void writeAnalysisStreamingCorrected(String jarName, String projectName, long jarSize, String analyzedAt,
@@ -171,13 +181,15 @@ public class PersistenceService {
                                                  Path classesJsonlFile,
                                                  List<EndpointInfo> endpoints, String analysisMode) throws IOException {
         paths.ensureJarRoot(jarName);
-        writeAnalysisStreamingTo(paths.correctedFile(jarName), jarName, projectName, jarSize, analyzedAt,
-                totalClasses, totalEndpoints, classesJsonlFile, endpoints, analysisMode, null, null);
         invalidateSummaryCache(jarName);
+        WriteStats stats = writeAnalysisStreamingTo(paths.correctedFile(jarName), jarName, projectName, jarSize, analyzedAt,
+                totalClasses, totalEndpoints, classesJsonlFile, endpoints, analysisMode, null, null);
         preGenerateSummaryCache(jarName, false);
+        preGenerateClassTreeCache(jarName, false);
+        writeManifest(jarName, false, stats);
     }
 
-    private void writeAnalysisStreamingTo(Path outPath, String jarName, String projectName, long jarSize,
+    private WriteStats writeAnalysisStreamingTo(Path outPath, String jarName, String projectName, long jarSize,
                                            String analyzedAt, int totalClasses, int totalEndpoints,
                                            Path classesJsonlFile, List<EndpointInfo> endpoints,
                                            String analysisMode, String basePackage,
@@ -189,6 +201,11 @@ public class PersistenceService {
         // mode and a buffered file stream locally, and the generator below cannot tell.
         com.analyzer.storage.ArtifactKey outKey = outPath.equals(paths.correctedFile(jarName))
                 ? paths.correctedKey(jarName) : paths.analysisKey(jarName);
+
+        // Filled by writeDocumentTo in the SAME pass that writes the document: byte offsets for the
+        // two ordinal-addressed arrays (plan 2a) and the counts the manifest needs (plan 2c).
+        AnalysisOffsets offsets = new AnalysisOffsets();
+        WriteStats stats = new WriteStats();
 
         // Flatten every endpoint's call tree into a content-addressed node dictionary BEFORE
         // opening the output. In memory a call tree is a DAG — a method reached by N paths is one
@@ -214,7 +231,7 @@ public class PersistenceService {
 
             writeDocument(outKey, outPath, jarName, projectName, jarSize, analyzedAt, totalClasses,
                     totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage, scopeTarget,
-                    flattener, rootIds, fragIds);
+                    flattener, rootIds, fragIds, offsets, stats);
         } finally {
             try {
                 store.delete(spillKey);
@@ -236,9 +253,20 @@ public class PersistenceService {
         log.info("Analysis saved: {} ({})", outPath.getFileName(),
                 sizeBytes >= 0 ? (sizeBytes / (1024 * 1024)) + " MB" : "size unknown");
 
+        // Offset index (plan 2a), written right after the document it indexes. Its absence is a
+        // supported state (old analyses), so a failure here only logs — it must never fail a save.
+        try {
+            com.analyzer.storage.ArtifactKey offsetsKey = outKey.equals(paths.correctedKey(jarName))
+                    ? paths.correctedOffsetsKey(jarName) : paths.analysisOffsetsKey(jarName);
+            offsets.writeTo(store, offsetsKey);
+        } catch (Exception e) {
+            log.warn("Failed to write analysis offsets sidecar for {}: {}", jarName, e.getMessage());
+        }
+
         // Write lightweight header sidecar for fast listing
         writeHeaderSidecar(jarName, projectName, jarSize, analyzedAt,
                 totalClasses, totalEndpoints, analysisMode, basePackage, scopeTarget);
+        return stats;
     }
 
     /**
@@ -359,12 +387,72 @@ public class PersistenceService {
                                int totalEndpoints, Path classesJsonlFile, List<EndpointInfo> endpoints,
                                String analysisMode, String basePackage, String scopeTarget,
                                CallTreeFlattener flattener, List<String> rootIds,
-                               List<com.fasterxml.jackson.databind.node.ObjectNode> fragIds)
+                               List<com.fasterxml.jackson.databind.node.ObjectNode> fragIds,
+                               AnalysisOffsets offsets, WriteStats stats)
             throws IOException {
         commitAtomically(outKey, staging ->
                 writeDocumentTo(staging, jarName, projectName, jarSize, analyzedAt, totalClasses,
                         totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage,
-                        scopeTarget, flattener, rootIds, fragIds));
+                        scopeTarget, flattener, rootIds, fragIds, offsets, stats));
+    }
+
+    /**
+     * Counts collected in the same pass that writes the document, so the layout manifest needs no
+     * second read of {@code analysis.json} (plan 2c).
+     */
+    static final class WriteStats {
+        int classCount;
+        int endpointCount;
+        int packageCount;
+        long docLength;
+    }
+
+    /**
+     * A growable {@code (offset, length)} pair of arrays. The number of classes is not known before
+     * the JSONL is read, and a {@code long[]} per element would box; this doubles as it fills.
+     */
+    private static final class GrowableOffsets {
+        private long[] offsets = new long[256];
+        private long[] lengths = new long[256];
+        private int size;
+
+        void add(long offset, long length) {
+            if (size == offsets.length) {
+                int n = offsets.length * 2;
+                offsets = java.util.Arrays.copyOf(offsets, n);
+                lengths = java.util.Arrays.copyOf(lengths, n);
+            }
+            offsets[size] = offset;
+            lengths[size] = length;
+            size++;
+        }
+
+        long[] offsets() { return java.util.Arrays.copyOf(offsets, size); }
+        long[] lengths() { return java.util.Arrays.copyOf(lengths, size); }
+    }
+
+    /**
+     * The {@code packageName} of a class JSONL line, or {@code null}.
+     *
+     * <p>A targeted scan, not a parse: {@code ClassInfo} declares {@code fullyQualifiedName} then
+     * {@code packageName} and no nested object has that field, so the first occurrence is the
+     * class's own. Counting distinct values while the classes are written is what gives the manifest
+     * its {@code packages} count without a second pass.
+     */
+    private static String packageOf(String classLine) {
+        final String marker = "\"packageName\":\"";
+        int i = classLine.indexOf(marker);
+        if (i < 0) return null;
+        int p = i + marker.length();
+        StringBuilder sb = new StringBuilder(32);
+        while (p < classLine.length()) {
+            char c = classLine.charAt(p);
+            if (c == '\\' && p + 1 < classLine.length()) { sb.append(classLine.charAt(++p)); p++; continue; }
+            if (c == '"') break;
+            sb.append(c);
+            p++;
+        }
+        return sb.length() == 0 ? null : sb.toString();
     }
 
     /** What to write, given the staging key to write it to. */
@@ -411,10 +499,12 @@ public class PersistenceService {
                                  int totalEndpoints, Path classesJsonlFile, List<EndpointInfo> endpoints,
                                  String analysisMode, String basePackage, String scopeTarget,
                                  CallTreeFlattener flattener, List<String> rootIds,
-                                 List<com.fasterxml.jackson.databind.node.ObjectNode> fragIds)
+                                 List<com.fasterxml.jackson.databind.node.ObjectNode> fragIds,
+                                 AnalysisOffsets offsets, WriteStats stats)
             throws IOException {
         try (OutputStream os = openWrite(outKey);
-             JsonGenerator gen = objectMapper.getFactory().createGenerator(os)) {
+             CountingOutputStream counting = new CountingOutputStream(os);
+             JsonGenerator gen = objectMapper.getFactory().createGenerator(counting)) {
 
             gen.writeStartObject();
             gen.writeStringField("jarName", jarName);
@@ -469,64 +559,127 @@ public class PersistenceService {
                 invocationPool.streamPool(gen);
             }
 
+            // ── classes (plan 2a) ───────────────────────────────────────────────────────────
+            // The elements are written as raw bytes rather than through the generator, so the
+            // counting stream's position is exactly the byte offset of each one — the offsets cost
+            // nothing extra because the bytes are serialised either way. The generator is flushed
+            // first so its buffer holds no bytes that have not reached the counter; the comma
+            // separator is written here (not by the generator) and the offset recorded after it, so
+            // a slice is a complete JSON value. The generator's array context is untouched: it wrote
+            // `[`, we write the elements, it writes `]`.
             gen.writeFieldName("classes");
             gen.writeStartArray();
+            gen.flush();
             int classCount = 0;
+            GrowableOffsets classOffsets = new GrowableOffsets();
+            Set<String> packages = new java.util.HashSet<>();
             try (BufferedReader reader = openClassesJsonl(classesJsonlFile)) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    if (!line.isBlank()) {
-                        // Unchanged classes keep their original bytes; a pooled class is written
-                        // through the generator so its string escaping matches what produced the
-                        // JSONL (a lone surrogate written raw fails the UTF-8 encoder).
-                        var pooled = invocationPool.rewrite(line);
-                        if (pooled == null) {
-                            gen.writeRawValue(line);
-                        } else {
-                            objectMapper.writeValue(gen, pooled);
-                        }
-                        classCount++;
-                        if (classCount % 500 == 0) {
-                            gen.flush();
-                            log.info("  ... {} classes written to JSON", classCount);
-                        }
+                    if (line.isBlank()) continue;
+                    // Unchanged classes keep their original bytes; a pooled class is serialised by
+                    // the mapper so its string escaping matches what produced the JSONL (a lone
+                    // surrogate written raw fails the UTF-8 encoder).
+                    var pooled = invocationPool.rewrite(line);
+                    byte[] row = pooled == null
+                            ? line.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+                            : objectMapper.writeValueAsBytes(pooled);
+                    if (classCount > 0) counting.write(',');
+                    classOffsets.add(counting.count(), row.length);
+                    counting.write(row);
+                    String pkg = packageOf(line);
+                    if (pkg != null) packages.add(pkg);
+                    classCount++;
+                    if (classCount % 500 == 0) {
+                        gen.flush();
+                        log.info("  ... {} classes written to JSON", classCount);
                     }
                 }
             }
             gen.writeEndArray();
             log.info("  {} classes written", classCount);
 
+            // ── endpoints (plan 2a) ─────────────────────────────────────────────────────────
             gen.writeFieldName("endpoints");
             gen.writeStartArray();
+            gen.flush();
             int epCount = 0;
+            GrowableOffsets endpointOffsets = new GrowableOffsets();
             for (EndpointInfo ep : endpoints) {
-                writeEndpoint(gen, ep, rootIds.get(epCount), fragIds.get(epCount), endpointPool);
+                byte[] row = endpointBytes(ep, rootIds.get(epCount), fragIds.get(epCount), endpointPool);
+                if (epCount > 0) counting.write(',');
+                endpointOffsets.add(counting.count(), row.length);
+                counting.write(row);
                 epCount++;
-                if (epCount % 100 == 0) {
-                    gen.flush();
-                }
             }
             gen.writeEndArray();
             log.info("  {} endpoints written", epCount);
 
             gen.writeEndObject();
             gen.flush();
+
+            offsets.setClasses(classOffsets.offsets(), classOffsets.lengths());
+            offsets.setEndpoints(endpointOffsets.offsets(), endpointOffsets.lengths());
+            stats.classCount = classCount;
+            stats.endpointCount = epCount;
+            stats.packageCount = packages.size();
+            stats.docLength = counting.count();
         }
     }
 
     /**
-     * Serialises one endpoint with its call tree replaced by dictionary references.
+     * One endpoint as bytes, with its call tree replaced by dictionary references.
      *
-     * <p>{@code callTree} and {@code fragments} are nulled for the duration of the conversion
-     * rather than suppressed with a mixin, so the reference fields land in the exact slots the
-     * tree fields occupied. Readers that skip {@code callTree} positionally (see the
-     * {@code @JsonPropertyOrder} on {@code EndpointInfo}, which deliberately puts it last so
-     * {@code streamSummary} sees the precomputed aggregates first) keep working unchanged.
+     * <p>Built as an {@code ObjectNode} and serialised whole rather than streamed through the
+     * document's generator, so the writer can record its exact byte offset (plan 2a). The field
+     * order, the ref-field slot and the compact serialisation are identical to the streamed form
+     * this replaced, so the document's bytes are unchanged.
+     *
+     * <p>{@code callTree} and {@code fragments} are nulled for the duration of the conversion rather
+     * than suppressed with a mixin, so the reference fields land in the exact slots the tree fields
+     * occupied.
      */
+    private byte[] endpointBytes(EndpointInfo ep, String rootId,
+                                 com.fasterxml.jackson.databind.node.ObjectNode fragIds,
+                                 EndpointArrayPool endpointPool) throws IOException {
+        com.fasterxml.jackson.databind.node.ObjectNode on = endpointNode(ep);
+        // Ordinals replace the objects under the SAME keys, so field order — and therefore the
+        // bytes of an inflated endpoint — are unchanged.
+        endpointPool.rewrite(on);
+
+        com.fasterxml.jackson.databind.node.ObjectNode out = objectMapper.createObjectNode();
+        boolean placed = false;
+        var fields = on.fields();
+        while (fields.hasNext()) {
+            var e = fields.next();
+            if ("callTree".equals(e.getKey())) {
+                addRefFields(out, rootId, fragIds);
+                placed = true;
+            } else if ("fragments".equals(e.getKey())
+                    || CallTreeFlattener.ROOT_ID_FIELD.equals(e.getKey())
+                    || CallTreeFlattener.FRAGMENT_IDS_FIELD.equals(e.getKey())) {
+                // dropped — the reference fields are written by addRefFields, in callTree's slot
+            } else {
+                out.set(e.getKey(), e.getValue());
+            }
+        }
+        if (!placed) addRefFields(out, rootId, fragIds);
+        return objectMapper.writeValueAsBytes(out);
+    }
+
+    private void addRefFields(com.fasterxml.jackson.databind.node.ObjectNode out, String rootId,
+                              com.fasterxml.jackson.databind.node.ObjectNode fragIds) {
+        if (rootId == null) out.putNull(CallTreeFlattener.ROOT_ID_FIELD);
+        else out.put(CallTreeFlattener.ROOT_ID_FIELD, rootId);
+        if (fragIds != null && fragIds.size() > 0) {
+            out.set(CallTreeFlattener.FRAGMENT_IDS_FIELD, fragIds);
+        }
+    }
+
     /**
      * One endpoint as a tree, with the call tree and fragments detached.
      *
-     * <p>Shared by the {@link EndpointArrayPool} pre-pass and {@link #writeEndpoint} so both see
+     * <p>Shared by the {@link EndpointArrayPool} pre-pass and {@link #endpointBytes} so both see
      * exactly the same node — if they disagreed, a pooled entry would not match its interned key
      * and the field would silently stay inline.
      *
@@ -544,45 +697,6 @@ public class PersistenceService {
         } finally {
             ep.setCallTree(callTree);
             ep.setFragments(fragments);
-        }
-    }
-
-    private void writeEndpoint(JsonGenerator gen, EndpointInfo ep, String rootId,
-                               com.fasterxml.jackson.databind.node.ObjectNode fragIds,
-                               EndpointArrayPool endpointPool) throws IOException {
-        com.fasterxml.jackson.databind.node.ObjectNode on = endpointNode(ep);
-        // Ordinals replace the objects under the SAME keys, so field order — and therefore the
-        // bytes of an inflated endpoint — are unchanged.
-        endpointPool.rewrite(on);
-
-        gen.writeStartObject();
-        var fields = on.fields();
-        boolean placed = false;
-        while (fields.hasNext()) {
-            var e = fields.next();
-            if ("callTree".equals(e.getKey())) {
-                writeRefFields(gen, rootId, fragIds);
-                placed = true;
-            } else if ("fragments".equals(e.getKey())
-                    || CallTreeFlattener.ROOT_ID_FIELD.equals(e.getKey())
-                    || CallTreeFlattener.FRAGMENT_IDS_FIELD.equals(e.getKey())) {
-                // dropped — the reference fields are written by writeRefFields, in callTree's slot
-            } else {
-                gen.writeFieldName(e.getKey());
-                gen.writeTree(e.getValue());
-            }
-        }
-        if (!placed) writeRefFields(gen, rootId, fragIds);
-        gen.writeEndObject();
-    }
-
-    private void writeRefFields(JsonGenerator gen, String rootId,
-                                com.fasterxml.jackson.databind.node.ObjectNode fragIds) throws IOException {
-        gen.writeFieldName(CallTreeFlattener.ROOT_ID_FIELD);
-        if (rootId == null) gen.writeNull(); else gen.writeString(rootId);
-        if (fragIds != null && fragIds.size() > 0) {
-            gen.writeFieldName(CallTreeFlattener.FRAGMENT_IDS_FIELD);
-            gen.writeTree(fragIds);
         }
     }
 
@@ -637,6 +751,9 @@ public class PersistenceService {
             }
         });
         log.info("Saved {} ({} MB)", key, store.size(key) / (1024 * 1024));
+        // This path writes the document WITHOUT the offset index, so any index left from a prior
+        // streaming save would point into different bytes. Drop it rather than serve a wrong record.
+        store.delete(paths.analysisOffsetsKey(analysis.getJarName()));
         writeHeaderSidecar(analysis.getJarName(), analysis.getProjectName(),
                 analysis.getJarSize(), analysis.getAnalyzedAt(),
                 analysis.getTotalClasses(), analysis.getTotalEndpoints(), analysis.getAnalysisMode(),
@@ -655,6 +772,7 @@ public class PersistenceService {
             }
         });
         log.info("Saved corrected {} ({} MB)", key, store.size(key) / (1024 * 1024));
+        store.delete(paths.correctedOffsetsKey(analysis.getJarName()));
         writeHeaderSidecar(analysis.getJarName(), analysis.getProjectName(),
                 analysis.getJarSize(), analysis.getAnalyzedAt(),
                 analysis.getTotalClasses(), analysis.getTotalEndpoints(), analysis.getAnalysisMode(),
@@ -865,6 +983,15 @@ public class PersistenceService {
             // the document that was just rewritten, so they are stale the moment it changes. Deleted
             // whole: a re-analysis or a correction must never be shadowed by a pre-change view.
             store.deletePrefix(paths.viewsDirKey(jarName));
+            // Chunked class tree (plan 2d): the directory does not match the "_class-tree_" prefix
+            // above (its leaf is "_class-tree"), so it is deleted explicitly. A stale chunk index
+            // would otherwise point the serving path at pre-rewrite rows.
+            store.deletePrefix(paths.classTreeChunksDirKey(jarName));
+            store.delete(paths.classTreeChunkIndexKey(jarName));
+            // The manifest describes the artifacts of the document that was just replaced; the
+            // streaming save rewrites it, and a POJO save simply leaves it absent (readers treat a
+            // missing manifest as "no index", never as an error).
+            store.delete(paths.manifestKey(jarName));
         } catch (IOException e) { log.debug("Failed to invalidate summary cache: {}", e.getMessage()); }
     }
 
@@ -911,6 +1038,123 @@ public class PersistenceService {
         }
     }
 
+    /**
+     * Pre-generate the class-tree cache at save time (plan 2b), so the first Code Structure request
+     * is a small read instead of a full pass over the (up to hundreds of MB) document.
+     *
+     * <p>Calls the same builder the lazy read path uses ({@code ArtifactScanRepository} streams
+     * {@code provider.streamClassTree} into {@code _class-tree.json} on a cache miss); the lazy path
+     * stays as the fallback for analyses written before this, detected by the cache's absence or a
+     * trailing byte that is not {@code ]}.
+     *
+     * <p>The chunked form (plan 2d) is split from the just-written monolith — a pass over the
+     * class-tree sidecar, never over {@code analysis.json} — so the serving path can prefer chunks.
+     */
+    public void preGenerateClassTreeCache(String jarName, boolean isStatic) {
+        var analysisKey = isStatic ? paths.analysisKey(jarName) : paths.correctedKey(jarName);
+        var cacheKey = paths.classTreeCacheKey(jarName, null);
+        if (!store.exists(analysisKey)) return;
+        try {
+            log.info("Pre-generating class-tree cache for {} ...", jarName);
+            long start = System.currentTimeMillis();
+            AnalysisDataProvider provider = isStatic
+                    ? new StaticAnalysisProvider(analysisKey, objectMapper, paths, jarName)
+                    : new ClaudeAnalysisProvider(analysisKey, objectMapper, paths, jarName, "claude");
+            long written;
+            try (InputStream src = openRead(analysisKey);
+                 CountingOutputStream counting = new CountingOutputStream(
+                         new java.io.BufferedOutputStream(openWrite(cacheKey), 128 * 1024));
+                 var parser = objectMapper.getFactory().createParser(src);
+                 var gen = objectMapper.getFactory().createGenerator(counting)) {
+                provider.streamClassTree(parser, gen);
+                gen.flush();
+                written = counting.count();
+            }
+            log.info("Class-tree cache pre-generated: {} ({} KB, {}ms)", cacheKey,
+                    written / 1024, System.currentTimeMillis() - start);
+            // Chunks (plan 2d). A failure here is not fatal: the serving path falls back to the
+            // monolith, which was just written above.
+            try {
+                ClassTreeChunks.Index idx = ClassTreeChunks.split(store, cacheKey,
+                        paths.classTreeChunksDirKey(jarName), paths.classTreeChunkIndexKey(jarName));
+                log.info("Class-tree chunked: {} chunks / {} rows", idx.chunkCount(), idx.rowCount());
+            } catch (Exception e) {
+                log.warn("Failed to chunk class-tree cache: {}", e.getMessage());
+            }
+        } catch (Exception e) {
+            // A partial write must not be served: delete it so the lazy path rebuilds cleanly.
+            try { store.delete(cacheKey); } catch (Exception ignored) { /* best effort */ }
+            log.warn("Failed to pre-generate class-tree cache: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Writes {@code jar/<id>/manifest.json} (plan 2c) — the artifact inventory, counts and sizes a
+     * reader can use to route an API with one small read. Built entirely from values known at save
+     * time (see {@link WriteStats} and {@link AnalysisOffsets}); never a pass over the document.
+     */
+    private void writeManifest(String jarName, boolean isStatic, WriteStats stats) {
+        try {
+            var analysisKey = isStatic ? paths.analysisKey(jarName) : paths.correctedKey(jarName);
+            var offsetsKey = isStatic ? paths.analysisOffsetsKey(jarName) : paths.correctedOffsetsKey(jarName);
+            JarLayoutManifest m = new JarLayoutManifest(jarName);
+            m.setCount("classes", stats.classCount);
+            m.setCount("endpoints", stats.endpointCount);
+            m.setCount("packages", stats.packageCount);
+
+            m.recordArtifact(analysisKey, store.size(analysisKey), (long) stats.classCount);
+            if (store.exists(offsetsKey)) {
+                m.recordArtifact(offsetsKey, store.size(offsetsKey),
+                        (long) stats.classCount + stats.endpointCount);
+            }
+            ArtifactKey headerKey = paths.headerKey(jarName);
+            if (store.exists(headerKey)) m.recordArtifact(headerKey, store.size(headerKey));
+
+            ArtifactKey summaryKey = isStatic
+                    ? paths.summaryCacheStaticKey(jarName) : paths.summaryCacheKey(jarName);
+            if (store.exists(summaryKey)) m.recordArtifact(summaryKey, store.size(summaryKey));
+            ArtifactKey summaryGz = summaryKey.parent().resolve(summaryKey.leaf() + ".gz");
+            if (store.exists(summaryGz)) m.recordArtifact(summaryGz, store.size(summaryGz));
+
+            ArtifactKey treeKey = paths.classTreeCacheKey(jarName, null);
+            if (store.exists(treeKey)) {
+                m.recordArtifact(treeKey, store.size(treeKey), (long) stats.classCount);
+            }
+            ArtifactKey storedJarKey = paths.storedJarKey(jarName);
+            if (store.exists(storedJarKey)) m.recordArtifact(storedJarKey, store.size(storedJarKey));
+
+            // Offset refs: which key holds the index, and how many rows it addresses.
+            Map<String, Object> offsets = new LinkedHashMap<>();
+            offsets.put(AnalysisOffsets.SEGMENT_CLASSES, offsetRef(offsetsKey, stats.classCount));
+            offsets.put(AnalysisOffsets.SEGMENT_ENDPOINTS, offsetRef(offsetsKey, stats.endpointCount));
+            m.setSection("offsets", offsets);
+
+            // Chunked class tree (plan 2d), when it was produced.
+            ClassTreeChunks.Index idx = ClassTreeChunks.loadIndex(store, paths.classTreeChunkIndexKey(jarName));
+            if (idx != null) {
+                Map<String, Object> chunks = new LinkedHashMap<>();
+                chunks.put("dir", paths.classTreeChunksDirKey(jarName).toString());
+                chunks.put("chunkSize", idx.chunkSize());
+                chunks.put("chunkCount", idx.chunkCount());
+                chunks.put("rowCount", idx.rowCount());
+                m.setSection("classTreeChunks", chunks);
+            }
+
+            // Per-endpoint output folders, collapsed to one aggregate (one listing, no per-key HEADs).
+            m.recordPrefix(store, paths.endpointsDirKey(jarName));
+
+            m.writeTo(store, paths.manifestKey(jarName));
+        } catch (Exception e) {
+            log.warn("Failed to write jar manifest for {}: {}", jarName, e.getMessage());
+        }
+    }
+
+    private static Map<String, Object> offsetRef(com.analyzer.storage.ArtifactKey key, int rowCount) {
+        Map<String, Object> ref = new LinkedHashMap<>();
+        ref.put("key", key.toString());
+        ref.put("rowCount", rowCount);
+        return ref;
+    }
 
     /**
      * Writes every byte to two streams, so a document can be produced once and stored in two forms.
