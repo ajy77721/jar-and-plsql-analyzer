@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,6 +20,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -37,13 +39,26 @@ import java.util.stream.Stream;
  *
  * <p>Artifact bytes mirror to {@code {app.data-dir}/cache/store/{storeName}/{key}} as real files,
  * and small JSON sidecars under {@code .../.meta/} and {@code .../.listings/} record what a read
- * needs to stay honest. There is <b>no heap cache of any kind</b>: the owner rejected an in-memory
- * cache outright — a multi-GB JAR payload must never sit in the heap. Only file paths and a handful
- * of longs are ever held, and only for the duration of one call.
+ * needs to stay honest.
+ *
+ * <h2>The heap micro-cache (small artifacts only)</h2>
+ *
+ * <p>Beneath the disk layer sits a <b>strictly capped</b> in-heap LRU for the artifacts that are
+ * read over and over and are tiny — a sidecar, an index header, a facet summary. Only reads whose
+ * bytes are <b>at most {@value #HEAP_MAX_ENTRY_BYTES}</b> qualify, and the whole thing is capped at
+ * {@code app.cache.heap.max-mb} (default {@value #DEFAULT_HEAP_MAX_MB} MB; {@code 0} disables it
+ * entirely). A multi-GB JAR payload can never enter it: an entry larger than the per-entry bound is
+ * served from disk and never copied, so the bound on total heap is the cap, not the corpus.
+ *
+ * <p>It is populated lazily, only from artifacts actually read — never a preload — and it is
+ * invalidated by the same mutations that invalidate the disk layer (write/delete/deletePrefix/move
+ * of the key or its subtree). Entries age out of the heap after {@link #revalidateAfterMs} so the
+ * heap can never serve an artifact for longer than the disk layer's own revalidation window.
  *
  * <h2>Read path</h2>
  *
  * <ol>
+ *   <li>A fresh heap entry exists for the key → serve its bytes directly (no disk, no network).</li>
  *   <li>A local file exists and its metadata is younger than {@value #DEFAULT_REVALIDATE_MS} ms
  *       (24 h) → serve it.</li>
  *   <li>Older than that → one cheap {@link ArtifactStore#size} / {@link ArtifactStore#lastModified}
@@ -68,6 +83,9 @@ import java.util.stream.Stream;
  * <ul>
  *   <li>the cached entry (bytes + metadata) for {@code K} — or the whole {@code K} subtree for
  *       {@code deletePrefix}/{@code move};</li>
+ *   <li>the heap micro-cache entry for {@code K} (or every entry under {@code K}'s prefix for
+ *       {@code deletePrefix}/{@code move}), by the same rule, so the heap can never outlive the
+ *       disk layer's own invalidation;</li>
  *   <li>the cached listing at every ancestor of {@code K} <em>and</em> at {@code K} itself, for both
  *       the shallow and the recursive form, so a child appearing or disappearing refreshes its
  *       parent; and</li>
@@ -88,7 +106,10 @@ import java.util.stream.Stream;
  *
  * <p>{@link #materialize} delegates: it is the rare "I genuinely need a {@code Path}" escape hatch,
  * and handing callers a shared cache file they might mutate is not worth the saved download.
- * Ranged reads are cached only when the whole artifact already is.
+ * Ranged reads are cached only when the whole artifact already is — and are never heap-cached
+ * (they bypass the disk layer's whole-object path, so they bypass the heap with it). Listings are
+ * never heap-cached either; a listing over {@link #LISTING_CACHE_MAX_ENTRIES} is not even disk-
+ * cached.
  */
 public final class CachingArtifactStore implements RequestScopedArtifactStore {
 
@@ -106,6 +127,12 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
     /** Above this many entries a listing is streamed through but not persisted. */
     static final int LISTING_CACHE_MAX_ENTRIES = 50_000;
 
+    /** The largest artifact the heap micro-cache will hold, in bytes. */
+    static final long HEAP_MAX_ENTRY_BYTES = 256L * 1024;
+
+    /** Default total heap cap, in MB — overridable with {@code app.cache.heap.max-mb}. */
+    static final long DEFAULT_HEAP_MAX_MB = 64;
+
     private static final int COPY_BUFFER = 256 * 1024;
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -118,6 +145,12 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
     private final Path listingRoot;
     private final long maxBytes;
     private final long revalidateAfterMs;
+
+    /**
+     * The strictly capped in-heap LRU, or {@code null} when disabled ({@code app.cache.heap.max-mb=0}).
+     * Bounded by {@link #HEAP_MAX_ENTRY_BYTES} per entry and by its own byte budget in total.
+     */
+    private final HeapCache heap;
 
     private final ExecutorService trimPool = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "artifact-cache-trim");
@@ -135,12 +168,25 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
      * @param maxBytes    LRU cap in bytes; {@code <= 0} means unbounded
      */
     public CachingArtifactStore(String storeName, ArtifactStore delegate, Path cacheRoot, long maxBytes) {
-        this(storeName, delegate, cacheRoot, maxBytes, DEFAULT_REVALIDATE_MS);
+        this(storeName, delegate, cacheRoot, maxBytes, DEFAULT_REVALIDATE_MS,
+                DEFAULT_HEAP_MAX_MB * 1024L * 1024L);
     }
 
     /** Constructor for tests that need to control the revalidation window. */
     public CachingArtifactStore(String storeName, ArtifactStore delegate, Path cacheRoot,
                                 long maxBytes, long revalidateAfterMs) {
+        this(storeName, delegate, cacheRoot, maxBytes, revalidateAfterMs,
+                DEFAULT_HEAP_MAX_MB * 1024L * 1024L);
+    }
+
+    /**
+     * Full constructor, for tests that need to control the heap cap as well as the revalidation
+     * window.
+     *
+     * @param heapMaxBytes total heap micro-cache cap in bytes; {@code <= 0} disables the heap cache
+     */
+    public CachingArtifactStore(String storeName, ArtifactStore delegate, Path cacheRoot,
+                                long maxBytes, long revalidateAfterMs, long heapMaxBytes) {
         this.storeName = Objects.requireNonNull(storeName, "storeName");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.cacheRoot = cacheRoot.toAbsolutePath().normalize();
@@ -151,6 +197,7 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
         this.listingRoot = this.cacheRoot.resolve(".listings").resolve(storeName);
         this.maxBytes = maxBytes;
         this.revalidateAfterMs = Math.max(0, revalidateAfterMs);
+        this.heap = heapMaxBytes > 0 ? new HeapCache(heapMaxBytes) : null;
     }
 
     /** The store this cache wraps — reads fall through to it on a miss, mutations always do. */
@@ -180,17 +227,60 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
 
     @Override
     public InputStream read(ArtifactKey key) throws IOException {
+        InputStream fromHeap = heapRead(key);
+        if (fromHeap != null) return fromHeap;
+
         Path file = hitFile(key);
         if (file != null) {
             touch(file);
             try {
-                return Files.newInputStream(file);
+                return serveLocal(key, file);
             } catch (IOException race) {
                 // Trim (or an operator clear) deleted the file between the hit check and the open;
                 // fall through and refetch rather than failing a read that has a valid answer.
             }
         }
         return fetchAndServe(key);
+    }
+
+    /**
+     * The heap micro-cache's answer for {@code key}, or {@code null} to consult the disk layer.
+     *
+     * <p>An entry older than {@link #revalidateAfterMs} is dropped rather than served: the heap must
+     * never keep an artifact alive longer than the disk layer's own revalidation window, or an
+     * out-of-band edit the disk layer would have caught would be masked indefinitely.
+     */
+    private InputStream heapRead(ArtifactKey key) {
+        if (heap == null) return null;
+        HeapCache.Entry entry = heap.get(key);
+        if (entry == null) return null;
+        // Strictly stricter than the disk layer's own `age <= window` rule (which is `>=` here), so
+        // the heap can never serve an artifact the disk layer would have revalidated — and with a
+        // zero window it never serves at all, matching a disabled cache.
+        if (System.currentTimeMillis() - entry.storedAt() >= revalidateAfterMs) {
+            heap.remove(key);
+            return null;
+        }
+        return new ByteArrayInputStream(entry.bytes());
+    }
+
+    /**
+     * Serves a local file, promoting a small one into the heap micro-cache on the way out.
+     *
+     * <p>The size check happens before any bytes are copied, so a large artifact is streamed
+     * straight from disk and never buffered; only an artifact within
+     * {@link #HEAP_MAX_ENTRY_BYTES} is read into memory, and only when the heap is enabled.
+     */
+    private InputStream serveLocal(ArtifactKey key, Path file) throws IOException {
+        if (heap != null) {
+            long size = Files.size(file);
+            if (size >= 0 && size <= HEAP_MAX_ENTRY_BYTES) {
+                byte[] bytes = Files.readAllBytes(file);
+                heap.put(key, bytes);
+                return new ByteArrayInputStream(bytes);
+            }
+        }
+        return Files.newInputStream(file);
     }
 
     @Override
@@ -251,7 +341,8 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
     private InputStream fetchAndServe(ArtifactKey key) throws IOException {
         InputStream in = delegate.read(key);
         try {
-            return mirror(key, in);
+            Path target = mirror(key, in);
+            return serveLocal(key, target);
         } catch (IOException cacheFailure) {
             // The mirror failed on local disk, not in storage: fall back to a straight read so a
             // broken cache can never be worse than no cache. The delegate stream was consumed.
@@ -261,7 +352,7 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
         }
     }
 
-    private InputStream mirror(ArtifactKey key, InputStream in) throws IOException {
+    private Path mirror(ArtifactKey key, InputStream in) throws IOException {
         Path target = entryPath(key);
         Files.createDirectories(target.getParent());
         // Temp sibling so the final move is same-filesystem and therefore atomic — a reader sees
@@ -290,7 +381,7 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
             // A missing sidecar only costs a refetch next time; the bytes are still correct.
         }
         scheduleTrim();
-        return Files.newInputStream(target);
+        return target;
     }
 
     // ── metadata reads ───────────────────────────────────────────────────────
@@ -424,6 +515,7 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
         DiskCacheAdmin.deleteContents(entryRoot);
         DiskCacheAdmin.deleteContents(metaRoot);
         DiskCacheAdmin.deleteContents(listingRoot);
+        if (heap != null) heap.clear();
         return freed;
     }
 
@@ -518,12 +610,14 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
     private void deleteEntry(ArtifactKey key) {
         deleteQuietly(entryPath(key));
         deleteQuietly(metaPath(key));
+        if (heap != null) heap.remove(key);
     }
 
     /** Drops the entry for one key and every cached listing that could have named it. */
     private void invalidateKey(ArtifactKey key) {
         deleteQuietly(entryPath(key));
         deleteQuietly(metaPath(key));
+        if (heap != null) heap.remove(key);
         for (ArtifactKey a = key; a != null; a = a.parent()) {
             deleteListingAt(a);
         }
@@ -533,6 +627,7 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
     private void invalidateSubtree(ArtifactKey prefix) {
         DiskCacheAdmin.deleteRecursively(entryPath(prefix));
         DiskCacheAdmin.deleteRecursively(metaPath(prefix));
+        if (heap != null) heap.removePrefix(prefix);
         deleteListingsUnder(prefix);
         for (ArtifactKey a = prefix; a != null; a = a.parent()) {
             deleteListingAt(a);
@@ -682,6 +777,79 @@ public final class CachingArtifactStore implements RequestScopedArtifactStore {
             in.close();
         } catch (IOException ignored) {
             // best effort
+        }
+    }
+
+    /**
+     * A strictly byte-capped LRU over artifact bytes, in access order.
+     *
+     * <p>Guarded by its own monitor rather than a concurrent map: the critical sections are a hash
+     * lookup plus an occasional eviction, and a read must never be blocked by anything slower. The
+     * cap is enforced on insert, so the total held is never more than {@code maxBytes} plus the one
+     * entry being inserted (itself bounded by {@link #HEAP_MAX_ENTRY_BYTES} by the caller).
+     */
+    static final class HeapCache {
+
+        record Entry(byte[] bytes, long storedAt) {}
+
+        private final long maxBytes;
+        private final LinkedHashMap<ArtifactKey, Entry> entries =
+                new LinkedHashMap<>(16, 0.75f, true); // accessOrder = true → eldest = least recently used
+        private long bytes;
+
+        HeapCache(long maxBytes) {
+            this.maxBytes = maxBytes;
+        }
+
+        synchronized Entry get(ArtifactKey key) {
+            return entries.get(key);
+        }
+
+        synchronized void put(ArtifactKey key, byte[] value) {
+            Entry previous = entries.put(key, new Entry(value, System.currentTimeMillis()));
+            if (previous != null) bytes -= previous.bytes().length;
+            bytes += value.length;
+            // Evict least-recently-used entries until the cap is honoured.
+            var it = entries.entrySet().iterator();
+            while (bytes > maxBytes && it.hasNext()) {
+                Entry evicted = it.next().getValue();
+                bytes -= evicted.bytes().length;
+                it.remove();
+            }
+        }
+
+        synchronized void remove(ArtifactKey key) {
+            Entry removed = entries.remove(key);
+            if (removed != null) bytes -= removed.bytes().length;
+        }
+
+        /** Removes every entry whose key is {@code prefix} or sits under it. */
+        synchronized void removePrefix(ArtifactKey prefix) {
+            String p = prefix.toString();
+            var it = entries.entrySet().iterator();
+            while (it.hasNext()) {
+                var e = it.next();
+                String s = e.getKey().toString();
+                if (s.equals(p) || s.startsWith(p + "/")) {
+                    bytes -= e.getValue().bytes().length;
+                    it.remove();
+                }
+            }
+        }
+
+        synchronized void clear() {
+            entries.clear();
+            bytes = 0;
+        }
+
+        /** Test hook: current number of heap entries. */
+        synchronized int size() {
+            return entries.size();
+        }
+
+        /** Test hook: current bytes held. */
+        synchronized long bytes() {
+            return bytes;
         }
     }
 

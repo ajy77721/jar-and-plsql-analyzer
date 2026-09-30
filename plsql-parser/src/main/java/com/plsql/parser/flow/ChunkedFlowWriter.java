@@ -1030,6 +1030,10 @@ public class ChunkedFlowWriter {
         ArtifactKey indexKey = apiDir.resolve("index.json");
         long indexBytes = writeJson(indexKey, indexRoot);
         manifest.recordArtifact(indexKey, indexBytes, (long) indexNodes.size());
+        // The listing scalars, taken from the index root already in memory — no re-read. The history
+        // listing can then answer from the manifest instead of reading index.json (and, for a large
+        // analysis, streaming past its nodes[] array) once per analysis.
+        manifest.setListingScalars(listingScalars(indexRoot));
 
         // ── 2. nodes/{nodeId}.json: full detail per node (on-demand) ──
         for (ResolvedNode rn : resolvedNodes) {
@@ -1345,6 +1349,25 @@ public class ChunkedFlowWriter {
         writeManifest();
 
         System.err.println("[ChunkedFlowWriter] API files written: " + apiDir);
+    }
+
+    /**
+     * The listing scalars of an index root: every root scalar, plus the {@code errors} array, with
+     * every nested object/array (above all {@code nodes[]}) skipped — the same projection the
+     * history listing needs, so a manifest-served row is byte-identical to an index-served one.
+     */
+    private static Map<String, Object> listingScalars(Map<String, Object> indexRoot) {
+        Map<String, Object> scalars = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : indexRoot.entrySet()) {
+            Object v = e.getValue();
+            if (v == null || v instanceof String || v instanceof Number || v instanceof Boolean) {
+                scalars.put(e.getKey(), v);
+            } else if ("errors".equals(e.getKey()) && v instanceof List) {
+                scalars.put(e.getKey(), v);
+            }
+            // any other nested value is skipped, as the listing's index-header read skips it
+        }
+        return scalars;
     }
 
     /**

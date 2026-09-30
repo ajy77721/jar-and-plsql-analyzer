@@ -75,6 +75,15 @@ public final class LayoutManifest {
     private final Map<String, Long> rowCounts = new LinkedHashMap<>();
     private final Map<String, Long> totals = new LinkedHashMap<>();
 
+    /**
+     * The analysis's listing scalars — the root scalars of {@code api/index.json} (entry point,
+     * schema, node/table/edge/LOC counts, timings, {@code dbCallCount}) plus its {@code errors}
+     * array. Supplied by the writer from the index root it already holds, so the history listing can
+     * answer from this one small document instead of reading (and, for a big analysis, streaming
+     * past the {@code nodes[]} of) {@code api/index.json} once per analysis.
+     */
+    private final Map<String, Object> listing = new LinkedHashMap<>();
+
     public LayoutManifest(String analysisIdentity) {
         this(analysisIdentity, System.currentTimeMillis());
     }
@@ -102,6 +111,15 @@ public final class LayoutManifest {
     /** A top-level count (nodes, tables, statements, edges). */
     public void setCount(String name, long value) {
         totals.put(name, value);
+    }
+
+    /**
+     * Records the analysis's listing scalars — see {@link #listing}. Replaces any previous set, so
+     * the manifest always reflects the most recent index root. Passing {@code null} clears it.
+     */
+    public void setListingScalars(Map<String, Object> scalars) {
+        listing.clear();
+        if (scalars != null) listing.putAll(scalars);
     }
 
     /** Serialises the manifest to {analysis}/{@code api/manifest.json}. */
@@ -154,6 +172,7 @@ public final class LayoutManifest {
         doc.put("analysisIdentity", analysisIdentity);
         doc.put("generatedAt", generatedAt);
         doc.put("counts", new LinkedHashMap<>(totals));
+        doc.put("listing", new LinkedHashMap<>(listing));
         doc.put("artifacts", artifacts);
         doc.put("collections", collections);
         doc.put("sidecars", EXPECTED_SIDECARS);

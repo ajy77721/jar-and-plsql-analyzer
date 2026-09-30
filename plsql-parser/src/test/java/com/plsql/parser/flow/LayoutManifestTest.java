@@ -151,4 +151,35 @@ class LayoutManifestTest {
         // The offset index is written alongside the statements index.
         assertTrue(store.exists(BUILD.resolve("api", "statements", "index.offsets.json")));
     }
+
+    @Test
+    @DisplayName("the manifest carries the index root's listing scalars, with nodes[] skipped")
+    void manifestCarriesListingScalars() throws Exception {
+        InMemoryArtifactStore store = new InMemoryArtifactStore();
+        ChunkedFlowWriter writer = new ChunkedFlowWriter(store, BUILD);
+
+        writer.writeChunk(node("APP$PKG$P", 0));
+        FlowResult result = new FlowResult();
+        result.setEntryPoint("APP.PKG.P");
+        result.setEntrySchema("APP");
+        result.setCrawlTimeMs(1234);
+        result.setTotalLinesOfCode(42);
+        result.setMaxDepthReached(2);
+        result.setDbCallCount(3);
+        result.setErrors(List.of("warn1"));
+        writer.writeFinalResult(result, Map.of());
+
+        JsonNode listing = manifest(store).get("listing");
+        assertNotNull(listing, "the manifest must carry a listing object");
+        assertEquals("APP.PKG.P", listing.get("entryPoint").asText());
+        assertEquals("APP", listing.get("entrySchema").asText());
+        assertEquals(1, listing.get("totalNodes").asInt());
+        assertEquals(42, listing.get("totalLinesOfCode").asInt());
+        assertEquals(2, listing.get("maxDepth").asInt());
+        assertEquals(1234, listing.get("crawlTimeMs").asLong());
+        assertEquals(3, listing.get("dbCallCount").asInt());
+        assertEquals(1, listing.get("errors").size());
+        // The listing is scalars only — the nodes[] array (53% of a large index) must not be in it.
+        assertFalse(listing.has("nodes"), "the nodes[] array must not be copied into the listing");
+    }
 }

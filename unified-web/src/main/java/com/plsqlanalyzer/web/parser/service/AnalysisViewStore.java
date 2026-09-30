@@ -16,6 +16,8 @@ import java.io.OutputStream;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Read/write store for an analysis's precomputed <b>view summaries</b> — small sidecar documents
@@ -45,6 +47,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * additionally carries {@code formatVersion} (it is a flat object of scalars, so the marker can
  * live beside them); a later format change bumps the constant and older sidecars are ignored rather
  * than misread.
+ *
+ * <p><b>gzip twins.</b> Every sidecar is also written as a {@code .gz} twin in the same store write
+ * pass (the JSON is already in memory, so this costs one gzip of bytes already held, never a second
+ * pass over a large document), and a read prefers the twin, decompressing it in memory. A cold S3
+ * fetch of a sidecar is therefore ~10× lighter, while the response stays byte-identical: the twin
+ * decompresses to exactly the plain file's bytes, and a read falls back to the plain file whenever
+ * the twin is absent or corrupt. The twin lives under the same {@code views/} prefix, so the
+ * existing invalidation drops it too, and the staleness check compares the twin's own mtime.
  */
 @Component
 public class AnalysisViewStore {
@@ -171,6 +181,19 @@ public class AnalysisViewStore {
         return AnalysisPaths.resolveKey(name, VIEWS_DIR + "/" + view);
     }
 
+    /**
+     * The gzip twin of a sidecar key, e.g. {@code views/header.json.gz}.
+     *
+     * <p>Written beside every sidecar (same store write pass) and preferred on read, so a cold S3
+     * fetch of a sidecar is ~10× lighter. It is not a separate artifact with its own lifecycle: it
+     * lives under the same {@code views/} prefix, so {@link #invalidate(String)} drops it with the
+     * plain file, and its mtime is what the staleness check compares.
+     */
+    private static ArtifactKey gzKey(ArtifactKey key) {
+        ArtifactKey parent = key.parent();
+        return parent == null ? key.resolve(key.leaf() + ".gz") : parent.resolve(key.leaf() + ".gz");
+    }
+
     private ArtifactKey indexKey(String name) {
         return AnalysisPaths.resolveKey(name, "api/index.json");
     }
@@ -194,14 +217,48 @@ public class AnalysisViewStore {
             // itself is exempt — readHeader() applies its own version check.
             if (!HEADER.equals(view) && isHeaderFormatStale(name)) return null;
             // No exists() first: lastModified already returns -1 for an absent key, so an absent
-            // (or masked) sidecar fails the freshness check below without a separate HEAD.
-            if (store.lastModified(k) < store.lastModified(indexKey(name))) return null;
-            try (InputStream in = store.read(k)) {
-                JsonNode doc = mapper.readTree(in);
-                return (doc == null || doc.isMissingNode()) ? null : doc;
-            }
+            // (or masked) sidecar fails the freshness check below without a separate HEAD. The gz
+            // twin's mtime is the one compared when it is present, because it is written in the
+            // same pass and is what a read actually fetches.
+            if (sidecarMtime(k) < store.lastModified(indexKey(name))) return null;
+            return readTree(k);
         } catch (Exception e) {
             log.debug("view read {} / {} failed: {}", name, view, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * The sidecar's own effective mtime: the {@code .gz} twin's when it exists, else the plain
+     * file's. Both are written in the same pass, so either answers "when was this sidecar written";
+     * preferring the twin keeps the staleness rule honest about the file a read actually fetches.
+     */
+    private long sidecarMtime(ArtifactKey k) {
+        long gz = store.lastModified(gzKey(k));
+        return gz >= 0 ? gz : store.lastModified(k);
+    }
+
+    /**
+     * Parses a sidecar, preferring the {@code .gz} twin (decompressed in memory) and falling back to
+     * the plain file when the twin is absent or unreadable/corrupt. Decompression yields exactly the
+     * plain file's bytes, so a read served from the twin is byte-identical to one served from disk.
+     */
+    private JsonNode readTree(ArtifactKey k) {
+        ArtifactKey gz = gzKey(k);
+        if (store.lastModified(gz) >= 0) {
+            try (InputStream in = new GZIPInputStream(store.read(gz))) {
+                JsonNode doc = mapper.readTree(in);
+                if (doc != null && !doc.isMissingNode()) return doc;
+            } catch (Exception e) {
+                // A truncated/corrupt twin must never fail a read that has a valid plain file.
+                log.debug("gz sidecar {} unreadable ({}), falling back to plain", gz, e.getMessage());
+            }
+        }
+        try (InputStream in = store.read(k)) {
+            JsonNode doc = mapper.readTree(in);
+            return (doc == null || doc.isMissingNode()) ? null : doc;
+        } catch (Exception e) {
+            log.debug("view read {} failed: {}", k, e.getMessage());
             return null;
         }
     }
@@ -264,17 +321,48 @@ public class AnalysisViewStore {
         // trust mtime granularity to notice (two writes can share a millisecond).
         if (HEADER.equals(view)) headerFormatMemo.remove(name);
         synchronized (lockFor(name)) {
-            try (OutputStream out = store.write(key(name, view))) {
-                mapper.writeValue(out, doc);
-                return true;
+            ArtifactKey k = key(name, view);
+            byte[] json;
+            try {
+                // Serialise ONCE into memory; the same bytes are then written as the plain file and
+                // gzipped into the twin. No second pass over the document, and no re-read of a large
+                // sidecar — the JSON is already in memory here.
+                json = mapper.writeValueAsBytes(doc);
             } catch (Exception e) {
-                if (logFailure) {
-                    log.warn("view write {} / {} failed: {}", name, view, e.getMessage());
-                } else {
-                    log.debug("view write {} / {} failed: {}", name, view, e.getMessage());
-                }
+                logWriteFailure(name, view, e, logFailure);
                 return false;
             }
+            try (OutputStream out = store.write(k)) {
+                out.write(json);
+            } catch (Exception e) {
+                logWriteFailure(name, view, e, logFailure);
+                return false;
+            }
+            writeGzTwin(k, json);
+            return true;
+        }
+    }
+
+    /**
+     * Writes the {@code .gz} twin of {@code k} in the same store write pass. Best-effort: a failed
+     * twin write must never fail the write of the sidecar itself (the plain file is authoritative,
+     * and a read falls back to it), so the failure is logged at DEBUG and swallowed.
+     */
+    private void writeGzTwin(ArtifactKey k, byte[] json) {
+        try (OutputStream out = store.write(gzKey(k));
+             GZIPOutputStream gz = new GZIPOutputStream(out)) {
+            gz.write(json);
+            gz.finish();
+        } catch (Exception e) {
+            log.debug("gz sidecar write {} failed: {}", gzKey(k), e.getMessage());
+        }
+    }
+
+    private void logWriteFailure(String name, String view, Exception e, boolean logFailure) {
+        if (logFailure) {
+            log.warn("view write {} / {} failed: {}", name, view, e.getMessage());
+        } else {
+            log.debug("view write {} / {} failed: {}", name, view, e.getMessage());
         }
     }
 
@@ -317,17 +405,12 @@ public class AnalysisViewStore {
     public boolean isHeaderFormatStale(String name) {
         if (name == null || name.isBlank()) return false;
         ArtifactKey hk = key(name, HEADER);
-        long hm = store.lastModified(hk);
+        long hm = sidecarMtime(hk);
         if (hm < 0) return false;
         long[] memo = headerFormatMemo.get(name);
         if (memo == null || memo[0] != hm) {
-            int version = -1;
-            try (InputStream in = store.read(hk)) {
-                JsonNode doc = mapper.readTree(in);
-                version = (doc != null && doc.isObject()) ? doc.path("formatVersion").asInt(-1) : -1;
-            } catch (Exception e) {
-                log.debug("header format probe {} failed: {}", name, e.getMessage());
-            }
+            JsonNode doc = readTree(hk);
+            int version = (doc != null && doc.isObject()) ? doc.path("formatVersion").asInt(-1) : -1;
             memo = new long[]{hm, version};
             headerFormatMemo.put(name, memo);
         }
@@ -581,7 +664,10 @@ public class AnalysisViewStore {
             variants.sort(java.util.Comparator.comparingLong(e -> e.getValue().lastModified()));
             int excess = variants.size() - COMPLEXITY_VARIANT_CAP;
             for (int i = 0; i < excess; i++) {
-                store.delete(variants.get(i).getKey());
+                ArtifactKey variant = variants.get(i).getKey();
+                store.delete(variant);
+                // Drop the variant's gz twin with it, so pruning does not leave an orphan.
+                store.delete(gzKey(variant));
             }
         } catch (Exception e) {
             log.debug("complexity variant prune {} failed: {}", name, e.getMessage());

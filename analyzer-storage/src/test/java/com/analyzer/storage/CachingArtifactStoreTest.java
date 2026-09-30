@@ -172,4 +172,122 @@ class CachingArtifactStoreTest {
             return s.filter(e -> !e.directory()).map(e -> e.key().leaf()).sorted().toList();
         }
     }
+
+    /* ────────────────────────────── heap micro-cache ────────────────────────────── */
+
+    private CachingArtifactStore heapCache(ArtifactStore delegate, long heapMaxBytes) {
+        return new CachingArtifactStore("test", delegate, tmp.resolve("cache").resolve("store"),
+                64L * 1024 * 1024, CachingArtifactStore.DEFAULT_REVALIDATE_MS, heapMaxBytes);
+    }
+
+    /** Removes both the disk mirror and the backend copy, so only the heap could still answer. */
+    private void stripDiskAndBackend(CachingArtifactStore store, ArtifactStore backend, ArtifactKey k)
+            throws IOException {
+        backend.delete(k);
+        Files.deleteIfExists(store.cacheDir().resolve(k.toString()));
+    }
+
+    @Test
+    void smallReadIsServedFromTheHeapAfterDiskAndBackendAreGone() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        CachingArtifactStore store = heapCache(backend, 64L * 1024 * 1024);
+        ArtifactKey k = ArtifactKey.of("jar", "demo", "sidecar.json");
+        put(store, k, "{\"small\":true}");
+
+        assertEquals("{\"small\":true}", get(store, k), "first read mirrors and promotes to heap");
+        stripDiskAndBackend(store, backend, k);
+
+        assertEquals("{\"small\":true}", get(store, k),
+                "a heap hit must serve without the disk mirror or the backend");
+    }
+
+    @Test
+    void writeInvalidatesTheHeapEntrySoTheOldValueIsNeverServed() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        CachingArtifactStore store = heapCache(backend, 64L * 1024 * 1024);
+        ArtifactKey k = ArtifactKey.of("x.json");
+        put(store, k, "v1");
+        assertEquals("v1", get(store, k));
+
+        put(store, k, "v2");
+        assertEquals("v2", get(store, k), "a write must drop the heap entry, not just the disk one");
+    }
+
+    @Test
+    void deleteInvalidatesTheHeapEntry() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        CachingArtifactStore store = heapCache(backend, 64L * 1024 * 1024);
+        ArtifactKey k = ArtifactKey.of("x.json");
+        put(store, k, "v1");
+        assertEquals("v1", get(store, k));
+
+        assertTrue(store.delete(k));
+        assertThrows(IOException.class, () -> get(store, k),
+                "a deleted artifact must not be served from the heap");
+    }
+
+    @Test
+    void deletePrefixInvalidatesEveryHeapEntryUnderIt() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        CachingArtifactStore store = heapCache(backend, 64L * 1024 * 1024);
+        ArtifactKey a = ArtifactKey.of("dir", "a.json");
+        ArtifactKey b = ArtifactKey.of("dir", "b.json");
+        put(store, a, "aa");
+        put(store, b, "bb");
+        assertEquals("aa", get(store, a));
+        assertEquals("bb", get(store, b));
+
+        store.deletePrefix(ArtifactKey.of("dir"));
+        assertThrows(IOException.class, () -> get(store, a));
+        assertThrows(IOException.class, () -> get(store, b));
+    }
+
+    @Test
+    void artifactOverThePerEntryCapIsNeverHeapCached() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        CachingArtifactStore store = heapCache(backend, 64L * 1024 * 1024);
+        ArtifactKey k = ArtifactKey.of("big.json");
+        byte[] big = new byte[(int) CachingArtifactStore.HEAP_MAX_ENTRY_BYTES + 1];
+        try (OutputStream out = store.write(k)) {
+            out.write(big);
+        }
+        try (InputStream in = store.read(k)) {
+            assertEquals(big.length, in.readAllBytes().length);
+        }
+        stripDiskAndBackend(store, backend, k);
+        assertThrows(IOException.class, () -> get(store, k),
+                "an artifact over the per-entry cap must never be heap-cached");
+    }
+
+    @Test
+    void heapCacheIsDisabledWhenTheCapIsZero() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        CachingArtifactStore store = heapCache(backend, 0);
+        ArtifactKey k = ArtifactKey.of("x.json");
+        put(store, k, "v1");
+        assertEquals("v1", get(store, k));
+        stripDiskAndBackend(store, backend, k);
+        assertThrows(IOException.class, () -> get(store, k),
+                "with the heap disabled a read must fall through to the backend");
+    }
+
+    @Test
+    void heapCapEvictsLeastRecentlyUsed() throws IOException {
+        InMemoryArtifactStore backend = new InMemoryArtifactStore();
+        // 30-byte heap: two 20-byte entries cannot both stay.
+        CachingArtifactStore store = heapCache(backend, 30);
+        String twenty = "01234567890123456789";
+        ArtifactKey first = ArtifactKey.of("first.json");
+        ArtifactKey second = ArtifactKey.of("second.json");
+        put(store, first, twenty);
+        put(store, second, twenty);
+        assertEquals(twenty, get(store, first));
+        assertEquals(twenty, get(store, second));
+
+        stripDiskAndBackend(store, backend, first);
+        stripDiskAndBackend(store, backend, second);
+        assertThrows(IOException.class, () -> get(store, first),
+                "the least-recently-used heap entry must have been evicted");
+        assertEquals(twenty, get(store, second), "the most recently used entry stays in the heap");
+    }
 }

@@ -48,6 +48,10 @@ import java.nio.file.Path;
  * # disk read-through cache (on by default; wraps BOTH routed stores):
  * app.cache.disk.enabled=true
  * app.cache.disk.max-mb=2048                     # LRU-by-last-access cap under {data}/cache/store
+ *
+ * # heap micro-cache (on by default): a small in-heap LRU for READ artifacts <= 256 KB each.
+ * # Only what is actually read is ever held; 0 disables it. Never holds a large artifact.
+ * app.cache.heap.max-mb=64
  * </pre>
  *
  * <p>Two properties, because they are two capabilities (PLAN-00): {@code ArtifactStore} is a blob
@@ -101,12 +105,13 @@ public class StorageConfig {
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
             @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind,
             @Value("${app.cache.disk.enabled:true}") boolean cacheEnabled,
-            @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb) {
+            @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb,
+            @Value("${app.cache.heap.max-mb:64}") long cacheHeapMb) {
         return buildAndRegister("parser", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
                 ssoSessionRegistry, currentHttpSession,
                 modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
                 mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
-                cacheEnabled, cacheMaxMb);
+                cacheEnabled, cacheMaxMb, cacheHeapMb);
     }
 
     /**
@@ -141,12 +146,13 @@ public class StorageConfig {
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
             @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind,
             @Value("${app.cache.disk.enabled:true}") boolean cacheEnabled,
-            @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb) {
+            @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb,
+            @Value("${app.cache.heap.max-mb:64}") long cacheHeapMb) {
         return buildAndRegister("jar", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
                 ssoSessionRegistry, currentHttpSession,
                 modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
                 mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
-                cacheEnabled, cacheMaxMb);
+                cacheEnabled, cacheMaxMb, cacheHeapMb);
     }
 
     /**
@@ -170,7 +176,7 @@ public class StorageConfig {
             String modeProp, String dataDir, String bucket, String prefix, String region,
             String endpoint, String mongoUri, String mongoDatabase, String mongoPrefix,
             int inlineThreshold, long hybridBigThreshold, String s3AlwaysPaths,
-            boolean s3WriteBehind, boolean cacheEnabled, long cacheMaxMb) {
+            boolean s3WriteBehind, boolean cacheEnabled, long cacheMaxMb, long cacheHeapMb) {
         // The startup store: what a request with no session-bound state reads and writes through,
         // signed with the credential resolver (which answers the default chain when there is no
         // session). See SessionRoutingArtifactStore for the routing rule.
@@ -199,13 +205,18 @@ public class StorageConfig {
             log.info("[storage] {}: disk cache disabled (app.cache.disk.enabled=false)", name);
             return effective;
         }
-        // {app.data-dir}/cache/store/ — local disk only, never heap. One shared root; the store name
-        // is the first segment, so parser and jar entries never collide.
+        // {app.data-dir}/cache/store/ — local disk. One shared root; the store name is the first
+        // segment, so parser and jar entries never collide. The heap micro-cache sits above the
+        // disk layer and is strictly capped; 0 disables it.
         Path cacheRoot = Path.of(dataDir).resolve("cache").resolve("store");
         long maxBytes = cacheMaxMb <= 0 ? -1 : cacheMaxMb * 1024L * 1024L;
-        log.info("[storage] {}: disk cache at {} (max {} MB, 24h revalidation)",
-                name, cacheRoot.resolve(name), cacheMaxMb);
-        return new CachingArtifactStore(name, effective, cacheRoot, maxBytes);
+        long heapMaxBytes = cacheHeapMb <= 0 ? 0 : cacheHeapMb * 1024L * 1024L;
+        log.info("[storage] {}: disk cache at {} (max {} MB, 24h revalidation); heap micro-cache "
+                        + "{} MB (artifacts <= {} KB)",
+                name, cacheRoot.resolve(name), cacheMaxMb, Math.max(0, cacheHeapMb),
+                CachingArtifactStore.HEAP_MAX_ENTRY_BYTES / 1024);
+        return new CachingArtifactStore(name, effective, cacheRoot, maxBytes,
+                CachingArtifactStore.DEFAULT_REVALIDATE_MS, heapMaxBytes);
     }
 
     /**

@@ -10,10 +10,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -258,6 +261,95 @@ class AnalysisViewWriterTest {
         return AnalysisPaths.resolveKey(NAME, "views/" + AnalysisViewStore.CALL_TREE_DIR + "/"
                 + AnalysisViewStore.callTreeFileName(nodeId));
     }
+
+    /* ───────────────────────────── gzip twins ───────────────────────────── */
+
+    private static final String[] FACETS = {
+            AnalysisViewStore.SEQUENCES, AnalysisViewStore.CURSORS, AnalysisViewStore.DYNAMIC_SQL,
+            AnalysisViewStore.JOINS_SUMMARY, AnalysisViewStore.TABLE_JOINS,
+            AnalysisViewStore.TABLE_COLUMNS, AnalysisViewStore.COMPLEXITY,
+            AnalysisViewStore.SUMMARY_STATS, AnalysisViewStore.CALLERS, AnalysisViewStore.SEARCH
+    };
+
+    private ArtifactKey gzKey(ArtifactKey k) {
+        return k.parent().resolve(k.leaf() + ".gz");
+    }
+
+    private byte[] readAll(ArtifactKey k) throws IOException {
+        try (InputStream in = store.read(k)) {
+            return in.readAllBytes();
+        }
+    }
+
+    private static byte[] gunzip(byte[] gz) throws IOException {
+        try (GZIPInputStream in = new GZIPInputStream(new java.io.ByteArrayInputStream(gz))) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            in.transferTo(out);
+            return out.toByteArray();
+        }
+    }
+
+    /** Every sidecar written gets a .gz twin that decompresses to exactly the plain bytes. */
+    @Test
+    void everySidecarIsWrittenWithAGzTwin() throws IOException {
+        writer.writeAll(NAME);
+        for (String view : FACETS) {
+            ArtifactKey plain = viewKey(view);
+            ArtifactKey gz = gzKey(plain);
+            assertTrue(store.exists(plain), "missing plain sidecar " + view);
+            assertTrue(store.exists(gz), "missing gz twin for " + view);
+            assertArrayEquals(readAll(plain), gunzip(readAll(gz)),
+                    "gz twin must decompress to the plain bytes for " + view);
+        }
+    }
+
+    /** A write round-trips identically whether served from the twin or the plain file. */
+    @Test
+    void writeThenReadRoundTripsIdenticallyThroughTheGzTwin() throws IOException {
+        var doc = M.createObjectNode().put("k", "v").put("n", 3);
+        assertTrue(views.write(NAME, AnalysisViewStore.SEQUENCES, doc));
+        ArtifactKey plain = viewKey(AnalysisViewStore.SEQUENCES);
+        assertArrayEquals(M.writeValueAsBytes(doc), M.writeValueAsBytes(views.read(NAME, AnalysisViewStore.SEQUENCES)),
+                "the gz-served read must equal the document that was written");
+
+        // Remove the plain file: the read must still succeed from the twin, identically.
+        store.delete(plain);
+        assertArrayEquals(M.writeValueAsBytes(doc), M.writeValueAsBytes(views.read(NAME, AnalysisViewStore.SEQUENCES)),
+                "a read must be served from the gz twin when the plain file is gone");
+    }
+
+    /** With the twin absent, a read falls back to the plain file. */
+    @Test
+    void readFallsBackToPlainWhenTheGzTwinIsAbsent() throws IOException {
+        var doc = M.createObjectNode().put("k", "v");
+        views.write(NAME, AnalysisViewStore.SEQUENCES, doc);
+        ArtifactKey plain = viewKey(AnalysisViewStore.SEQUENCES);
+        store.delete(gzKey(plain));
+        assertArrayEquals(M.writeValueAsBytes(doc), M.writeValueAsBytes(views.read(NAME, AnalysisViewStore.SEQUENCES)));
+    }
+
+    /**
+     * The staleness check compares the twin's mtime, because the twin is what a read fetches: a
+     * backdated plain file with a fresh twin is still served; a backdated twin is not.
+     */
+    @Test
+    void stalenessUsesTheGzTwinsMtime() throws IOException {
+        var doc = M.createObjectNode().put("k", "v");
+        views.write(NAME, AnalysisViewStore.SEQUENCES, doc);
+        ArtifactKey plain = viewKey(AnalysisViewStore.SEQUENCES);
+        ArtifactKey gz = gzKey(plain);
+
+        // Backdate only the plain file; the twin (what a read fetches) is still fresh.
+        store.setLastModifiedForTest(plain, System.currentTimeMillis() - 100_000);
+        assertNotNull(views.read(NAME, AnalysisViewStore.SEQUENCES),
+                "a fresh twin must govern staleness, not the backdated plain file");
+
+        // Now backdate the twin past api/index.json (written at setup) — the sidecar is stale.
+        store.setLastModifiedForTest(gz, System.currentTimeMillis() - 100_000);
+        assertNull(views.read(NAME, AnalysisViewStore.SEQUENCES),
+                "a twin older than api/index.json must be rejected as stale");
+    }
+
 
     /**
      * A format bump invalidates the whole facet set: a header left by an older deploy makes

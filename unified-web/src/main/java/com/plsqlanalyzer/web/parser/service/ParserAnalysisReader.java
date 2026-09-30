@@ -129,27 +129,30 @@ public class ParserAnalysisReader {
     public List<ParserAnalysisInfo> listAnalyses() throws IOException {
         // ONE prefix listing for the whole tree. The previous Files.walk + per-directory
         // isRegularFile("api/index.json") probe is a stat per candidate — fine locally, minutes of
-        // latency over object storage.
+        // latency over object storage. The same listing also carries each candidate's mtime, so the
+        // manifest-freshness check below costs no extra round trip.
         ArtifactKey root = com.analyzer.storage.ArtifactKey.of(AnalysisPaths.PARSE_ROOT);
-        List<ArtifactKey> indexKeys = new ArrayList<>();
+        Map<ArtifactKey, ArtifactEntry> entries;
         try {
-            for (ArtifactKey k : store.statPrefix(root).keySet()) {
-                List<String> segs = k.segments();
-                int n = segs.size();
-                // .../<OBJECT>/api/index.json — the marker of an analysis directory.
-                if (n >= 4 && "index.json".equals(segs.get(n - 1)) && "api".equals(segs.get(n - 2))) {
-                    indexKeys.add(k);
-                }
-            }
+            entries = store.statPrefix(root);
         } catch (IOException e) {
             return Collections.emptyList();
+        }
+        List<ArtifactKey> indexKeys = new ArrayList<>();
+        for (ArtifactKey k : entries.keySet()) {
+            List<String> segs = k.segments();
+            int n = segs.size();
+            // .../<OBJECT>/api/index.json — the marker of an analysis directory.
+            if (n >= 4 && "index.json".equals(segs.get(n - 1)) && "api".equals(segs.get(n - 2))) {
+                indexKeys.add(k);
+            }
         }
 
         List<ParserAnalysisInfo> results = new ArrayList<>();
         indexKeys.sort(Comparator.comparing(k -> AnalysisPaths.nameOfKey(k.parent().parent())));
         for (ArtifactKey indexKey : indexKeys) {
             try {
-                ParserAnalysisInfo info = buildInfo(indexKey);
+                ParserAnalysisInfo info = buildInfo(indexKey, entries);
                 if (info != null) results.add(info);
             } catch (IOException ignored) {}
         }
@@ -676,12 +679,59 @@ public class ParserAnalysisReader {
         return treeNode;
     }
 
-    /** @param indexKey the {@code .../<OBJECT>/api/index.json} key that identifies the analysis */
-    private ParserAnalysisInfo buildInfo(ArtifactKey indexKey) throws IOException {
+    /**
+     * One analysis's listing row.
+     *
+     * <p>When a <b>fresh</b> {@code api/manifest.json} is present — one written no earlier than
+     * {@code api/index.json} — the row is built from the manifest's {@code listing} scalars, which
+     * the writer recorded from the very index root this method would otherwise read. That avoids
+     * opening (and, for a large analysis, streaming past the {@code nodes[]} array of) index.json
+     * once per analysis; the mtimes are already in hand from the one prefix listing, so the check
+     * adds no round trip. Absent or stale, it falls back to the index read, unchanged.
+     *
+     * <p>Byte-identical either way: the manifest's listing scalars ARE the index root's scalars
+     * (see {@code ChunkedFlowWriter.listingScalars}), mapped through the same helpers.
+     *
+     * @param indexKey the {@code .../<OBJECT>/api/index.json} key that identifies the analysis
+     * @param entries  the whole-tree listing, for the manifest/index mtimes
+     */
+    private ParserAnalysisInfo buildInfo(ArtifactKey indexKey, Map<ArtifactKey, ArtifactEntry> entries)
+            throws IOException {
+        ArtifactKey manifestKey = indexKey.parent().resolve("manifest.json");
+        ArtifactEntry manifestEntry = entries.get(manifestKey);
+        if (manifestEntry != null && manifestEntry.lastModified() >= 0) {
+            ArtifactEntry indexEntry = entries.get(indexKey);
+            boolean fresh = indexEntry == null
+                    || manifestEntry.lastModified() >= indexEntry.lastModified();
+            if (fresh) {
+                JsonNode listing = readManifestListing(manifestKey);
+                if (listing != null) {
+                    String name = AnalysisPaths.nameOfKey(indexKey.parent().parent());
+                    return buildInfoFromScalars(name, listing);
+                }
+            }
+        }
         JsonNode root = readTree(indexKey);
+        return buildInfoFromScalars(AnalysisPaths.nameOfKey(indexKey.parent().parent()), root);
+    }
+
+    /** The {@code listing} object of a manifest document, or {@code null} when it is absent. */
+    private JsonNode readManifestListing(ArtifactKey manifestKey) {
+        try {
+            JsonNode doc = readTree(manifestKey);
+            JsonNode listing = doc == null ? null : doc.get("listing");
+            return (listing != null && listing.isObject()) ? listing : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Maps an analysis's listing scalars — the index root's own, whether read from {@code
+     * api/index.json} or taken from the manifest's {@code listing} object — to the listing row.
+     */
+    private ParserAnalysisInfo buildInfoFromScalars(String name, JsonNode root) {
         ParserAnalysisInfo info = new ParserAnalysisInfo();
-        // Identity name is the analysis directory (index key minus api/index.json) with '/'→'~'.
-        String name = AnalysisPaths.nameOfKey(indexKey.parent().parent());
         info.setName(name);
         info.setEntryPoint(txtDef(root, "entryPoint", AnalysisPaths.leaf(name)));
         info.setEntrySchema(txtDef(root, "entrySchema", ""));
