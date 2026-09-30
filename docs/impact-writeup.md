@@ -1,5 +1,9 @@
 # AMP Analyzer — Impact Writeup
 
+> **Headline outcome — batch validation of 200,000+ lines of legacy code: 3-5 days of manual work → 2-3 hours**
+> with the tool's batch-validation skill. Initial static analysis of that codebase takes 10-15 minutes; after
+> that, everything — search, call chains, validation, planning — is instant.
+
 ## What it is, and why it matters
 
 AMP Analyzer is a static analyzer for legacy ERP modernization whose **primary target is Oracle stored
@@ -44,6 +48,7 @@ for the largest inputs, silently incomplete.
 
 | Task | Before — by hand (human estimate*) | Before — old tool | After — AMP now |
 |---|---|---|---|
+| **Batch validation (200K+ lines)** | **3-5 days** | — | **2-3 hours** |
 | "Where is this table touched?" across ~500 procedures | **hours to a full day** of grep/read/verify | 35-41s per query | **7-19 ms** |
 | Full call-chain map of ONE big procedure (every branch) | **hours per procedure**, branches still missed | 71.5s per view | **2 ms** |
 | Debugging: finding what calls a procedure / what it affects | **hours** (mental tracing) | — | **4.6 ms** |
@@ -56,12 +61,16 @@ error-prone, where the tool returns the complete answer in milliseconds. The 71.
 tool's own measured response times before the indexing work — the human manual times are the real 'before'
 that motivated building it."
 
-## Batch validation (in preparation)
+## Batch validation — in production use
 
-The same outputs make **batch-optimize** and **batch-validation** possible: instead of validating one
-procedure at a time, whole batches run at once — because every procedure's full map is precomputed and
-served in milliseconds. Removing **~1 hour/day** of analyst waiting and returning search in milliseconds is
-precisely what makes those batch workflows practical.
+The team runs **batch-optimize** and **batch-validation** skills on top of the platform today, at batch
+scale rather than one procedure at a time. Validating **200,000+ lines** of legacy code used to be **3-5
+days** of manual work; with the tool it is **2-3 hours**. The initial static analysis of that codebase takes
+**10-15 minutes**, and after that everything — search, call chains, validation, planning — is instant,
+because every procedure's full map is precomputed and served in milliseconds. The piece-to-piece validation
+described above, run across a whole batch, is what turned a 3-5 day validation cycle into 2-3 hours.
+Removing **~1 hour/day** of analyst waiting per analyst remains a secondary benefit that makes the batch
+workflows practical.
 
 ## Reliability and platform
 
