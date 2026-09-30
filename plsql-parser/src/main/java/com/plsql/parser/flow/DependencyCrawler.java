@@ -945,6 +945,11 @@ public class DependencyCrawler {
             tn.setTriggerEvent(eventU);
             tn.setTriggerTiming(timing);
             tn.setReadable(true);
+            // Anchor every trigger at depth 1: a trigger is an artefact of the table it fires on,
+            // not a node on the caller's own path, so it is pinned one level under the root rather
+            // than at its true call-graph distance. This is why /complexity/scores reports a
+            // trigger at depth 1 while the call-tree walker (graph distance from the root) can
+            // report it much deeper — two different, intentional definitions of "depth".
             tn.setDepth(1);
             tn.generateNodeId();
             String trigId = tn.getNodeId();

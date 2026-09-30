@@ -333,7 +333,9 @@ public class ParserAnalysisReader {
                     final String cursorType = refCursor ? "REF_CURSOR" : forLoop ? "FOR_LOOP" : "EXPLICIT";
                     final String baseOp = forLoop ? "CURSOR_FOR_LOOP" : "DECLARE";
                     final String queryText = query != null ? query : "";
-                    String mapKey = cursorName + "::" + (nodeId != null ? nodeId : "");
+                    // One row per cursor INSTANCE: keyed by the declaration's own line so Oracle's
+                    // identically-named "(FOR R)" implicit FOR-loop cursors do not collapse.
+                    String mapKey = cursorName + "::" + (nodeId != null ? nodeId : "") + "#" + line;
 
                     ObjectNode entry = cursorMap.computeIfAbsent(mapKey, k -> {
                         ObjectNode e = mapper.createObjectNode();

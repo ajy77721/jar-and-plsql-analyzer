@@ -203,8 +203,12 @@ final class ParserFacetSpecs {
                    "2", FacetSpec.arrayColumn("operations")));
 
     /**
-     * Cursors. The reader merges by {@code name::nodeId}; {@code nodeId} is not a field on the row,
-     * so the identity is rebuilt from the first access detail — which is that same node.
+     * Cursors. The reader emits one row per cursor INSTANCE, keyed by
+     * {@code name::nodeId#line}; {@code nodeId} is not a field on the row, so the identity is
+     * rebuilt from the first access detail — that same node and the declaration's own line. The
+     * line must be part of the identity: Oracle names every implicit FOR-loop cursor
+     * {@code "(FOR R)"}, so {@code name::node} alone is not unique per row and a page boundary
+     * could drop one of two same-named cursors on one node.
      */
     static final FacetSpec CURSORS = new FacetSpec(
             "cursors",
@@ -220,7 +224,8 @@ final class ParserFacetSpecs {
             row -> {
                 List<String> pids = FacetSpec.accessDetailProcedureIds(row);
                 return row.path("cursorName").asText("").toUpperCase(Locale.ROOT) + "::"
-                        + (pids.isEmpty() ? "" : pids.get(0));
+                        + (pids.isEmpty() ? "" : pids.get(0))
+                        + "#" + FacetSpec.accessDetailFirstLine(row);
             },
             row -> lower(row.path("cursorName").asText("") + " " + row.path("queryText").asText("")),
             row -> List.of(row.path("cursorType").asText("EXPLICIT")),

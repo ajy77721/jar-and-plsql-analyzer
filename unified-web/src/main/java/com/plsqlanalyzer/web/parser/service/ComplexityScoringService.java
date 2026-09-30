@@ -29,6 +29,17 @@ import org.springframework.stereotype.Service;
  * {@code linear: w*v}, {@code logarithmic: w*log2(1+v)}, {@code exponential: w*((1+v)^p - 1)},
  * {@code balanced: w*sqrt(v)}; {@code score = round(sum of six metric contributions)};
  * {@code risk = score>=high ? HIGH : score>=medium ? MEDIUM : LOW}.
+ *
+ * <h2>{@code depth} here is the nesting anchor level, not graph distance</h2>
+ *
+ * <p>The {@code depth} this endpoint reports and scores is the index node's own {@code depth} — the
+ * level the crawler anchored the object at, not its distance from the entry point in the call
+ * graph. The two deliberately differ for triggers: {@code DependencyCrawler} anchors every emitted
+ * trigger at depth 1 ({@code tn.setDepth(1)}) so a trigger appears as a root-level artefact of the
+ * table it fires on, while the call-tree walker's own {@code depth} (see {@code CallGraphNav}) is
+ * BFS distance from whatever node the tree is rooted at — so the same trigger can show depth 1 here
+ * and depth 7 in the call tree. That divergence is intentional; do not "fix" one to match the other
+ * without deciding which meaning the caller wants.
  */
 @Service
 public class ComplexityScoringService {
@@ -75,6 +86,8 @@ public class ComplexityScoringService {
             long cursors = counts.path("cursors").asLong(0);
             long exHandlers = counts.path("exceptionHandlers").asLong(0);
             long loc = n.path("linesOfCode").asLong(0);
+            // Nesting anchor level from the index (crawler-assigned), NOT call-graph distance —
+            // see the class javadoc's "depth here is the nesting anchor level" note.
             long depth = n.path("depth").asLong(0);
 
             double score = Math.round(

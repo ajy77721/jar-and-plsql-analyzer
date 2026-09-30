@@ -17,6 +17,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -256,5 +257,29 @@ class AnalysisViewWriterTest {
     private ArtifactKey callTreeKey(String nodeId) {
         return AnalysisPaths.resolveKey(NAME, "views/" + AnalysisViewStore.CALL_TREE_DIR + "/"
                 + AnalysisViewStore.callTreeFileName(nodeId));
+    }
+
+    /**
+     * A format bump invalidates the whole facet set: a header left by an older deploy makes
+     * {@code read} refuse every sidecar beside it, so a read recomputes and rewrites the current
+     * shape (the lazy-backfill path), and the warm-up sweep sees the set as incomplete and rebuilds
+     * it rather than skipping a stale-but-fresh-looking set.
+     */
+    @Test
+    void anOlderFormatHeaderInvalidatesEveryFacetSidecar() throws IOException {
+        writer.writeAll(NAME);
+        assertNotNull(views.read(NAME, AnalysisViewStore.SEQUENCES),
+                "a header-less (legacy) set still reads back");
+
+        var old = M.createObjectNode();
+        old.put("formatVersion", AnalysisViewStore.FORMAT_VERSION - 1);
+        old.put("entryPoint", "DEMO");
+        views.write(NAME, AnalysisViewStore.HEADER, old);
+
+        assertTrue(views.isHeaderFormatStale(NAME), "an older-format header must be reported stale");
+        assertNull(views.read(NAME, AnalysisViewStore.SEQUENCES),
+                "a sidecar beside an older-format header must not be served");
+        assertFalse(views.hasCompleteViewSet(NAME),
+                "an older-format set is incomplete and must be rebuilt");
     }
 }

@@ -143,7 +143,13 @@ class NodeScanFacetReader {
 
                     String cursorType = refCursor ? "REF_CURSOR" : forLoop ? "FOR_LOOP" : "EXPLICIT";
                     String baseOperation = forLoop ? "CURSOR_FOR_LOOP" : "DECLARE";
-                    String mapKey = cursorName + "::" + (nodeId != null ? nodeId : "");
+                    // Group by CURSOR INSTANCE, not by (name, node): Oracle gives every implicit
+                    // FOR-loop cursor the same synthetic name ("(FOR R)"), so keying on name+node
+                    // collapsed a node's 38 cursors into a handful of rows (64 vs 476 across the
+                    // known corpus). The declaration's own line makes each instance its own row, so
+                    // the facet's row count equals counts.cursors / stats.totalCursors and each
+                    // instance keeps its own accessDetails.
+                    String mapKey = cursorName + "::" + (nodeId != null ? nodeId : "") + "#" + line;
 
                     ObjectNode entry = cursorMap.get(mapKey);
                     if (entry == null) {

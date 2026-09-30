@@ -819,23 +819,15 @@ public class ChunkedFlowWriter {
 
             // Counts only — details in nodes/{id}.json
             int tableCount = node.getTableOperations() != null ? countDistinct(node.getTableOperations()) : 0;
-            int callCountOut = 0;
-            int internalCallCount = 0;
-            int externalCallCount = 0;
-            if (node.getCalls() != null) {
-                Set<String> seen = new HashSet<>();
-                for (CallInfo c : node.getCalls()) {
-                    if ("BUILTIN".equalsIgnoreCase(c.getType())) continue;
-                    // Schema-qualify standalone calls so same-named cross-schema routines count distinctly.
-                    String key = c.getPackageName() != null ? c.getPackageName() + "." + c.getName()
-                            : (c.getSchema() != null && !c.getSchema().isEmpty() ? c.getSchema() + "$" + c.getName() : c.getName());
-                    if (seen.add(key)) {
-                        callCountOut++;
-                        if ("INTERNAL".equalsIgnoreCase(c.getType())) internalCallCount++;
-                        else externalCallCount++;
-                    }
-                }
-            }
+            // Counted with groupCalls()'s own key (below), so counts.callsOut equals the node
+            // detail's calls[] length — overloads split by arity instead of merging, and the
+            // schema/package qualification matches. The old name-only key under-counted every
+            // overloaded target (ERP_PKG_PLANNER.COMPUTE_TOTAL (1 args)/(2 args) collapsed to one),
+            // making complexity.callsOut 1 short of node.calls for the affected procedures.
+            int[] callCounts = countCallGroups(node.getCalls(), node.getPackageName(), node.getSchema());
+            int callCountOut = callCounts[0];
+            int internalCallCount = callCounts[1];
+            int externalCallCount = callCounts[2];
             int varCount = node.getLocalVariables() != null ? node.getLocalVariables().size() : 0;
             int cursorCount = node.getCursors() != null ? node.getCursors().size() : 0;
             int paramCount = node.getParameters() != null ? node.getParameters().size() : 0;
@@ -1511,6 +1503,58 @@ public class ChunkedFlowWriter {
         }
 
         return new ArrayList<>(grouped.values());
+    }
+
+    /**
+     * Distinct call groups for one node, using <b>the same grouping key as {@link #groupCalls}</b>
+     * so the index's {@code counts.callsOut} equals the node detail's {@code calls[]} length (and
+     * {@code internalCalls}/{@code externalCalls} sum to it). Returns
+     * {@code [callsOut, internalCalls, externalCalls]}.
+     *
+     * <p>Why this is not a name-only de-dup: a target invoked with more than one argument count is
+     * an overload, and {@code groupCalls} splits each arity into its own row
+     * ({@code COMPUTE_TOTAL (1 args)} / {@code (2 args)}). A name-only key merged them, so
+     * {@code counts.callsOut} was lower than the node's own {@code calls[]} for every procedure that
+     * calls an overload — and {@code /complexity/scores} read that short value. Keyed identically
+     * here, the two agree by construction, and {@code /summary/stats.totalCalls} (the sum of the
+     * internal+external halves) stays reconciled with {@code sum(complexity.callsOut)}.
+     */
+    private static int[] countCallGroups(List<CallInfo> calls, String nodePackageName, String nodeSchema) {
+        if (calls == null) return new int[]{0, 0, 0};
+        // Pre-scan mirrors groupCalls: distinct argument counts per (package.)name, before the
+        // BUILTIN filter, so overload detection agrees exactly.
+        Map<String, Set<Integer>> arityByName = new LinkedHashMap<>();
+        for (CallInfo c : calls) {
+            if (c.getName() == null) continue;
+            String bn = (c.getPackageName() != null ? c.getPackageName() + "." : "") + c.getName();
+            arityByName.computeIfAbsent(bn.toUpperCase(), k -> new LinkedHashSet<>()).add(c.getArguments());
+        }
+        Map<String, Boolean> groups = new LinkedHashMap<>(); // groupKey -> isInternal
+        for (CallInfo c : calls) {
+            String callType = c.getType() != null ? c.getType() : "UNKNOWN";
+            if ("BUILTIN".equalsIgnoreCase(callType)) continue;
+            String cPkg = c.getPackageName() != null ? c.getPackageName() : "";
+            String cName = c.getName() != null ? c.getName() : "";
+            boolean overloaded = c.getName() != null && arityByName.getOrDefault(
+                    ((cPkg.isEmpty() ? "" : cPkg + ".") + cName).toUpperCase(),
+                    java.util.Collections.emptySet()).size() > 1;
+            // INTERNAL calls without a package inherit the node's package (see groupCalls).
+            if (cPkg.isEmpty() && "INTERNAL".equalsIgnoreCase(callType)
+                    && nodePackageName != null && !nodePackageName.isEmpty()) {
+                cPkg = nodePackageName;
+            }
+            String schema = c.getSchema();
+            if ((schema == null || schema.isEmpty()) && nodeSchema != null) schema = nodeSchema;
+            String groupKey = !cPkg.isEmpty() ? cPkg + "." + cName
+                    : (schema != null && !schema.isEmpty() ? schema + "$" + cName : cName);
+            if (overloaded) groupKey = groupKey + "#" + c.getArguments();
+            String subprogram = c.getSubprogramName();
+            if (subprogram != null) groupKey = groupKey + "\u0000" + subprogram;
+            groups.putIfAbsent(groupKey, "INTERNAL".equalsIgnoreCase(callType));
+        }
+        int internal = 0;
+        for (boolean isInternal : groups.values()) if (isInternal) internal++;
+        return new int[]{groups.size(), internal, groups.size() - internal};
     }
 
     @SuppressWarnings("unchecked")

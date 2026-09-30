@@ -128,6 +128,28 @@ class SidecarWarmUpServiceTest {
         assertTrue(warmUp.warmOne(NAME), "a complete analysis needs no recompute");
     }
 
+    /**
+     * A set left behind by an older format must be rebuilt, not skipped: the header's formatVersion
+     * is what marks it stale (readHeader returns null), so {@link SidecarWarmUpService#warmOne}
+     * drops the old sidecars and rewrites current-shape ones instead of leaving them to be served.
+     */
+    @Test
+    @DisplayName("a sweep rebuilds a set left behind by an older format")
+    void sweepRebuildsAnOlderFormatSet() throws IOException {
+        var old = M.createObjectNode();
+        old.put("formatVersion", AnalysisViewStore.FORMAT_VERSION - 1);
+        old.put("entryPoint", "DEMO");
+        views.write(NAME, AnalysisViewStore.HEADER, old);
+        put(AnalysisPaths.resolveKey(NAME, "views/" + AnalysisViewStore.SEQUENCES), "[]");
+
+        assertTrue(views.isHeaderFormatStale(NAME), "an older-format header must read as stale");
+        assertFalse(views.hasCompleteViewSet(NAME), "an older-format set is not complete");
+
+        assertEquals(1, warmUp.sweep());
+        assertTrue(views.hasCompleteViewSet(NAME), "the sweep must rebuild the whole set");
+        assertFalse(views.isHeaderFormatStale(NAME), "the header must be current after the sweep");
+    }
+
     @Test
     @DisplayName("a login-triggered sweep runs once per interval, not once per login")
     void loginSweepRunsOncePerInterval() {

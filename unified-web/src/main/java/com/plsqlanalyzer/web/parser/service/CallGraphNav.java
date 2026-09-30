@@ -132,6 +132,18 @@ class CallGraphNav {
         boolean truncated;
     }
 
+    /**
+     * Builds one call-tree node and its subtree.
+     *
+     * <p><b>{@code depth} is graph distance, not the index's nesting anchor level.</b> It is the
+     * number of call edges between the tree's root and this node, incremented once per recursion
+     * ({@code depth + 1}); the root is 0. The index node's own {@code depth} — the value
+     * {@code /complexity/scores} reports and scores — is a different quantity: the crawler anchors
+     * some objects deliberately (every trigger is {@code setDepth(1)} in {@code DependencyCrawler}),
+     * so a trigger can be depth 1 in complexity and depth 7 here depending on how far its caller
+     * chain sits from the queried root. The two are intentionally not reconciled; see
+     * {@code ComplexityScoringService}'s own note.
+     */
     ObjectNode buildCallTreeNode(
             String nodeId,
             Map<String, JsonNode> nodeMetadata,

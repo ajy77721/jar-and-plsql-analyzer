@@ -21,6 +21,13 @@ import java.util.function.Predicate;
  * so this conversion, like `statements.js`/`detailHeader.js`, actually reduces what the browser
  * needs to hold, not just where the computation runs.
  *
+ * <p><b>{@code totalTables} means the DISTINCT table count, everywhere.</b> It is the same number
+ * {@code /analyses} and {@code /tables} report (the analysis index root's {@code totalTables},
+ * written by the crawler from its distinct table set), so the same name means the same thing on
+ * every endpoint. The sum of per-node table <em>references</em> — which this endpoint used to
+ * mislabel {@code totalTables} (e.g. 1256 vs the 114 distinct) — is now its own field,
+ * {@code totalTableReferences}.
+ *
  * <p>Root-level fields the client already reads directly off `PA.analysisData` (`totalTables`,
  * `totalEdges`, `maxDepth`, `errors.length`, `entrySchema`/`entryPoint`) are NOT duplicated here —
  * they aren't a scan (a handful of scalars on an already-loaded small object), and the client's own
@@ -63,7 +70,7 @@ public class SummaryStatsService {
 
         String entrySchema = (entrySchemaRaw == null ? "" : entrySchemaRaw).split("\\.")[0].toUpperCase(Locale.ROOT);
 
-        long totalLoc = 0, totalTables = 0, totalCalls = 0, totalCursors = 0;
+        long totalLoc = 0, totalTableReferences = 0, totalCalls = 0, totalCursors = 0;
         long totalParams = 0, totalVars = 0, totalExHandlers = 0, totalStmts = 0;
         long encryptedCount = 0, totalNodes = 0;
         Map<String, Long> schemas = new LinkedHashMap<>();
@@ -89,7 +96,7 @@ public class SummaryStatsService {
             long depth = n.path("depth").asLong(0);
 
             totalLoc += loc;
-            totalTables += tables;
+            totalTableReferences += tables;
             totalCalls += calls;
             totalCursors += cursors;
             totalParams += params;
@@ -138,7 +145,10 @@ public class SummaryStatsService {
         ObjectNode result = mapper.createObjectNode();
         result.put("totalNodes", totalNodes);
         result.put("totalLoc", totalLoc);
-        result.put("totalTables", totalTables);
+        // totalTables is the DISTINCT table count — the same number /analyses and /tables report —
+        // and totalTableReferences is the per-node SUM this endpoint used to mislabel totalTables.
+        result.put("totalTables", distinctTables(name, index));
+        result.put("totalTableReferences", totalTableReferences);
         result.put("totalCalls", totalCalls);
         result.put("totalCursors", totalCursors);
         result.put("totalParams", totalParams);
@@ -161,5 +171,27 @@ public class SummaryStatsService {
         ObjectNode maxCalls = result.putObject("maxCalls");
         maxCalls.put("name", maxCallsName[0]); maxCalls.put("value", maxCallsVal[0]);
         return ResponseEntity.ok(result);
+    }
+
+    /**
+     * The analysis's DISTINCT table count, fetched the way {@code /analyses}/{@code /tables} get
+     * theirs so the same name means the same number everywhere: the tables index sidecar's own root
+     * scalar ({@code views}-independent, the same document the topbar reads), falling back to the
+     * analysis index root's {@code totalTables} — the crawler writes the same distinct count into
+     * both. This is analysis-wide, not scope-filtered: the scoped dashboard's own client overlays
+     * the same root scalar ({@code summary.js}'s {@code data.totalTables || computed}), so returning
+     * anything else here would disagree with what the user sees.
+     */
+    private long distinctTables(String name, JsonNode index) {
+        try {
+            JsonNode summary = service.getTablesSummary(name);
+            if (summary != null && summary.hasNonNull("totalTables")) {
+                return summary.get("totalTables").asLong(0);
+            }
+        } catch (Exception e) {
+            // Older/merged analyses may have no api/tables/index.json; the index root carries the
+            // same value, so fall through rather than fail the whole stats read.
+        }
+        return index.path("totalTables").asLong(0);
     }
 }

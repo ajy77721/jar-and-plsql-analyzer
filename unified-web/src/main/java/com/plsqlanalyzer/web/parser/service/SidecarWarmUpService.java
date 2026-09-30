@@ -391,6 +391,15 @@ public class SidecarWarmUpService {
             boolean headerNew = false;
             boolean header = views.readHeader(name) != null;
             if (!header) {
+                // An older-format header means the facet sidecars beside it were written by that
+                // older format too. Drop the whole set before rebuilding it: read() already refuses
+                // them, but leaving them in place would let a facet whose read path does not
+                // recompute (the reader-served node-scan facets) be served stale once the fresh
+                // header lands. A genuinely absent header (a never-warmed analysis) has nothing to
+                // drop, so this is a no-op there.
+                if (views.isHeaderFormatStale(name)) {
+                    views.invalidate(name);
+                }
                 header = analysisService.writeHeaderSidecar(name, false);
                 headerNew = header;
             }

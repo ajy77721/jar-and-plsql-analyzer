@@ -112,6 +112,19 @@ public record FacetSpec(String label,
         return out;
     }
 
+    /**
+     * The {@code lineNumber} of a usage row's first access detail, or {@code 0} when there is none.
+     * A usage-style facet whose reader emits one row per <em>instance</em> (not per name) needs the
+     * instance's source line in its row identity — two Oracle implicit FOR-loop cursors share the
+     * synthetic name {@code "(FOR R)"} on the same node, so {@code name::node} alone is not unique
+     * and a page boundary could drop one. See {@code ParserFacetSpecs.CURSORS}.
+     */
+    public static int accessDetailFirstLine(JsonNode row) {
+        JsonNode details = row.path("accessDetails");
+        if (!details.isArray() || details.isEmpty()) return 0;
+        return details.get(0).path("lineNumber").asInt(0);
+    }
+
     /** The elements of a string array field, e.g. {@code operations} or {@code joinTypes}. */
     public static List<String> stringArray(JsonNode row, String field) {
         JsonNode arr = row.path(field);

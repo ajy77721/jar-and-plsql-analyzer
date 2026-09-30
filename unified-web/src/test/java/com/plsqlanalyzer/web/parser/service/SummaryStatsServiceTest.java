@@ -18,7 +18,10 @@ class SummaryStatsServiceTest {
     private static final ObjectMapper M = new ObjectMapper();
 
     private static String indexJson(String nodesJson) {
-        return "{\"nodes\":" + nodesJson + "}";
+        // The root's own totalTables is the DISTINCT count /analyses and /tables report; it is
+        // deliberately different from the sum of the per-node counts below so the two fields can
+        // be told apart.
+        return "{\"totalTables\":2,\"nodes\":" + nodesJson + "}";
     }
 
     private static String node(String id, String schema, String objectType, int loc, int depth,
@@ -44,7 +47,10 @@ class SummaryStatsServiceTest {
         ObjectNode body = (ObjectNode) response.getBody();
         assertEquals(2, body.get("totalNodes").asInt());
         assertEquals(150, body.get("totalLoc").asInt());
-        assertEquals(4, body.get("totalTables").asInt());
+        // totalTables is the DISTINCT count (the index root's own scalar), NOT the per-node sum;
+        // the sum is totalTableReferences. 3 + 1 references vs 2 distinct tables.
+        assertEquals(2, body.get("totalTables").asInt());
+        assertEquals(4, body.get("totalTableReferences").asInt());
         assertEquals(3, body.get("totalCalls").asInt());
         assertEquals(100, body.get("maxLoc").get("value").asInt());
         assertEquals("P1", body.get("maxLoc").get("name").asText());

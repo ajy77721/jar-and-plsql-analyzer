@@ -47,11 +47,12 @@ import java.util.Set;
  *
  * <h2>The merge key, reproduced exactly</h2>
  *
- * <p>The artifact-scan reader groups by {@code cursorName::nodeId} — not by {@code am_cursor_decl}'s
- * own per-declaration identity — so two distinct cursor declarations sharing a name on the same
- * node (the real corpus's own anonymous {@code "(FOR R)"} for-loop cursors, one per node, never two
- * on the same node in this corpus) would merge into one facet row with two access details. This
- * reader reproduces that same grouping, not `am_cursor_decl`'s own one-row-per-declaration shape.
+ * <p>The artifact-scan reader groups by {@code cursorName::nodeId#line} — one facet row per cursor
+ * declaration, keyed by the declaration's own source line. It deliberately is <em>not</em>
+ * {@code cursorName::nodeId}: Oracle names every implicit FOR-loop cursor {@code "(FOR R)"}, so
+ * keying without the line collapsed a node's many cursors into one row (64 rows for a corpus whose
+ * {@code counts.cursors} sums to 476). Including the line gives each instance its own row and its
+ * own accessDetails, which is what this reader reproduces.
  */
 @Component
 public class EntityCursorsReader {
@@ -151,7 +152,7 @@ public class EntityCursorsReader {
             }
         }
 
-        // Grouped by cursorName::nodeId, same key the artifact-scan reader uses.
+        // Grouped by cursorName::nodeId#line, same per-instance key the artifact-scan reader uses.
         Map<String, ObjectNode> rows = new LinkedHashMap<>();
         for (CursorDecl d : decls) {
             NodeInfo node = nodes.get(d.nodeRef());
@@ -159,7 +160,10 @@ public class EntityCursorsReader {
             String nodeName = node == null ? "" : (node.name() == null ? "" : node.name());
             String sourceFile = node == null ? "" : (node.sourceFile() == null ? "" : node.sourceFile());
             String cursorName = d.name() == null ? "UNNAMED" : d.name();
-            String mapKey = cursorName + "::" + nodeId;
+            // One row per cursor INSTANCE: name::node#line, exactly the key NodeScanFacetReader now
+            // uses. Keying on name::node alone collapsed every synthetic Oracle FOR-loop cursor
+            // ("(FOR R)") on a node into one row; the declaration's line keeps each distinct.
+            String mapKey = cursorName + "::" + nodeId + "#" + d.line();
 
             ObjectNode row = rows.computeIfAbsent(mapKey, k -> {
                 ObjectNode n = mapper.createObjectNode();

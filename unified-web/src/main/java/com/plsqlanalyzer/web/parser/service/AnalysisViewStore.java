@@ -51,8 +51,17 @@ public class AnalysisViewStore {
 
     private static final Logger log = LoggerFactory.getLogger(AnalysisViewStore.class);
 
-    /** Bump to invalidate every existing sidecar whose shape this code no longer understands. */
-    public static final int FORMAT_VERSION = 1;
+    /**
+     * Bump to invalidate every existing sidecar whose shape this code no longer understands.
+     *
+     * <p>Version 2: the cursor facet is now one row per cursor INSTANCE
+     * ({@code name::node#line}, not {@code name::node}), {@code /summary/stats} distinguishes
+     * {@code totalTables} (distinct) from {@code totalTableReferences}, and
+     * {@code counts.callsOut} splits overloads. Sidecars written at version 1 carry the old
+     * shapes, so {@link #read} refuses them and the warm-up sweep rebuilds the set — an analysis
+     * analysed before this change upgrades itself on next access rather than serving stale rows.
+     */
+    public static final int FORMAT_VERSION = 2;
 
     /** The sidecar folder inside an analysis directory. */
     public static final String VIEWS_DIR = "views";
@@ -137,6 +146,13 @@ public class AnalysisViewStore {
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
 
     /**
+     * {@code name -> {headerMtime, formatVersionSeen}} — memoises the one header probe a facet read
+     * needs to decide format staleness, so the hot path pays a stat rather than a header GET. The
+     * mtime is the cache key: a rewritten header invalidates the memo with it.
+     */
+    private final ConcurrentHashMap<String, long[]> headerFormatMemo = new ConcurrentHashMap<>();
+
+    /**
      * @param store required — the same per-user routed {@code parserArtifactStore} every other
      *              parser artifact goes through, so the sidecars inherit credentials and backend
      *              automatically
@@ -172,6 +188,11 @@ public class AnalysisViewStore {
     public JsonNode read(String name, String view) {
         try {
             ArtifactKey k = key(name, view);
+            // A header from a different format means every facet sidecar beside it is from that
+            // older format too: refuse it so readOrCompute recomputes and rewrites current-shape
+            // output (this is what makes a format bump upgrade an analysis on access). The header
+            // itself is exempt — readHeader() applies its own version check.
+            if (!HEADER.equals(view) && isHeaderFormatStale(name)) return null;
             // No exists() first: lastModified already returns -1 for an absent key, so an absent
             // (or masked) sidecar fails the freshness check below without a separate HEAD.
             if (store.lastModified(k) < store.lastModified(indexKey(name))) return null;
@@ -239,6 +260,9 @@ public class AnalysisViewStore {
      */
     public boolean write(String name, String view, JsonNode doc, boolean logFailure) {
         if (doc == null) return false;
+        // A rewritten header changes what the format probe should answer; drop the memo rather than
+        // trust mtime granularity to notice (two writes can share a millisecond).
+        if (HEADER.equals(view)) headerFormatMemo.remove(name);
         synchronized (lockFor(name)) {
             try (OutputStream out = store.write(key(name, view))) {
                 mapper.writeValue(out, doc);
@@ -260,6 +284,7 @@ public class AnalysisViewStore {
      * so the mtime freshness check alone would not catch it.
      */
     public void invalidate(String name) {
+        headerFormatMemo.remove(name);
         synchronized (lockFor(name)) {
             try {
                 store.deletePrefix(AnalysisPaths.resolveKey(name, VIEWS_DIR));
@@ -280,6 +305,33 @@ public class AnalysisViewStore {
         if (doc == null || !doc.isObject()) return null;
         if (doc.path("formatVersion").asInt(-1) != FORMAT_VERSION) return null;
         return doc;
+    }
+
+    /**
+     * True when {@code views/header.json} exists but was written by a different format. A format
+     * bump therefore invalidates every facet sidecar at once: {@link #read} refuses to serve them,
+     * so a read recomputes and rewrites the current shape, and {@code SidecarWarmUpService} drops
+     * the stale set before rebuilding it. An <em>absent</em> header is not stale — that is a test
+     * fixture or an analysis that never warmed, and the pre-existing mtime rule alone applies.
+     */
+    public boolean isHeaderFormatStale(String name) {
+        if (name == null || name.isBlank()) return false;
+        ArtifactKey hk = key(name, HEADER);
+        long hm = store.lastModified(hk);
+        if (hm < 0) return false;
+        long[] memo = headerFormatMemo.get(name);
+        if (memo == null || memo[0] != hm) {
+            int version = -1;
+            try (InputStream in = store.read(hk)) {
+                JsonNode doc = mapper.readTree(in);
+                version = (doc != null && doc.isObject()) ? doc.path("formatVersion").asInt(-1) : -1;
+            } catch (Exception e) {
+                log.debug("header format probe {} failed: {}", name, e.getMessage());
+            }
+            memo = new long[]{hm, version};
+            headerFormatMemo.put(name, memo);
+        }
+        return memo[1] != FORMAT_VERSION;
     }
 
     /**
