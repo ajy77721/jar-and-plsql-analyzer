@@ -94,6 +94,36 @@ public interface AnalysisDataProvider {
     void streamClassByIndex(JsonParser parser, JsonGenerator gen, int idx) throws IOException;
 
     /**
+     * One class by ordinal, served by seeking the offsets sidecar (plan 2a adoption) instead of
+     * streaming the whole document to reach position {@code idx}.
+     *
+     * <p>Writes exactly what {@link #streamClassByIndex} writes — including a JSON {@code null} for
+     * an out-of-range index — and returns {@code true} once it has written it. Returns {@code false}
+     * <b>without writing anything</b> when there is no usable offsets sidecar (an older analysis, a
+     * partial write, a corrupt index), so the caller can fall back to the legacy scan on the same
+     * generator. A read failure is the same contract: nothing is written, {@code false} is returned.
+     *
+     * <p>Kept a default so a provider implementation that predates the sidecar is untouched.
+     */
+    default boolean streamClassByIndexSeek(JsonGenerator gen, int idx) throws IOException {
+        return false;
+    }
+
+    /**
+     * One page of the endpoint list, served from the {@code endpoints[]} offsets (plan 2a adoption)
+     * rather than a full parse of the document per page.
+     *
+     * @return the same mark {@link #streamSummaryEndpointPage} returns, or {@code null} when there
+     *         is no usable offsets sidecar and the caller must fall back to the legacy scan. On
+     *         {@code null} the method may have written nothing; a caller that buffers can discard
+     *         its buffer and replay the legacy path.
+     */
+    default AbstractAnalysisDataProvider.EndpointPageMark streamSummaryEndpointPageSeek(
+            JsonGenerator gen, String afterId, int limit, String query) throws IOException {
+        return null;
+    }
+
+    /**
      * Stream a filtered slice of the summary: either headers-only (excluding heavy fields)
      * or a specific field extracted from endpoints.
      *

@@ -489,6 +489,138 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
         gen.writeNull();
     }
 
+    /* ═══════════════ Offset-seek serving (plan 2a adoption) ═══════════════ */
+
+    /**
+     * The offsets sidecar that indexes this provider's document, or {@code null} when the document
+     * has none.
+     *
+     * <p>{@code analysis.json} and {@code analysis_corrected.json} each get their own sidecar,
+     * written in the same pass as the document (plan 2a). The {@code previous} correction twin has
+     * no sidecar yet, so it answers {@code null} and keeps the legacy scan.
+     */
+    protected com.analyzer.storage.ArtifactKey offsetsKey() {
+        if (documentKey == null) return null;
+        return switch (documentKey.leaf()) {
+            case "analysis.json" -> jarDataPaths.analysisOffsetsKey(jarName);
+            case "analysis_corrected.json" -> jarDataPaths.correctedOffsetsKey(jarName);
+            default -> null;
+        };
+    }
+
+    /**
+     * One class by ordinal, read from the offsets sidecar instead of a full-document scan.
+     *
+     * <h2>What the slice alone is not enough for</h2>
+     *
+     * <p>{@code analysis.json} pools each distinct {@code MethodCallInfo} once (see {@link
+     * InvocationPool}); a class whose methods make calls stores {@code invocationRefs} ordinals, not
+     * the calls. Serving that class byte-for-byte therefore needs the document-level {@code
+     * invocationPool} as well as the class slice. The pool is a known fixed-position section — the
+     * writer emits it immediately before {@code classes} — so it is read from the document prefix
+     * bounded by the first class's recorded offset, never from a scan of the arrays themselves. A
+     * class that carries no {@code invocationRefs} needs no pool at all and is served from its slice
+     * alone (the legacy token copy).
+     *
+     * <h2>Reads happen before any write</h2>
+     *
+     * <p>Every failure — absent sidecar, out-of-range offset, truncated slice, unreadable pool —
+     * returns {@code false} <b>before a single byte reaches the generator</b>, so the caller can
+     * replay the legacy scan onto the same output. Correctness over speed: an offset that cannot be
+     * trusted degrades to the old path rather than risk a wrong record.
+     */
+    @Override
+    public boolean streamClassByIndexSeek(JsonGenerator gen, int idx) throws IOException {
+        com.analyzer.storage.ArtifactKey offsetsKey = offsetsKey();
+        if (offsetsKey == null) return false;
+        com.analyzer.storage.ArtifactStore store = jarDataPaths.store();
+
+        AnalysisOffsetIndexReader.Segment seg;
+        JsonNode cls = null;
+        byte[] slice = null;
+        InvocationPool.Inflater pool = null;
+        try {
+            seg = new AnalysisOffsetIndexReader().loadSegment(
+                    store, offsetsKey, AnalysisOffsets.SEGMENT_CLASSES);
+            if (seg == null) return false;
+            if (seg.has(idx)) {
+                slice = readBytes(store, documentKey(), seg.offsets()[idx], seg.lengths()[idx]);
+                cls = objectMapper.readTree(slice);
+                if (cls != null && hasInvocationRefs(cls)) {
+                    pool = readInvocationPool(store, seg.offsets()[0]);
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            return false;   // stale/corrupt index -> legacy scan; nothing written yet
+        }
+
+        // All reads succeeded; only now touch the output.
+        if (cls == null) {
+            gen.writeNull();
+            return true;
+        }
+        if (pool != null && !pool.isEmpty()) {
+            // Identical to the legacy pooled path: inflate, then serialise the class node.
+            objectMapper.writeTree(gen, pool.inflateClass(cls, objectMapper));
+        } else {
+            // No pooled references: reproduce the legacy no-pool token copy exactly.
+            try (JsonParser p = objectMapper.getFactory().createParser(slice)) {
+                p.nextToken();   // START_OBJECT
+                copyValue(p, gen);
+            }
+        }
+        return true;
+    }
+
+    /** True when any method of the class carries pooled {@code invocationRefs}. */
+    private static boolean hasInvocationRefs(JsonNode cls) {
+        JsonNode methods = cls.get("methods");
+        if (methods == null || !methods.isArray()) return false;
+        for (JsonNode method : methods) {
+            if (method.has(InvocationPool.REFS_FIELD)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Reads the document-level {@code invocationPool} from the prefix ending at the first class.
+     *
+     * <p>{@code prefixEnd} is {@code classes.offsets[0]}, so the stream is cut immediately after
+     * {@code "classes":[} — the loop stops on that field name rather than running off the truncated
+     * end. Nodes, the endpoint pool and advice (which precede the invocation pool) are skipped
+     * without materialising them.
+     */
+    private InvocationPool.Inflater readInvocationPool(com.analyzer.storage.ArtifactStore store,
+                                                       long prefixEnd) throws IOException {
+        try (java.io.InputStream in = store.read(documentKey(), 0, prefixEnd);
+             JsonParser p = objectMapper.getFactory().createParser(in)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) return InvocationPool.Inflater.passthrough();
+            while (p.nextToken() != null) {
+                if (p.currentToken() == JsonToken.END_OBJECT) break;
+                if (p.currentToken() != JsonToken.FIELD_NAME) continue;
+                String name = p.currentName();
+                if ("classes".equals(name)) break;      // reached the arrays; no pool field seen
+                p.nextToken();                          // value token
+                if (InvocationPool.POOL_FIELD.equals(name)) {
+                    return InvocationPool.Inflater.of(objectMapper.readTree(p));
+                }
+                if (p.currentToken() == JsonToken.START_OBJECT
+                        || p.currentToken() == JsonToken.START_ARRAY) {
+                    p.skipChildren();
+                }
+            }
+        }
+        return InvocationPool.Inflater.passthrough();
+    }
+
+    private static byte[] readBytes(com.analyzer.storage.ArtifactStore store,
+                                    com.analyzer.storage.ArtifactKey key, long offset, long length)
+            throws IOException {
+        try (java.io.InputStream in = store.read(key, offset, length)) {
+            return in.readAllBytes();
+        }
+    }
+
     @Override
     public void streamSummary(JsonParser parser, JsonGenerator gen) throws IOException {
         // Pre-scan: detect whether endpoints have pre-computed aggregates (externalCalls etc.)
@@ -1593,6 +1725,161 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
      */
     public record EndpointPageMark(String lastId, boolean hasMore, long matched,
                                    boolean cursorResolved) {}
+
+    /**
+     * One page of the endpoint list, served from the {@code endpoints[]} offsets rather than a full
+     * parse of the document per page.
+     *
+     * <h2>Byte-identity with the legacy scan</h2>
+     *
+     * <p>The output is the same items, in the same order, with the same {@code endpointId} and
+     * {@code endpointIndex}, and the same mark. The only structural difference is that the document
+     * pools some heavy endpoint arrays ({@link EndpointArrayPool}); the legacy scan inflates a
+     * {@code externalCallsRefs} back to {@code externalCalls} and then drops it as a header-skipped
+     * field. Skipping the refs field directly is the same omission in the same position, so no byte
+     * of the response depends on the pool's contents — the page never reads it.
+     *
+     * <h2>Which elements are read</h2>
+     *
+     * <ul>
+     *   <li><b>Unfiltered first page</b> ({@code afterId} absent, no {@code q}): only the page's own
+     *       elements are sought, and the exact total is the sidecar's {@code rowCount} — no element
+     *       beyond the page is touched.</li>
+     *   <li><b>Filtered or resumed</b>: the total counts matches over the whole array and a cursor
+     *       is resolved by identity, so every endpoint must be seen. They are read as one ranged
+     *       read of the contiguous {@code endpoints[]} region — never the classes array, the pools
+     *       or the call-tree dictionary.</li>
+     * </ul>
+     *
+     * <p>Returns {@code null} — possibly after writing nothing, so a buffering caller can discard
+     * and replay the legacy path — when the sidecar is absent or unreadable.
+     */
+    @Override
+    public EndpointPageMark streamSummaryEndpointPageSeek(JsonGenerator gen, String afterId,
+                                                          int limit, String query) throws IOException {
+        com.analyzer.storage.ArtifactKey offsetsKey = offsetsKey();
+        if (offsetsKey == null) return null;
+        com.analyzer.storage.ArtifactStore store = jarDataPaths.store();
+        AnalysisOffsetIndexReader.Segment seg;
+        try {
+            seg = new AnalysisOffsetIndexReader().loadSegment(
+                    store, offsetsKey, AnalysisOffsets.SEGMENT_ENDPOINTS);
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+        if (seg == null) return null;
+
+        String needle = (query == null || query.isBlank())
+                ? null : query.toLowerCase(java.util.Locale.ROOT);
+        boolean seeking = afterId != null && !afterId.isBlank();
+
+        if (!seeking && needle == null && limit >= 0) {
+            return seekEndpointPageFast(gen, store, seg, limit);
+        }
+        return scanEndpointPageSeek(gen, store, seg, afterId, seeking, limit, needle);
+    }
+
+    /**
+     * The unfiltered first page: seek exactly the page's elements; the total is the row count.
+     *
+     * <p>{@code hasMore} is "there is an element after the last one written", which with no filter
+     * and no cursor is exactly {@code rowCount > written} — the same condition the legacy scan
+     * discovers by continuing past the limit.
+     */
+    private EndpointPageMark seekEndpointPageFast(JsonGenerator gen,
+                                                  com.analyzer.storage.ArtifactStore store,
+                                                  AnalysisOffsetIndexReader.Segment seg, int limit)
+            throws IOException {
+        gen.writeStartArray();
+        int written = 0;
+        String lastId = null;
+        AnalysisOffsetIndexReader reader = new AnalysisOffsetIndexReader();
+        long end = Math.min((long) seg.rowCount(), (long) limit);
+        for (int i = 0; i < end; i++) {
+            JsonNode ep = reader.readElement(store, documentKey(), seg, i);
+            if (ep == null) break;   // cannot happen while the offsets are valid
+            String id = endpointId(ep);
+            writeEndpointHeaderSkippingPoolRefs(ep, id, i, gen);
+            lastId = id;
+            written++;
+        }
+        gen.writeEndArray();
+        return new EndpointPageMark(lastId, seg.rowCount() > written, seg.rowCount(), true);
+    }
+
+    /**
+     * The filtered/resumed page: the whole {@code endpoints[]} region in one ranged read, streamed
+     * through the same per-endpoint logic the legacy document scan uses. The region is the array's
+     * contiguous bytes (elements and their separating commas), wrapped in synthetic {@code [} and
+     * {@code ]} bytes so a forward-only parser can walk it as one array without the region having
+     * to carry the document's own brackets.
+     */
+    private EndpointPageMark scanEndpointPageSeek(JsonGenerator gen,
+                                                  com.analyzer.storage.ArtifactStore store,
+                                                  AnalysisOffsetIndexReader.Segment seg,
+                                                  String afterId, boolean seeking, int limit,
+                                                  String needle) throws IOException {
+        int n = seg.rowCount();
+        long start = seg.offsets()[0];
+        long end = seg.offsets()[n - 1] + seg.lengths()[n - 1];
+        boolean past = !seeking;
+        int written = 0;
+        boolean more = false;
+        String lastId = null;
+        long matched = 0;
+
+        gen.writeStartArray();
+        try (java.io.InputStream body = store.read(documentKey(), start, end - start);
+             java.io.InputStream in = new java.io.SequenceInputStream(
+                     new java.io.ByteArrayInputStream(new byte[]{'['}),
+                     new java.io.SequenceInputStream(body,
+                             new java.io.ByteArrayInputStream(new byte[]{']'})));
+             JsonParser p = objectMapper.getFactory().createParser(in)) {
+            p.nextToken();   // synthetic START_ARRAY
+            int ordinal = -1;
+            while (p.nextToken() != null) {
+                if (p.currentToken() == JsonToken.END_ARRAY) break;
+                if (p.currentToken() != JsonToken.START_OBJECT) continue;
+                ordinal++;
+                JsonNode ep = objectMapper.readTree(p);
+                String id = endpointId(ep);
+                boolean isMatch = needle == null || endpointMatches(ep, needle);
+                if (isMatch) matched++;
+                if (!past) {
+                    if (id.equals(afterId)) past = true;
+                    continue;
+                }
+                if (!isMatch) continue;
+                if (limit >= 0 && written >= limit) { more = true; continue; }
+                writeEndpointHeaderSkippingPoolRefs(ep, id, ordinal, gen);
+                lastId = id;
+                written++;
+            }
+        }
+        gen.writeEndArray();
+        return new EndpointPageMark(lastId, more, matched, !seeking || past);
+    }
+
+    /**
+     * {@link #writeEndpointHeader} plus the pooled-refs omission: a {@code *Refs} key is skipped
+     * where the legacy scan would have inflated it to its original name (which is itself a skipped
+     * header field). Same bytes out; the pool is never read.
+     */
+    private void writeEndpointHeaderSkippingPoolRefs(JsonNode ep, String id, int ordinal,
+                                                     JsonGenerator gen) throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField("endpointId", id);
+        gen.writeNumberField("endpointIndex", ordinal);
+        var it = ep.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (HEADERS_SKIP_FIELDS.contains(e.getKey())) continue;
+            if (EndpointArrayPool.Inflater.originalFieldFor(e.getKey()) != null) continue;
+            gen.writeFieldName(e.getKey());
+            objectMapper.writeValue(gen, e.getValue());
+        }
+        gen.writeEndObject();
+    }
 
     /** The four columns the endpoint list is searched by in the browser today. */
     private static boolean endpointMatches(JsonNode ep, String lowerNeedle) {

@@ -870,12 +870,26 @@ public class AnalyzerController {
         // bounded by `limit`, so this cannot become the whole-document allocation the endpoint
         // exists to avoid.
         java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream(64 * 1024);
-        AbstractAnalysisDataProvider.EndpointPageMark mark;
-        try (var parser = objectMapper.getFactory().createParser(provider.openStream());
-             var gen = objectMapper.getFactory().createGenerator(buf)) {
-            mark = provider.streamSummaryEndpointPage(parser, gen, afterId, req.limit(),
-                                                      req.query());
-            gen.flush();
+        AbstractAnalysisDataProvider.EndpointPageMark mark = null;
+        // Plan 2a adoption: page the endpoints[] by their offsets instead of parsing the whole
+        // document per page. A null (or a failure) means no usable sidecar: discard whatever the
+        // seek wrote and replay the legacy scan, so old analyses answer exactly as before.
+        try {
+            try (var gen = objectMapper.getFactory().createGenerator(buf)) {
+                mark = provider.streamSummaryEndpointPageSeek(gen, afterId, req.limit(), req.query());
+                gen.flush();
+            }
+        } catch (IOException | RuntimeException e) {
+            mark = null;
+        }
+        if (mark == null) {
+            buf.reset();
+            try (var parser = objectMapper.getFactory().createParser(provider.openStream());
+                 var gen = objectMapper.getFactory().createGenerator(buf)) {
+                mark = provider.streamSummaryEndpointPage(parser, gen, afterId, req.limit(),
+                                                          req.query());
+                gen.flush();
+            }
         }
 
         if (!mark.cursorResolved()) {
@@ -1279,9 +1293,15 @@ public class AnalyzerController {
         AnalysisDataProvider provider = resolveProvider(id, version);
         response.setContentType("application/json");
         response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-        try (var parser = objectMapper.getFactory().createParser(provider.openStream());
-             var gen = objectMapper.getFactory().createGenerator(response.getOutputStream())) {
-            provider.streamClassByIndex(parser, gen, idx);
+        // Plan 2a adoption: seek the class from the offsets sidecar. The seek writes nothing when
+        // it cannot serve (no/corrupt sidecar), so the legacy full-document scan can replay onto
+        // the same generator.
+        try (var gen = objectMapper.getFactory().createGenerator(response.getOutputStream())) {
+            if (!provider.streamClassByIndexSeek(gen, idx)) {
+                try (var parser = objectMapper.getFactory().createParser(provider.openStream())) {
+                    provider.streamClassByIndex(parser, gen, idx);
+                }
+            }
             gen.flush();
         }
     }
