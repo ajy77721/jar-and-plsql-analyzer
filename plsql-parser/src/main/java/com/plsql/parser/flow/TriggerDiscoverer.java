@@ -24,6 +24,27 @@ public class TriggerDiscoverer {
     private static final Pattern SEQ_PATTERN = Pattern.compile(
             "(?i)([A-Z_][A-Z0-9_]*(?:\\.[A-Z_][A-Z0-9_]*)?)\\.(NEXTVAL|CURRVAL)\\b");
 
+    /**
+     * Number of trigger bodies the grammar parse could not handle, i.e. the number of times the
+     * DML_PATTERN/SEQ_PATTERN text scan ran as the recovery path (Oracle wrapped sources, a
+     * fragment the DB returned mid-statement …). Exposed so the regex-retirement rate of the
+     * regex → grammar migration is observable.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong TRIGGER_BODY_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    private static final java.util.concurrent.atomic.AtomicBoolean TRIGGER_FALLBACK_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Logs (once) and counts a use of the regex recovery path for a trigger body. */
+    private void recordTriggerRegexFallback(String what) {
+        long fallbackNo = TRIGGER_BODY_REGEX_FALLBACKS.incrementAndGet();
+        if (TRIGGER_FALLBACK_LOGGED.compareAndSet(false, true)) {
+            System.err.println("[TriggerDiscoverer] trigger body did not parse; using legacy regex "
+                    + "fallback for " + what + " (#" + fallbackNo + ")");
+        }
+    }
+
     private final DbConnectionManager connManager;
     private final SchemaResolver schemaResolver;
 
@@ -636,6 +657,7 @@ public class TriggerDiscoverer {
             return ops;
         }
 
+        recordTriggerRegexFallback("DML operations");
         Matcher m = DML_PATTERN.matcher(body);
         Set<String> seen = new HashSet<>();
         while (m.find()) {
@@ -682,6 +704,7 @@ public class TriggerDiscoverer {
             return seqs;
         }
 
+        recordTriggerRegexFallback("sequence references");
         Matcher m = SEQ_PATTERN.matcher(body);
         Set<String> seen = new HashSet<>();
         while (m.find()) {

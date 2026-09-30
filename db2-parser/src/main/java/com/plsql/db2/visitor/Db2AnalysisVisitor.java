@@ -1241,6 +1241,22 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
             "(?i)(?:FROM|INTO|UPDATE|INSERT\\s+INTO|DELETE\\s+FROM|JOIN)\\s+"
                     + "([A-Za-z_][A-Za-z0-9_$#]*(?:\\.[A-Za-z_][A-Za-z0-9_$#]*)?)");
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Guards + observability for the grammar-first recursive dynamic-SQL parse.
+    // DYN_SQL_TABLE_PATTERN survives only as the recovery path for text the grammar cannot
+    // attribute a table to; every such use is logged once and counted.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final int DYN_PARSE_MAX_DEPTH = 3;
+    private static final int DYN_PARSE_MAX_CHARS = 64 * 1024;
+    private static final ThreadLocal<Integer> DYN_PARSE_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final java.util.concurrent.atomic.AtomicLong DYN_SQL_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicBoolean DYN_FALLBACK_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Number of literals the recursive grammar parse could not attribute a table to. */
+    public static long dynamicSqlRegexFallbacks() { return DYN_SQL_REGEX_FALLBACKS.get(); }
+
     /** Extracts a table name from a fully-literal dynamic-SQL string (no host-variable
      *  indirection) and records it as a {@code DYNAMIC} table op. */
     private void extractLiteralDynamicSqlTable(String sqLiteral, int line) {
@@ -1266,6 +1282,13 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
         // (concatenation leftovers, `?` parameter markers, vendor syntax outside this grammar).
         List<String> tableTexts = nestedParseDynamicSqlTables(innerSql);
         if (tableTexts.isEmpty()) {
+            // Recovery path: text the grammar cannot attribute a table to. Logged once, counted,
+            // so the regex retirement rate of the migration is observable.
+            long fallbackNo = DYN_SQL_REGEX_FALLBACKS.incrementAndGet();
+            if (DYN_FALLBACK_LOGGED.compareAndSet(false, true)) {
+                System.err.println("[Db2AnalysisVisitor] dynamic-SQL recursive parse produced no "
+                        + "table target; using legacy regex fallback (#" + fallbackNo + ")");
+            }
             // Legacy text scan: single-table only by construction (the regex has one capture
             // group and no join alternatives), so this path is unchanged.
             java.util.regex.Matcher m = DYN_SQL_TABLE_PATTERN.matcher(innerSql);
@@ -1294,6 +1317,11 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
      * mentioned twice, or a self-join, does not double-report.
      */
     private List<String> nestedParseDynamicSqlTables(String innerSql) {
+        if (innerSql == null || innerSql.isBlank()) return List.of();
+        if (innerSql.length() > DYN_PARSE_MAX_CHARS) return List.of();
+        int depth = DYN_PARSE_DEPTH.get();
+        if (depth >= DYN_PARSE_MAX_DEPTH) return List.of();
+        DYN_PARSE_DEPTH.set(depth + 1);
         try {
             Db2ParseErrorListener errors = new Db2ParseErrorListener();
             Db2Lexer lexer = new Db2Lexer(org.antlr.v4.runtime.CharStreams.fromString(innerSql));
@@ -1324,6 +1352,8 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
             return out;
         } catch (Exception e) {
             return List.of();   // never let a nested-parse failure break the outer analysis
+        } finally {
+            DYN_PARSE_DEPTH.set(depth);
         }
     }
 

@@ -1,10 +1,16 @@
 package com.plsql.parser.visitor;
 
+import com.plsql.parser.PlSqlLexer;
 import com.plsql.parser.PlSqlParser;
 import com.plsql.parser.PlSqlParserBaseVisitor;
 import com.plsql.parser.model.*;
 
+import org.antlr.v4.runtime.BaseErrorListener;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.RecognitionException;
+import org.antlr.v4.runtime.Recognizer;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
@@ -4974,6 +4980,37 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             "(?i)^(?:CREATE\\s+(?:GLOBAL\\s+TEMPORARY\\s+)?TABLE|CREATE\\s+OR\\s+REPLACE\\s+VIEW|CREATE\\s+VIEW|ALTER\\s+TABLE"
                     + "|DROP\\s+TABLE|TRUNCATE\\s+TABLE)$");
 
+    // ---------------------------------------------------------------
+    // Grammar-first recursive dynamic-SQL parse.
+    //
+    // The literal handed to EXECUTE IMMEDIATE / DBMS_SQL.PARSE is real SQL, so it is re-parsed
+    // through this same Oracle grammar (sql_script) and its table targets are read off the nested
+    // parse tree by the very visitor the static path uses. The legacy DYN_SQL_TABLE_PATTERN regex
+    // survives only as a recovery path for literals the grammar cannot attribute a table to
+    // (concatenation fragments, `DROP TABLE` — which has no visitor rule yet — wrapped source …),
+    // and every use of it is logged once and counted.
+    // ---------------------------------------------------------------
+
+    /** Hard cap on nested dynamic-SQL literals (a literal containing dynamic SQL containing …). */
+    private static final int DYN_PARSE_MAX_DEPTH = 3;
+
+    /** Literals larger than this are never handed to the grammar — an absurd payload, regex only. */
+    private static final int DYN_PARSE_MAX_CHARS = 64 * 1024;
+
+    /** Per-thread recursion depth, so a nested dynamic-SQL literal can never loop forever. */
+    private static final ThreadLocal<Integer> DYN_PARSE_DEPTH = ThreadLocal.withInitial(() -> 0);
+
+    /**
+     * Number of dynamic-SQL literals the recursive grammar parse could not attribute a table to,
+     * i.e. the number of times the legacy regex ran. Exposed so the regex-retirement rate of the
+     * regex → grammar migration is observable (should fall to ~0 on real corpora).
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DYN_SQL_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    private static final java.util.concurrent.atomic.AtomicBoolean DYN_FALLBACK_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     private void extractTablesFromDynamicSql(String expr, int line) {
         if (expr == null) return;
         Set<String> seen = new HashSet<>();
@@ -5007,6 +5044,25 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     }
 
     private void runDynSqlPattern(String text, int line, Set<String> seen) {
+        if (text == null || text.isEmpty()) return;
+
+        // Grammar first: recursively parse the literal through this same Oracle grammar and read
+        // the table targets off the nested parse tree, exactly as the static path does.
+        List<TableOperationInfo> grammarOps = nestedParseDynamicSqlTables(text);
+        if (!grammarOps.isEmpty()) {
+            emitGrammarTableOps(grammarOps, text, line, seen);
+            return;
+        }
+
+        // Recovery path: the literal is not a statement this grammar can attribute a table to
+        // (a concatenation fragment, an Oracle `DROP TABLE` the visitor has no rule for, wrapped
+        // source …). Logged once and counted so the regex retirement rate is measurable.
+        long fallbackNo = DYN_SQL_REGEX_FALLBACKS.incrementAndGet();
+        if (DYN_FALLBACK_LOGGED.compareAndSet(false, true)) {
+            System.err.println("[PlSqlAnalysisVisitor] dynamic-SQL recursive parse produced no table "
+                    + "target; using legacy regex fallback (fallback #" + fallbackNo + ")");
+        }
+
         Matcher m = DYN_SQL_TABLE_PATTERN.matcher(text);
         while (m.find()) {
             String tablRef = m.group(1).toUpperCase();
@@ -5051,6 +5107,154 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 toi.setOperation("DYNAMIC");
             }
             addTableOperation(toi);
+        }
+    }
+
+    /**
+     * Recursively parse a dynamic-SQL literal through this same Oracle grammar and return every
+     * table operation the nested analysis recorded. Returns an empty list when the literal is not
+     * a statement this grammar can attribute a table to, or when a guard (depth/size) fires —
+     * callers then run the legacy regex as a recovery path.
+     *
+     * <p>Schema-level DDL ({@code CREATE}/{@code ALTER}/{@code DROP …}) parses as a top-level
+     * {@code sql_script} unit and is captured by the object visitors. DML and PL/SQL blocks are
+     * only recorded inside a program unit, so they are wrapped in a synthetic procedure body —
+     * the same technique {@link com.plsql.parser.flow.TriggerDiscoverer} uses for a trigger body —
+     * which leaves the statements inside it untouched.
+     */
+    private List<TableOperationInfo> nestedParseDynamicSqlTables(String sqlText) {
+        if (sqlText == null || sqlText.isBlank()) return List.of();
+        if (sqlText.length() > DYN_PARSE_MAX_CHARS) return List.of();
+        int depth = DYN_PARSE_DEPTH.get();
+        if (depth >= DYN_PARSE_MAX_DEPTH) return List.of();
+        DYN_PARSE_DEPTH.set(depth + 1);
+        try {
+            String trimmed = sqlText.stripLeading();
+            boolean schemaDdl = startsWithKeyword(trimmed, "CREATE")
+                    || startsWithKeyword(trimmed, "ALTER")
+                    || startsWithKeyword(trimmed, "DROP");
+            List<TableOperationInfo> ops = schemaDdl
+                    ? parseDynamicSourceForTables(sqlText)
+                    : List.of();
+            if (ops.isEmpty()) {
+                // A dynamic-SQL literal never carries its own terminator (Oracle rejects a
+                // trailing `;`), but a statement inside a block needs one — normalize to exactly
+                // one so a PL/SQL block literal (`BEGIN … END;`) is not doubled up either.
+                String stmt = sqlText.stripTrailing();
+                if (stmt.endsWith(";")) stmt = stmt.substring(0, stmt.length() - 1);
+                ops = parseDynamicSourceForTables(
+                        "CREATE OR REPLACE PROCEDURE JAR$DYN_SQL_BODY IS\nBEGIN\n"
+                                + stmt + ";\nEND;\n");
+            }
+            // A schema-DDL literal that did not yield a table from the wrapped form may still be
+            // capturable at top level (and vice-versa) — try the other shape once.
+            if (ops.isEmpty() && !schemaDdl) {
+                ops = parseDynamicSourceForTables(sqlText);
+            }
+            return ops;
+        } catch (Throwable t) {
+            return List.of();
+        } finally {
+            DYN_PARSE_DEPTH.set(depth);
+        }
+    }
+
+    private static boolean startsWithKeyword(String text, String keyword) {
+        return text.length() >= keyword.length()
+                && text.regionMatches(true, 0, keyword, 0, keyword.length())
+                && (text.length() == keyword.length()
+                        || !Character.isLetterOrDigit(text.charAt(keyword.length())));
+    }
+
+    /**
+     * Parse one source string with the Oracle grammar and harvest every table operation the
+     * visitor recorded. Any lexer/parser error makes the result untrusted (empty), so a partial
+     * error-recovered tree can never fabricate table targets.
+     */
+    private List<TableOperationInfo> parseDynamicSourceForTables(String source) {
+        List<String> errors = new ArrayList<>();
+        try {
+            PlSqlLexer lexer = new PlSqlLexer(CharStreams.fromString(source));
+            lexer.removeErrorListeners();
+            lexer.addErrorListener(new DynParseErrorListener(errors));
+            PlSqlParser parser = new PlSqlParser(new CommonTokenStream(lexer));
+            parser.removeErrorListeners();
+            parser.addErrorListener(new DynParseErrorListener(errors));
+            ParseTree tree = parser.sql_script();
+            if (!errors.isEmpty()) return List.of();
+            PlSqlAnalysisVisitor sub = new PlSqlAnalysisVisitor();
+            sub.visit(tree);
+            List<TableOperationInfo> ops = new ArrayList<>();
+            for (ParsedObject po : sub.getResults()) {
+                collectTableOpsForDynamic(po, ops);
+            }
+            return ops;
+        } catch (Throwable t) {
+            return List.of();
+        }
+    }
+
+    private static void collectTableOpsForDynamic(ParsedObject po, List<TableOperationInfo> out) {
+        if (po == null) return;
+        if (po.getTableOperations() != null) out.addAll(po.getTableOperations());
+        if (po.getSubprograms() != null) {
+            for (SubprogramInfo sub : po.getSubprograms()) {
+                if (sub.getTableOperations() != null) out.addAll(sub.getTableOperations());
+            }
+        }
+    }
+
+    /**
+     * Map the nested visitor's table operations onto the dynamic-SQL output shape: the same
+     * {@link TableOperationInfo} fields, with DML/SELECT references landing in the generic
+     * {@code DYNAMIC} bucket and schema changes in {@code DDL} (carrying {@code sqlText} so the
+     * existing enrichment populates {@code getDdl()}) — byte-identical to what the regex produced,
+     * but with the table targets read off the parse tree.
+     */
+    private void emitGrammarTableOps(List<TableOperationInfo> ops, String text, int line,
+                                     Set<String> seen) {
+        for (TableOperationInfo src : ops) {
+            String tableName = src.getTableName();
+            if (tableName == null || tableName.isEmpty()) continue;
+            // "REFERENCE" rows are foreign-key lineage edges, not targets of the dynamic statement.
+            if ("REFERENCE".equalsIgnoreCase(src.getOperation())) continue;
+            String schema = src.getSchema();
+            String fullRef = (schema != null ? schema + "." + tableName : tableName).toUpperCase();
+            if (isDualTable(fullRef) || isBuiltinFunction(fullRef)) continue;
+            if (isSystemTable(fullRef)) continue; // suppress ALL_, DBA_, USER_, V$, GV$, SYS. tables
+            if (!seen.add(fullRef)) continue;
+
+            String op = src.getOperation() == null ? "" : src.getOperation().toUpperCase();
+            boolean dml = op.equals("SELECT") || op.equals("INSERT") || op.equals("UPDATE")
+                    || op.equals("DELETE") || op.equals("MERGE");
+            TableOperationInfo toi = new TableOperationInfo();
+            toi.setTableName(tableName);
+            toi.setSchema(schema);
+            toi.setLine(line);
+            if (dml) {
+                toi.setOperation("DYNAMIC");
+            } else {
+                toi.setOperation("DDL");
+                String stmt = src.getSqlText();
+                toi.setSqlText(stmt != null && !stmt.isBlank() ? stmt.trim() : text.trim());
+            }
+            addTableOperation(toi);
+        }
+    }
+
+    /** Collects ANTLR syntax errors so a nested dynamic-SQL parse can be trusted only when clean. */
+    private static final class DynParseErrorListener extends BaseErrorListener {
+        private final List<String> errors;
+
+        DynParseErrorListener(List<String> errors) {
+            this.errors = errors;
+        }
+
+        @Override
+        public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
+                                int line, int charPositionInLine, String msg,
+                                RecognitionException e) {
+            errors.add(msg);
         }
     }
 

@@ -1500,6 +1500,83 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
             "(?i)(?:FROM|INTO|UPDATE|INSERT\\s+INTO|DELETE\\s+FROM|JOIN)\\s+"
                     + "([A-Za-z_][A-Za-z0-9_$#]*(?:\\.[A-Za-z_][A-Za-z0-9_$#]*)?)");
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Grammar-first recursive dynamic-SQL parse (regex → fallback only)
+    //
+    // A fully-literal EXECUTE '<sql>' (and the fully-resolved text of a format('%I') template) is
+    // real SQL, so it is re-parsed with this same Postgres grammar and its table targets read off
+    // the nested parse tree by the same visitor the static path uses. DYN_SQL_TABLE_PATTERN
+    // survives only as the recovery path for text the grammar cannot attribute a table to,
+    // logged once and counted.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final int DYN_PARSE_MAX_DEPTH = 3;
+    private static final int DYN_PARSE_MAX_CHARS = 64 * 1024;
+    private static final ThreadLocal<Integer> DYN_PARSE_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final java.util.concurrent.atomic.AtomicLong DYN_SQL_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicBoolean DYN_FALLBACK_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Number of literals the recursive grammar parse could not attribute a table to. */
+    public static long dynamicSqlRegexFallbacks() { return DYN_SQL_REGEX_FALLBACKS.get(); }
+
+    /**
+     * Recursively parse a recovered dynamic-SQL string with the Postgres grammar and return the
+     * table operations the nested visitor recorded; empty when the text is not a statement this
+     * grammar can parse (callers then run the legacy regex), or when a guard fires.
+     */
+    private List<PostgresTableOpInfo> nestedParseDynamicSqlTables(String innerSql) {
+        if (innerSql == null || innerSql.isBlank()) return List.of();
+        if (innerSql.length() > DYN_PARSE_MAX_CHARS) return List.of();
+        int depth = DYN_PARSE_DEPTH.get();
+        if (depth >= DYN_PARSE_MAX_DEPTH) return List.of();
+        DYN_PARSE_DEPTH.set(depth + 1);
+        try {
+            PostgresDynParseErrorListener errors = new PostgresDynParseErrorListener();
+            com.plsql.postgres.grammar.PostgresLexer lexer = new com.plsql.postgres.grammar.PostgresLexer(
+                    org.antlr.v4.runtime.CharStreams.fromString(innerSql));
+            lexer.removeErrorListeners();
+            lexer.addErrorListener(errors);
+            PostgresParser parser = new PostgresParser(new org.antlr.v4.runtime.CommonTokenStream(lexer));
+            parser.removeErrorListeners();
+            parser.addErrorListener(errors);
+            PostgresParser.StatementContext stmt = parser.statement();
+            if (errors.hasErrors()) return List.of();
+            PostgresAnalysisVisitor sub = new PostgresAnalysisVisitor("JAR$DYN_SQL", null);
+            sub.visit(stmt);
+            return new ArrayList<>(sub.getResult().getTableOps());
+        } catch (Throwable t) {
+            return List.of();
+        } finally {
+            DYN_PARSE_DEPTH.set(depth);
+        }
+    }
+
+    /** Collects ANTLR syntax errors so a nested dynamic-SQL parse is trusted only when clean. */
+    private static final class PostgresDynParseErrorListener
+            extends org.antlr.v4.runtime.BaseErrorListener {
+        private final List<String> errors = new ArrayList<>();
+
+        @Override
+        public void syntaxError(org.antlr.v4.runtime.Recognizer<?, ?> recognizer,
+                                Object offendingSymbol, int line, int charPositionInLine,
+                                String msg, org.antlr.v4.runtime.RecognitionException e) {
+            errors.add(msg);
+        }
+
+        boolean hasErrors() { return !errors.isEmpty(); }
+    }
+
+    /** Logs (once) and counts a use of the legacy regex recovery path. */
+    private void recordRegexFallback(String dialectNote) {
+        long fallbackNo = DYN_SQL_REGEX_FALLBACKS.incrementAndGet();
+        if (DYN_FALLBACK_LOGGED.compareAndSet(false, true)) {
+            System.err.println("[PostgresAnalysisVisitor] dynamic-SQL recursive parse produced no "
+                    + "table target (" + dialectNote + "); using legacy regex fallback (#"
+                    + fallbackNo + ")");
+        }
+    }
+
     /** Runs both the literal-only and the format(%I,...) dynamic-SQL table extractors. */
     private void extractDynamicSqlTables(PostgresParser.ExprContext e, int line, PostgresDynamicSqlInfo d) {
         extractLiteralDynamicSqlTable(soleStringLiteral(e), line);
@@ -1548,6 +1625,28 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      *  string (no ||/format() indirection) and records it as a {@code DYNAMIC} table op. */
     private void extractLiteralDynamicSqlTable(String inner, int line) {
         if (inner == null) return;
+
+        // Grammar first: recursively parse the literal with the same Postgres grammar.
+        List<PostgresTableOpInfo> grammarOps = nestedParseDynamicSqlTables(inner);
+        if (!grammarOps.isEmpty()) {
+            Set<String> seen = new HashSet<>();
+            for (PostgresTableOpInfo g : grammarOps) {
+                if (g.getTableName() == null || g.getTableName().isEmpty()) continue;
+                String key = (g.getSchemaName() != null ? g.getSchemaName() + "." : "")
+                        + g.getTableName();
+                if (!seen.add(key.toLowerCase())) continue;
+                PostgresTableOpInfo op = new PostgresTableOpInfo();
+                op.setDmlType(PostgresTableOpInfo.DmlType.DYNAMIC);
+                op.setTableName(g.getTableName());
+                op.setSchemaName(g.getSchemaName());
+                op.setLine(line);
+                result.getTableOps().add(op);
+            }
+            return;
+        }
+
+        // Recovery path: text the grammar cannot attribute a table to.
+        recordRegexFallback("literal EXECUTE");
         java.util.regex.Matcher m = DYN_SQL_TABLE_PATTERN.matcher(inner);
         if (m.find()) {
             PostgresTableOpInfo op = new PostgresTableOpInfo();
@@ -1650,7 +1749,37 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
         // Emit one DYNAMIC table op per substituted placeholder that a FROM/INTO/UPDATE/JOIN …
         // clause actually reads as a table name. Matches that do not cover a substituted region
         // are static text in the template and stay out of scope here, as before.
-        java.util.regex.Matcher tm = DYN_SQL_TABLE_PATTERN.matcher(rebuilt.toString());
+        String resolvedSql = rebuilt.toString();
+        List<PostgresTableOpInfo> grammarOps = nestedParseDynamicSqlTables(resolvedSql);
+        if (!grammarOps.isEmpty()) {
+            // Keep only targets whose name is one of the substituted placeholder values — static
+            // table text in the template stays out of scope, exactly as the positional regex did.
+            Set<String> substituted = new HashSet<>();
+            for (int[] r : resolvedRanges) {
+                substituted.add(resolvedSql.substring(r[0], r[1]).toUpperCase());
+            }
+            Set<String> seen = new HashSet<>();
+            for (PostgresTableOpInfo g : grammarOps) {
+                if (g.getTableName() == null) continue;
+                String simple = g.getTableName().toUpperCase();
+                String qualified = g.getSchemaName() != null
+                        ? (g.getSchemaName() + "." + g.getTableName()).toUpperCase() : simple;
+                if (!substituted.contains(simple) && !substituted.contains(qualified)) continue;
+                if (!seen.add(qualified)) continue;
+                PostgresTableOpInfo op = new PostgresTableOpInfo();
+                op.setDmlType(PostgresTableOpInfo.DmlType.DYNAMIC);
+                op.setTableName(g.getTableName());
+                op.setSchemaName(g.getSchemaName());
+                op.setLine(line);
+                result.getTableOps().add(op);
+            }
+            return;
+        }
+
+        // Recovery path: the resolved template is not a statement the grammar can attribute a
+        // table to — fall back to the positional regex scan.
+        recordRegexFallback("format(%I) template");
+        java.util.regex.Matcher tm = DYN_SQL_TABLE_PATTERN.matcher(resolvedSql);
         while (tm.find()) {
             boolean fromPlaceholder = false;
             for (int[] r : resolvedRanges) {

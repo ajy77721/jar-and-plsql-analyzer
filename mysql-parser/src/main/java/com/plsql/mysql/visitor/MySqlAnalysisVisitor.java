@@ -794,6 +794,26 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
                     + "(?:\\s|\\\\[nrt])+"
                     + "`?([A-Za-z_][A-Za-z0-9_$#]*)`?(?:\\.`?([A-Za-z_][A-Za-z0-9_$#]*)`?)?");
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Grammar-first recursive dynamic-SQL parse (regex → fallback only)
+    //
+    // A fully-literal PREPARE ... FROM '<sql>' is real SQL, so it is re-parsed with this same
+    // MySQL grammar and its table targets read off the nested parse tree by the same visitor the
+    // static path uses. DYN_SQL_TABLE_PATTERN survives only as the recovery path for literals the
+    // grammar cannot attribute a table to (CONCAT fragments, \n-escaped separators …), logged once
+    // and counted.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final int DYN_PARSE_MAX_DEPTH = 3;
+    private static final int DYN_PARSE_MAX_CHARS = 64 * 1024;
+    private static final ThreadLocal<Integer> DYN_PARSE_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final java.util.concurrent.atomic.AtomicLong DYN_SQL_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicBoolean DYN_FALLBACK_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Number of literals the recursive grammar parse could not attribute a table to. */
+    public static long dynamicSqlRegexFallbacks() { return DYN_SQL_REGEX_FALLBACKS.get(); }
+
     /**
      * Extracts a table name from a dynamic-SQL string that is a single, fully-literal quoted
      * string (no {@code @variable}/{@code CONCAT(...)} indirection) and records it as a
@@ -809,6 +829,35 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
                 src.SQ_STRING() != null ? src.SQ_STRING() : src.DQ_STRING();
         if (tok == null) return false; // AT_VAR — out of scope for this fix
         String inner = literalInner(tok.getText());
+
+        // Grammar first: recursively parse the literal with the same MySQL grammar.
+        java.util.List<MySqlTableOpInfo> grammarOps = nestedParseDynamicSqlTables(inner);
+        if (!grammarOps.isEmpty()) {
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            boolean added = false;
+            for (MySqlTableOpInfo g : grammarOps) {
+                if (g.getTableName() == null || g.getTableName().isEmpty()) continue;
+                String key = (g.getSchemaName() != null ? g.getSchemaName() + "." : "")
+                        + g.getTableName();
+                if (!seen.add(key.toLowerCase())) continue;
+                MySqlTableOpInfo op = new MySqlTableOpInfo();
+                op.setDmlType(MySqlTableOpInfo.DmlType.DYNAMIC);
+                op.setTableName(g.getTableName());
+                op.setSchemaName(g.getSchemaName());
+                op.setLine(line);
+                result.getTableOps().add(op);
+                added = true;
+            }
+            if (added) return true;
+        }
+
+        // Recovery path: not a statement this grammar can attribute a table to. Logged once,
+        // counted, so the regex retirement rate of the migration is observable.
+        long fallbackNo = DYN_SQL_REGEX_FALLBACKS.incrementAndGet();
+        if (DYN_FALLBACK_LOGGED.compareAndSet(false, true)) {
+            log.warn("MySQL dynamic-SQL recursive parse produced no table target; using legacy "
+                    + "regex fallback (#{})", fallbackNo);
+        }
         java.util.regex.Matcher m = DYN_SQL_TABLE_PATTERN.matcher(inner);
         if (m.find()) {
             MySqlTableOpInfo op = new MySqlTableOpInfo();
@@ -819,6 +868,71 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Recursively parse a literal dynamic-SQL string with the MySQL grammar and return the table
+     * operations the nested visitor recorded; empty when the literal is not a statement this
+     * grammar can parse (callers then run the legacy regex), or when a guard fires.
+     */
+    private java.util.List<MySqlTableOpInfo> nestedParseDynamicSqlTables(String innerSql) {
+        if (innerSql == null || innerSql.isBlank()) return java.util.List.of();
+        if (innerSql.length() > DYN_PARSE_MAX_CHARS) return java.util.List.of();
+        int depth = DYN_PARSE_DEPTH.get();
+        if (depth >= DYN_PARSE_MAX_DEPTH) return java.util.List.of();
+        DYN_PARSE_DEPTH.set(depth + 1);
+        try {
+            MySqlDynParseErrorListener errors = new MySqlDynParseErrorListener();
+            com.plsql.mysql.grammar.MySqlLexer lexer = new com.plsql.mysql.grammar.MySqlLexer(
+                    org.antlr.v4.runtime.CharStreams.fromString(innerSql));
+            lexer.removeErrorListeners();
+            lexer.addErrorListener(errors);
+            MySqlParser parser = new MySqlParser(new org.antlr.v4.runtime.CommonTokenStream(lexer));
+            parser.removeErrorListeners();
+            parser.addErrorListener(errors);
+
+            String kw = leadingKeyword(innerSql);
+            org.antlr.v4.runtime.ParserRuleContext stmt;
+            switch (kw) {
+                case "SELECT": case "WITH": stmt = parser.selectStatement(); break;
+                case "INSERT": stmt = parser.insertStatement(); break;
+                case "UPDATE": stmt = parser.updateStatement(); break;
+                case "DELETE": stmt = parser.deleteStatement(); break;
+                case "REPLACE": stmt = parser.replaceStatement(); break;
+                default: return java.util.List.of();
+            }
+            if (errors.hasErrors()) return java.util.List.of();
+            MySqlAnalysisVisitor sub = new MySqlAnalysisVisitor("JAR$DYN_SQL", null);
+            sub.visit(stmt);
+            return new java.util.ArrayList<>(sub.getResult().getTableOps());
+        } catch (Throwable t) {
+            return java.util.List.of();
+        } finally {
+            DYN_PARSE_DEPTH.set(depth);
+        }
+    }
+
+    /** The first bare word of the SQL text, upper-cased (empty when none). */
+    private static String leadingKeyword(String sql) {
+        int i = 0;
+        while (i < sql.length() && Character.isWhitespace(sql.charAt(i))) i++;
+        int j = i;
+        while (j < sql.length() && Character.isLetter(sql.charAt(j))) j++;
+        return sql.substring(i, j).toUpperCase();
+    }
+
+    /** Collects ANTLR syntax errors so a nested dynamic-SQL parse is trusted only when clean. */
+    private static final class MySqlDynParseErrorListener extends org.antlr.v4.runtime.BaseErrorListener {
+        private final java.util.List<String> errors = new java.util.ArrayList<>();
+
+        @Override
+        public void syntaxError(org.antlr.v4.runtime.Recognizer<?, ?> recognizer,
+                                Object offendingSymbol, int line, int charPositionInLine,
+                                String msg, org.antlr.v4.runtime.RecognitionException e) {
+            errors.add(msg);
+        }
+
+        boolean hasErrors() { return !errors.isEmpty(); }
     }
 
     /**
