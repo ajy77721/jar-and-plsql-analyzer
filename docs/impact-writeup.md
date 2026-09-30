@@ -10,11 +10,37 @@ packages — as the evidence base for the migration. It is deployed internally a
 (staging + prod), built and shipped by **Drone CI** to **GHCR**, with analysis artifacts stored in
 **AWS S3** and **per-user AWS SSO identity** carried through every request and background job. The "why"
 behind this work: results were already correct, but the read paths were too slow to use interactively and,
-for the largest inputs, silently incomplete — an analyst doing a modernization assessment waited seconds
-to minutes per click and could not trust large-artifact source views. The hardening described below turned
-the analyzer into a responsive, durable, multi-user platform.
+for the largest inputs, silently incomplete.
 
-## Before → After
+## Before → After: the analyst's workflow
+
+### BEFORE — analyzing one stored procedure by hand
+
+- Open the procedure source, read it start to end, and manually track every operation: which tables it
+  reads, inserts, updates, and deletes; which other procedures it calls — and what **those** call, level
+  after level (proc → proc → proc).
+- Long call chains live across many files and schemas. Tracking them by hand means jumping between files,
+  grepping, keeping mental notes — and still missing branches when the chain is deep.
+- Finding "where is this table touched?" across hundreds of procedures means searching the code by hand,
+  over and over for every question.
+- Triggers, views, and related objects that silently affect the procedure are easy to miss entirely.
+- Debugging, conversion planning, and validation all depend on this hand-built map — so they need deep
+  prior knowledge of the schema and take days.
+
+### AFTER — with AMP Analyzer
+
+- Every operation on any procedure is **captured at analysis time, start to end**: the full call chain,
+  every table operation, every join (with exact join views), related tables/views, and triggers — all
+  precomputed and searchable in milliseconds.
+- "Where is this table touched?" is a search box, not a day of grepping.
+- **Conversion planning:** the summary views (complexity, dependencies, call trees) show what to convert
+  first and what it will touch — with minimal prior knowledge of the schema, because the tool surfaces it.
+- **Debugging:** the call tree / callers views pinpoint where a procedure is used from and what it calls —
+  in clicks.
+- **Validation:** piece-to-piece checking of every converted piece against its original call chain and
+  data operations.
+
+## Metrics
 
 | Capability | Before | After | Work saved (assumptions inline) |
 |---|---|---|---|
@@ -31,32 +57,25 @@ the analyzer into a responsive, durable, multi-user platform.
 times by a stated daily click/query count (50 facet views/day, 20 searches/day); they are not telemetry
 from real sessions. Numbers elsewhere are exactly as measured on the project.
 
-## Customer experience
+## Batch validation (in preparation)
 
-For an analyst running an Oracle ERP modernization assessment, the difference is the shift from "wait and
-wonder" to "instant and complete." Facet views over a large Oracle package — like `USP_RUN_CYCLE` or
-`ERP$USP_PROCESSSALESORDER` — that used to stall for more than a minute now render from precomputed
-sidecars in milliseconds, so exploring sequences, cursors, dynamic SQL, and joins across the package
-estate feels like flipping through a document rather than queuing jobs. Global search across an analysis
-returns in milliseconds instead of half a minute, which makes the analyzer viable as a primary evidence
-tool during a conversion workshop. Call-tree "who calls this?" questions answer in ~4.6ms. And the largest
-inputs — 105MB artifacts with 11,264 classes, 200MB uploads — are no longer a silent dead end: source
-views actually appear, and uploads survive. The net effect is that assessments that once required
-defensive batching of queries can proceed at conversational speed.
+The same outputs make **batch-optimize** and **batch-validation** possible: instead of validating one
+procedure at a time, whole batches run at once — because every procedure's full map is precomputed and
+served in milliseconds. Removing **~1 hour/day** of analyst waiting and returning search in milliseconds is
+precisely what makes those batch workflows practical.
 
 ## Reliability and platform
 
 This work converted a single-user-oriented prototype into an operationally trustworthy service. A latent
-bug that dropped every background S3 upload — losing analyses whenever a pod restarted — was fixed by
-carrying credentials per buffer entry, verified at zero failed uploads. Identity is now explicit end to
-end: a user's AWS SSO identity is captured on the request thread, carried with each task, and installed on
-the worker, with no silent fallback to default credentials; concurrent users are proven isolated and
-unauthenticated access is page-locked. Confidence comes from a 3,452-test suite (including 40+ new
-contract tests) and a 769-combination endpoint sweep with zero 5xx. Delivery is fully automated — every
-push to `main` builds and deploys to Kanopy staging via GHCR, version tags promote to prod — with
-self-cleaning logs, an ops script (`scripts/amp-ops.sh`), and an admin portal that gives visibility into
-users, connections, and analyses. Connections now survive redeploys by auto-reconnecting from each user's
-saved config, so a deploy no longer costs the team a manual reconnect.
+bug that dropped every background S3 upload was fixed by carrying credentials per buffer entry, verified at
+zero failed uploads. Identity is explicit end to end: a user's AWS SSO identity is captured on the request
+thread, carried with each task, and installed on the worker, with no silent fallback to default
+credentials; concurrent users are proven isolated and unauthenticated access is page-locked. Confidence
+comes from a 3,452-test suite (including 40+ new contract tests) and a 769-combination endpoint sweep with
+zero 5xx. Delivery is fully automated — every push to `main` builds and deploys to Kanopy staging via
+GHCR, version tags promote to prod — with self-cleaning logs, an ops script (`scripts/amp-ops.sh`), and an
+admin portal giving visibility into users, connections, and analyses. Connections survive redeploys by
+auto-reconnecting from each user's saved config.
 
 ## An employee-led innovation pattern (India-based reference)
 
@@ -77,28 +96,9 @@ decompile. Solving that personal pain, piece by piece, produced precomputed side
 same dynamic shows up in the numbers: **~1 hour/day of analyst waiting eliminated** per analyst, from one
 engineer's daily annoyance to a shared capability.
 
-## How the team uses it directly — piece-to-piece validation
-
-AMP is not a demo handed over to someone else; our own team uses it every day, and we are building
-**batch-optimize** and **batch-validation** workflows on top of it.
-
-- **Piece-to-piece (proc-to-proc) validation, Oracle first.** When modernizing a large Oracle ERP package
-  such as `USP_RUN_CYCLE` or `ERP$USP_PROCESSSALESORDER`, we validate the conversion **piece by piece** —
-  walking its call tree one procedure at a time. The tool's call-tree, callers, and cross-reference output
-  let an analyst confirm that each converted piece behaves like its original — same call chain, same data
-  touched — instead of testing randomly and hoping.
-- **Why confidence scales with size.** The bigger the package and the longer the call chain, the more
-  that human testing alone misses. AMP makes every branch of the chain visible and checkable, so confidence
-  comes from evidence, not hope.
-- **Batch-optimize / batch-validation (in preparation).** The same analysis outputs let us run these
-  validations across whole batches of procedures rather than one at a time. The sidecar / per-endpoint
-  architecture — every endpoint's tree and fragment precomputed and served in milliseconds — is what makes
-  batch-scale validation feasible at all.
-- **The metrics are the enabler.** Removing **~1 hour/day** of waiting per analyst and returning search in
-  milliseconds is precisely what makes those batch workflows practical.
-
-## Scope
+## Scope — the same engine also covers more
 
 Oracle stored procedures are the primary target. The same engine also reads Microsoft SQL Server, MySQL,
-IBM Db2, and PostgreSQL procedures, plus Java JAR/WAR archives — additional coverage on the same
-analysis model, not the headline.
+IBM Db2, and PostgreSQL procedures **and** the Java side — for JAR/WAR archives it maps every endpoint,
+call tree, and class relationship (11,264+ classes on a single 105 MB jar), so Java modernization gets the
+same evidence-first treatment.
