@@ -55,3 +55,41 @@ push to `main` builds and deploys to Kanopy staging via GHCR, version tags promo
 self-cleaning logs, an ops script (`scripts/amp-ops.sh`), and an admin portal that gives visibility into
 users, connections, and analyses. Connections now survive redeploys by auto-reconnecting from each user's
 saved config, so a deploy no longer costs the team a manual reconnect.
+
+## An employee-led innovation pattern (India-based reference)
+
+AMP fits a well-known Indian pattern of employee-led innovation. Infosys' **"Zero Distance"** (2013,
+championed by Narayana Murthy) asked every project owner to innovate inside their own project — to close
+the "distance" between the work and the person doing it — rather than wait for a central team. HCL
+Technologies' **"Employees First, Customers Second"** (Vineet Nayar) made the same bet from the other
+direction: give the people closest to the work the authority and tools to fix it, and the value reaches
+customers on its own. The pattern in both is qualitative and repeatable — **an engineer hits a daily
+bottleneck, solves it inside their own work, and the fix compounds into an organization-level
+capability.** No company-specific numbers are claimed here; the measurable results belong to AMP itself.
+
+AMP is exactly this pattern. The analyzer was built by the engineer who hit the bottleneck every day —
+waiting 71.5s for a single facet view, 35–41s per search, watching a 105MB / 11,264-class jar fail to
+decompile. Solving that personal pain, piece by piece, produced precomputed sidecars that serve facets in
+2ms and search in 7–19ms, made 105MB / 11,264-class jars analyze end-to-end, and — after a
+769-combination sweep with zero 5xx — turned a local workaround into a deployed internal platform. The
+same dynamic shows up in the numbers: **~1 hour/day of analyst waiting eliminated** per analyst, from one
+engineer's daily annoyance to a shared capability.
+
+## How the team uses it directly — piece-to-piece validation
+
+AMP is not a demo handed over to someone else; our own team uses it every day, and we are building
+**batch-optimize** and **batch-validation** workflows on top of it.
+
+- **Piece-to-piece (proc-to-proc) validation.** When modernizing a large stored procedure, we validate the
+  conversion **piece by piece**. The tool's call-tree, callers, and cross-reference output let an analyst
+  confirm that each converted piece behaves like its original — same call chain, same data touched —
+  instead of testing randomly and hoping.
+- **Why confidence scales with size.** The bigger the procedure and the longer the call chain, the more
+  that human testing alone misses. AMP makes every branch of the chain visible and checkable, so confidence
+  comes from evidence, not hope.
+- **Batch-optimize / batch-validation (in preparation).** The same analysis outputs let us run these
+  validations across whole batches of procedures rather than one at a time. The sidecar / per-endpoint
+  architecture — every endpoint's tree and fragment precomputed and served in milliseconds — is what makes
+  batch-scale validation feasible at all.
+- **The metrics are the enabler.** Removing **~1 hour/day** of waiting per analyst and returning search in
+  milliseconds is precisely what makes those batch workflows practical.
