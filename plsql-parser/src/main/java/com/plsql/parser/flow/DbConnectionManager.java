@@ -492,6 +492,30 @@ public class DbConnectionManager implements AutoCloseable {
     public boolean isDB2() { return "DB2".equals(dbType); }
     public boolean isPostgres() { return "POSTGRES".equals(dbType); }
 
+    /** True for the default Oracle dialect (none of the explicit multi-db flags is set). */
+    public boolean isOracle() {
+        return !isMySQL() && !isSqlServer() && !isDB2() && !isPostgres();
+    }
+
+    /**
+     * Stable identity of this connection <em>target</em> — the dialect plus the JDBC URL. Used to
+     * key on-disk caches that must never share entries across two different databases (the crawl
+     * source cache). The generated configs carry no credentials in the URL: the username/password
+     * travel in the JDBC {@code Properties}, never in {@code jdbc_url}.
+     */
+    public String getConnectionIdentity() {
+        return dbType + "|" + (jdbcUrl == null ? "" : jdbcUrl);
+    }
+
+    /**
+     * Total live connections the pool can hold across every configured user
+     * ({@code dbUsers × POOL_SIZE_PER_USER}). Callers that fan work out in parallel use this as the
+     * upper bound so they never queue more DB work than the pool can actually run at once.
+     */
+    public int getTotalPoolCapacity() {
+        return Math.max(1, dbUsers.size() * POOL_SIZE_PER_USER);
+    }
+
     /**
      * Default schema for SQL Server objects. SQL Server groups objects under a
      * schema (typically "dbo"); this is used as the owner label so output has

@@ -4,6 +4,7 @@ import com.plsql.parser.multidb.Db2SourceFetchStrategy;
 import com.plsql.parser.multidb.MySqlSourceFetchStrategy;
 import com.plsql.parser.multidb.PostgresSourceFetchStrategy;
 import com.plsql.parser.multidb.SqlServerSourceFetchStrategy;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.analyzer.storage.ArtifactEntry;
@@ -12,7 +13,10 @@ import com.analyzer.storage.ArtifactStore;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,6 +53,34 @@ public class SourceDownloader {
     // the last assignment wins, and every reader sees a fully-constructed map.
     private volatile Map<String, ArtifactKey> localCacheIndex = null;
 
+    // ── Persistent, DDL-validated source cache ────────────────────────────────────────────────
+    // Lives OUTSIDE the per-analysis output folder (which AnalysisService archives/moves on every
+    // re-analysis), so a re-run can reuse a source the database has not changed. Namespace:
+    //   <outputKey>/.source-cache/<SANITIZED_SCHEMA>.<NAME>.<TYPE>.<hash8>.srccache
+    // where <hash8> = first 8 hex of md5(connectionIdentity|schema|name|type) so two connections
+    // never collide. Each file is JSON {"lastDdl":...,"source":...}. On lookup the object's current
+    // LAST_DDL_TIME (primed from the catalog by the crawler) is compared with the stored one: equal
+    // (or either side unknown) -> reuse; different -> treat as a miss and re-fetch. All store calls
+    // run on the calling thread, so the crawler's per-task context install routes them to the
+    // submitter's per-user store exactly like the src-prefetch pool already does.
+    private ArtifactStore sourceCacheStore;
+    private ArtifactKey sourceCacheDir;
+    private String sourceCacheIdentity;
+    private final ObjectMapper sourceCacheMapper = new ObjectMapper();
+    // NAME (upper) -> {owner, objectType, lastDdl}; primed per BFS level by the crawler.
+    private final Map<String, String[]> catalogMeta = new ConcurrentHashMap<>();
+
+    /** On-disk entry shape for {@link #sourceCacheDir}. Public for Jackson. */
+    public static final class CachedSource {
+        public String lastDdl;
+        public String source;
+        public CachedSource() {}
+        public CachedSource(String lastDdl, String source) {
+            this.lastDdl = lastDdl;
+            this.source = source;
+        }
+    }
+
     public SourceDownloader(DbConnectionManager connManager) {
         this.connManager = connManager;
     }
@@ -68,6 +100,119 @@ public class SourceDownloader {
     }
 
     /**
+     * Point the persistent source cache at {@code dir} (the analysis-adjacent
+     * {@code <outputKey>/.source-cache/} namespace) and bind it to {@code identity} — the
+     * connection's {@link DbConnectionManager#getConnectionIdentity()}. Passing a null store, key or
+     * identity disables the cache. The store is expected to be the routed per-user store; callers on
+     * pool threads must have installed the captured routing scope (the crawler's fan-out does).
+     */
+    public void setSourceCache(ArtifactStore store, ArtifactKey dir, String identity) {
+        this.sourceCacheStore = store;
+        this.sourceCacheDir = dir;
+        this.sourceCacheIdentity = identity;
+    }
+
+    /** True when a persistent source cache is configured and usable. */
+    public boolean hasSourceCache() {
+        return sourceCacheStore != null && sourceCacheDir != null
+                && sourceCacheIdentity != null && !sourceCacheIdentity.isEmpty();
+    }
+
+    /** Prime catalog metadata for one object (owner / type / LAST_DDL) so the cache can validate. */
+    public void primeCatalogMeta(String name, String owner, String type, String lastDdl) {
+        if (name == null) return;
+        catalogMeta.put(name.toUpperCase(), new String[]{owner, type, lastDdl});
+    }
+
+    /** Prime catalog metadata in bulk (NAME -> {owner, type, lastDdl}). */
+    public void primeCatalogMeta(Map<String, String[]> meta) {
+        if (meta == null) return;
+        for (Map.Entry<String, String[]> e : meta.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null) {
+                catalogMeta.put(e.getKey().toUpperCase(), e.getValue());
+            }
+        }
+    }
+
+    /**
+     * Look up a cached source for {@code (identity, schema, name, type)} whose stored LAST_DDL
+     * matches the object's current one (a missing DDL on either side counts as "cannot prove it
+     * changed" and still reuses the entry). Returns null on any miss/staleness/IO error.
+     */
+    private String trySourceCache(String objectName, String objectType) {
+        if (!hasSourceCache() || objectName == null || objectType == null) return null;
+        String upper = objectName.toUpperCase();
+        String owner = cacheOwner(upper);
+        if (owner == null) return null; // no schema yet -> cannot key the cache consistently
+        ArtifactKey file = sourceCacheKey(upper, objectType.toUpperCase(), owner);
+        CachedSource entry;
+        try (InputStream in = sourceCacheStore.read(file)) {
+            entry = sourceCacheMapper.readValue(in, CachedSource.class);
+        } catch (IOException e) {
+            return null; // absent (the common miss) or unreadable — fall through to the DB
+        }
+        if (entry == null || entry.source == null) return null;
+        String currentDdl = cacheLastDdl(upper);
+        if (currentDdl != null && entry.lastDdl != null && !currentDdl.equals(entry.lastDdl)) {
+            log.info("[SourceDownloader] SourceCache STALE for {} {} (ddl {} -> {})",
+                    objectType, upper, entry.lastDdl, currentDdl);
+            return null;
+        }
+        log.info("[SourceDownloader] SourceCache HIT: {} {} ({})", objectType, upper, owner);
+        return entry.source;
+    }
+
+    /** Persist a freshly fetched source (with its catalog LAST_DDL, when known). Best-effort. */
+    private void storeSourceCache(String objectName, String objectType, String source) {
+        if (!hasSourceCache() || objectName == null || objectType == null || source == null) return;
+        String upper = objectName.toUpperCase();
+        String owner = cacheOwner(upper);
+        if (owner == null) return;
+        ArtifactKey file = sourceCacheKey(upper, objectType.toUpperCase(), owner);
+        try (OutputStream out = sourceCacheStore.write(file)) {
+            sourceCacheMapper.writeValue(out, new CachedSource(cacheLastDdl(upper), source));
+        } catch (IOException e) {
+            log.debug("[SourceDownloader] SourceCache store failed for {} {}: {}", objectType, upper, e.getMessage());
+        }
+    }
+
+    /** Owner to key the source cache by: the known owner, else the catalog's, else null (disabled). */
+    private String cacheOwner(String upperName) {
+        String owner = ownerCache.get(upperName);
+        if (owner != null) return owner.toUpperCase();
+        String[] meta = catalogMeta.get(upperName);
+        return meta != null && meta[0] != null ? meta[0].toUpperCase() : null;
+    }
+
+    private String cacheLastDdl(String upperName) {
+        String[] meta = catalogMeta.get(upperName);
+        return meta != null ? meta[2] : null;
+    }
+
+    private ArtifactKey sourceCacheKey(String name, String type, String schema) {
+        String leaf = sanitize(schema) + "." + sanitize(name) + "." + sanitize(type)
+                + "." + shortHash(sourceCacheIdentity + "|" + schema + "|" + name + "|" + type)
+                + ".srccache";
+        return sourceCacheDir.resolve(leaf);
+    }
+
+    private static String sanitize(String s) {
+        return s == null ? "_" : s.toUpperCase().replaceAll("[^A-Z0-9_$]", "_");
+    }
+
+    private static String shortHash(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(8);
+            for (int i = 0; i < 4; i++) sb.append(String.format("%02x", digest[i]));
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return Integer.toHexString(input.hashCode());
+        }
+    }
+
+    /**
      * Download source for a given object name and type.
      * Searches across all configured schemas.
      * Returns the source text with CREATE OR REPLACE prefix, or null if not found.
@@ -77,6 +222,14 @@ public class SourceDownloader {
         String cached = sourceCache.get(key);
         if (cached != null) {
             return cached;
+        }
+
+        // Persistent DDL-validated source cache (survives re-analysis) — skip the DB fetch
+        // entirely when the object is unchanged.
+        String diskCached = trySourceCache(objectName, objectType);
+        if (diskCached != null) {
+            sourceCache.put(key, diskCached);
+            return diskCached;
         }
 
         // Check local file cache first
@@ -110,6 +263,7 @@ public class SourceDownloader {
             }
             if (source != null) {
                 sourceCache.put(key, source);
+                storeSourceCache(objectName, objectType, source);
                 connManager.recordSuccess(objectName);
             }
             connManager.returnToPool(conn);
@@ -227,6 +381,11 @@ public class SourceDownloader {
             String key = type + ":" + objectName.toUpperCase();
             String cached = sourceCache.get(key);
             if (cached != null) return cached;
+            String diskCached = trySourceCache(objectName, type);
+            if (diskCached != null) {
+                sourceCache.put(key, diskCached);
+                return diskCached;
+            }
             String localSource = checkLocalCache(objectName.toUpperCase(), type);
             if (localSource != null) {
                 sourceCache.put(key, localSource);
@@ -247,6 +406,7 @@ public class SourceDownloader {
                 else log.info("[SourceDownloader] DB fetch for {} {} took {}ms", type, objectName, elapsed);
                 if (source != null) {
                     sourceCache.put(key, source);
+                    storeSourceCache(objectName, type, source);
                     connManager.recordSuccess(objectName);
                     connManager.returnToPool(conn);
                     conn = null;
@@ -272,11 +432,7 @@ public class SourceDownloader {
 
     /** Oracle is the default dialect (no explicit MySQL/SQLServer/DB2 flag). */
     private boolean isOracleConn() {
-        return connManager != null
-                && !connManager.isMySQL()
-                && !connManager.isSqlServer()
-                && !connManager.isDB2()
-                && !connManager.isPostgres();
+        return connManager != null && connManager.isOracle();
     }
 
     /**
@@ -288,6 +444,8 @@ public class SourceDownloader {
             String key = type + ":" + objectName;
             String cached = sourceCache.get(key);
             if (cached != null) return cached;
+            String diskCached = trySourceCache(objectName, type);
+            if (diskCached != null) { sourceCache.put(key, diskCached); return diskCached; }
             String local = checkLocalCache(objectName, type);
             if (local != null) { sourceCache.put(key, local); return local; }
         }
@@ -307,6 +465,7 @@ public class SourceDownloader {
             conn = null;
             if (typeAndSource != null) {
                 sourceCache.put(typeAndSource[0] + ":" + objectName, typeAndSource[1]);
+                storeSourceCache(objectName, typeAndSource[0], typeAndSource[1]);
                 connManager.recordSuccess(objectName);
                 return typeAndSource[1];
             }

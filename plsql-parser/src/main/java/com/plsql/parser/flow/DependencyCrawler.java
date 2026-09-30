@@ -41,6 +41,10 @@ public class DependencyCrawler {
 
     private int maxDepth = -1;
     private long timeoutPerEntryMs = 120_000;
+    // Fan-out bounds for the per-level parallel work (see setCatalogParallelism/setSourceParallelism).
+    private int catalogParallelism = 8;
+    private int sourceParallelism = 8;
+    private int catalogBatchSize = 500;
     private ArtifactStore store;
     private ArtifactKey outputKey;
     private String outputFolderName;
@@ -164,6 +168,28 @@ public class DependencyCrawler {
     }
 
     /**
+     * Upper bound on concurrent catalog lookups (batched ALL_OBJECTS chunks + per-name
+     * {@code tryResolveFromDb} calls) fanned out per BFS level. Default 8; the operator lowers it to
+     * match a database's connection limit. Never below 1.
+     */
+    public void setCatalogParallelism(int catalogParallelism) {
+        this.catalogParallelism = Math.max(1, catalogParallelism);
+    }
+
+    /**
+     * Upper bound on concurrent source fetches fanned out across one BFS level (the src-prefetch
+     * pool widened to the whole level). Default 8; never below 1.
+     */
+    public void setSourceParallelism(int sourceParallelism) {
+        this.sourceParallelism = Math.max(1, sourceParallelism);
+    }
+
+    /** Chunk size for the batched ALL_OBJECTS IN(...) lookups (Oracle bind-variable limit headroom). */
+    public void setCatalogBatchSize(int catalogBatchSize) {
+        this.catalogBatchSize = Math.max(1, catalogBatchSize);
+    }
+
+    /**
      * Crawl from the given entry point and produce a FlowResult.
      *
      * @param entryPoint e.g. "PG_AC_EINVOICE.PC_IRBM_SUBMISSION" or "FN_SOME_FUNC"
@@ -199,6 +225,14 @@ public class DependencyCrawler {
                 ArtifactKey buildKey = outputKey.resolve(safeName);
                 chunkedWriter = new ChunkedFlowWriter(store, buildKey);
                 downloader.setLocalCacheDir(store, chunkedWriter.getSourcesKey());
+                // Persistent, DDL-validated source cache. Deliberately under the PARENT outputKey
+                // (not the per-analysis folder, which AnalysisService archives on every re-run), so
+                // an unchanged object's source survives and skips the re-fetch. Namespace:
+                // <outputKey>/.source-cache/. Keyed by connection identity + schema + name + type.
+                if (downloader.getConnManager() != null) {
+                    downloader.setSourceCache(store, outputKey.resolve(".source-cache"),
+                            downloader.getConnManager().getConnectionIdentity());
+                }
                 log.info("[Crawler] Chunked output: " + buildKey);
             } catch (IOException e) {
                 log.info("[Crawler] Failed to init chunked writer: " + e.getMessage());
@@ -242,22 +276,41 @@ public class DependencyCrawler {
         // called per-BFS-node fires an incremental batchResolveTableOwners each time (~40 queries).
         bulkPreResolveAllTables();
 
-        Queue<BfsItem> queue = new LinkedList<>();
+        LinkedList<BfsItem> queue = new LinkedList<>();
         queue.add(new BfsItem(packageName, subprogramName, 0, null, null, 0));
-        int currentBfsDepth = 0;
+        int currentBfsDepth = -1;
 
         while (!queue.isEmpty()) {
             BfsItem item = queue.poll();
 
-            // Fix C: when BFS depth advances, flush all accumulated unknown call names in ONE
-            // ALL_OBJECTS IN(...) query.  This replaces ~270 individual tryResolveFromDb calls
-            // (each 400ms blocking) with 1-2 batch queries fired between BFS levels.
+            // When BFS depth advances, prepare the WHOLE level in parallel before processing it:
+            //   1. flush accumulated unknown call names (batched ALL_OBJECTS, parallel chunks),
+            //   2. prime catalog metadata (owner/type/LAST_DDL) for the level — one batched query,
+            //   3. fetch every level-N source concurrently (the src-prefetch pool widened to a level).
+            // BFS keeps all same-depth items contiguous at the head, so draining them here is exact.
+            // The drained items are put back at the head in the same order, and processing below
+            // stays serial — so nodes, edges and their order are byte-for-byte the serial result.
             if (item.depth > currentBfsDepth) {
                 currentBfsDepth = item.depth;
+                List<BfsItem> levelRest = new ArrayList<>();
+                while (!queue.isEmpty() && queue.peek().depth == item.depth) {
+                    levelRest.add(queue.poll());
+                }
+                List<BfsItem> level = new ArrayList<>(levelRest.size() + 1);
+                level.add(item);
+                level.addAll(levelRest);
+
                 flushPendingResolve();
                 // Flush standalone names queued by enqueueExternalCalls so they are
                 // confirmed present/absent before their BFS nodes are processed.
                 flushMissingBatch();
+                // Catalog metadata for the level (LAST_DDL validation for the source cache).
+                Map<String, String[]> levelMeta = fetchLevelCatalogMeta(level);
+                if (!levelMeta.isEmpty()) downloader.primeCatalogMeta(levelMeta);
+                // Parallel source fan-out: every level-N source fetched simultaneously.
+                prefetchLevelSources(level);
+
+                for (int i = levelRest.size() - 1; i >= 0; i--) queue.addFirst(levelRest.get(i));
             }
             String visitKey = buildVisitKey(item.schema, item.packageName, item.subprogramName);
             // Overloaded package member: distinguish by arg count so each overload becomes
@@ -1559,6 +1612,212 @@ public class DependencyCrawler {
         }
     }
 
+    // ── Parallel per-level fan-out ──────────────────────────────────────────────────────────────
+
+    /**
+     * Run {@code tasks} on a bounded, short-lived pool, carrying the submitting thread's identity to
+     * every worker. This is the {@code src-prefetch} pattern generalized: capture the SSO snapshot
+     * (credentials + stores) and the routed-store scope HERE, on the crawl thread, then install both
+     * per task with try-with-resources so each worker signs as the same principal and reads/writes
+     * the submitter's per-user store. Null-safe: with nothing captured, install is a no-op and legacy
+     * / CLI behaviour is preserved exactly. A task that throws never fails the batch.
+     */
+    private void fanOut(Collection<Runnable> tasks, int maxThreads) {
+        if (tasks == null || tasks.isEmpty()) return;
+        final CapturedSsoContext ctx = CapturedSsoContext.capture(null);
+        final RequestScopedArtifactStore.Scope scope = store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+        int threads = Math.max(1, Math.min(maxThreads, tasks.size()));
+        ExecutorService pool = Executors.newFixedThreadPool(threads,
+                r -> { Thread t = new Thread(r, "crawl-fanout"); t.setDaemon(true); return t; });
+        for (Runnable task : tasks) {
+            pool.submit(() -> {
+                try (AutoCloseable scoped = scope.install();
+                     AutoCloseable sso = ctx == null ? null : ctx.install()) {
+                    task.run();
+                } catch (Exception ignored) {
+                    // best-effort fan-out: one failed task must not abort the level
+                }
+            });
+        }
+        pool.shutdown();
+        try {
+            pool.awaitTermination(180, TimeUnit.SECONDS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("[Crawler] fan-out interrupted after timeout");
+        }
+    }
+
+    /** Result of a batched ALL_OBJECTS lookup: resolved names and names whose chunk failed. */
+    private record TypeLookup(Map<String, String> found, Set<String> unresolved) {}
+
+    /**
+     * One batched ALL_OBJECTS lookup for {@code names}, split into chunks run IN PARALLEL on the
+     * bounded catalog pool (a configurable cap). Each chunk borrows its own pooled connection.
+     * Returns the best object_type per name (PACKAGE BODY preferred) plus the names belonging to
+     * chunks that failed — those are left for a later level / individual retry rather than being
+     * wrongly marked missing. A null connection manager yields all names unresolved.
+     */
+    private TypeLookup queryObjectTypes(Collection<String> names) {
+        Map<String, String> found = new ConcurrentHashMap<>();
+        Set<String> unresolved = ConcurrentHashMap.newKeySet();
+        if (names == null || names.isEmpty()) return new TypeLookup(found, unresolved);
+        if (downloader.getConnManager() == null) {
+            unresolved.addAll(names);
+            return new TypeLookup(found, unresolved);
+        }
+        List<String> nameList = new ArrayList<>(names);
+        List<List<String>> chunks = new ArrayList<>();
+        int size = Math.max(1, catalogBatchSize);
+        for (int i = 0; i < nameList.size(); i += size) {
+            chunks.add(new ArrayList<>(nameList.subList(i, Math.min(i + size, nameList.size()))));
+        }
+        List<Runnable> tasks = new ArrayList<>(chunks.size());
+        for (List<String> chunk : chunks) {
+            tasks.add(() -> {
+                java.sql.Connection conn = null;
+                try {
+                    conn = downloader.getConnManager().getAnyConnection();
+                    String ph = String.join(",", Collections.nCopies(chunk.size(), "?"));
+                    // Include owner filter so we only count objects our schemas can actually download.
+                    // Return object_type so nodeCache peek can target exactly the right type (1 call
+                    // vs 2). PACKAGE BODY ranks first so it wins when both PACKAGE and PACKAGE BODY exist.
+                    String sql = "SELECT object_name, object_type FROM all_objects "
+                            + "WHERE object_name IN (" + ph + ") "
+                            + "AND object_type IN ('PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION') "
+                            + "AND owner IN (" + buildSchemaInClause() + ") "
+                            + "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
+                    downloader.getConnManager().incrementDbCalls();
+                    try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                        for (int j = 0; j < chunk.size(); j++) ps.setString(j + 1, chunk.get(j));
+                        try (java.sql.ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) {
+                                String name = rs.getString(1).toUpperCase();
+                                String type = rs.getString(2).toUpperCase();
+                                found.putIfAbsent(name, type); // first row wins (ORDER BY rank)
+                            }
+                        }
+                    }
+                    downloader.getConnManager().returnToPool(conn);
+                    conn = null;
+                } catch (Exception e) {
+                    unresolved.addAll(chunk);
+                    log.warn("[Crawler] catalog chunk ({} names) failed: {}", chunk.size(), e.getMessage());
+                } finally {
+                    // Never leak the connection/permit on error (would starve the pool over time).
+                    if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
+                }
+            });
+        }
+        fanOut(tasks, catalogParallelism);
+        return new TypeLookup(found, unresolved);
+    }
+
+    /**
+     * One batched ALL_OBJECTS query for the level returning owner / object_type / LAST_DDL_TIME for
+     * every object the level will fetch, chunked and run in parallel like {@link #queryObjectTypes}.
+     * Only issued for Oracle when a source cache is configured (otherwise it is pure overhead). The
+     * returned metadata is used ONLY to key/validate the source cache — it never feeds the serial
+     * parse path, so it cannot change the analysis output.
+     */
+    private Map<String, String[]> fetchLevelCatalogMeta(Collection<BfsItem> level) {
+        Map<String, String[]> meta = new ConcurrentHashMap<>();
+        if (!downloader.hasSourceCache()) return meta;
+        if (downloader.getConnManager() == null || !downloader.getConnManager().isOracle()) return meta;
+        Set<String> names = new LinkedHashSet<>();
+        for (BfsItem it : level) {
+            String n = it.packageName != null ? it.packageName : it.subprogramName;
+            if (n != null && !n.isBlank()) names.add(n.toUpperCase());
+        }
+        if (names.isEmpty()) return meta;
+        List<String> nameList = new ArrayList<>(names);
+        List<List<String>> chunks = new ArrayList<>();
+        int size = Math.max(1, catalogBatchSize);
+        for (int i = 0; i < nameList.size(); i += size) {
+            chunks.add(new ArrayList<>(nameList.subList(i, Math.min(i + size, nameList.size()))));
+        }
+        List<Runnable> tasks = new ArrayList<>(chunks.size());
+        for (List<String> chunk : chunks) {
+            tasks.add(() -> {
+                java.sql.Connection conn = null;
+                try {
+                    conn = downloader.getConnManager().getAnyConnection();
+                    String ph = String.join(",", Collections.nCopies(chunk.size(), "?"));
+                    String sql = "SELECT owner, object_name, object_type, "
+                            + "TO_CHAR(last_ddl_time,'YYYY-MM-DD HH24:MI:SS') ddl FROM all_objects "
+                            + "WHERE object_name IN (" + ph + ") "
+                            + "AND object_type IN ('PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION') "
+                            + "AND owner IN (" + buildSchemaInClause() + ") "
+                            + "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
+                    downloader.getConnManager().incrementDbCalls();
+                    try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                        for (int j = 0; j < chunk.size(); j++) ps.setString(j + 1, chunk.get(j));
+                        try (java.sql.ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) {
+                                String name = rs.getString("object_name").toUpperCase();
+                                String owner = rs.getString("owner");
+                                String type = rs.getString("object_type").toUpperCase();
+                                String ddl = rs.getString("ddl");
+                                meta.putIfAbsent(name, new String[]{owner, type, ddl});
+                            }
+                        }
+                    }
+                    downloader.getConnManager().returnToPool(conn);
+                    conn = null;
+                } catch (Exception e) {
+                    log.debug("[Crawler] level catalog-meta chunk failed: {}", e.getMessage());
+                } finally {
+                    if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
+                }
+            });
+        }
+        fanOut(tasks, catalogParallelism);
+        return meta;
+    }
+
+    /**
+     * Fetch every source in one BFS level simultaneously on the bounded source pool. The serial
+     * processing loop that follows then finds each source in the downloader's in-memory cache and
+     * pays no further network cost — the parse order (and therefore the analysis output) is
+     * unchanged. Skips built-in packages, names already known missing, and names already parsed.
+     */
+    private void prefetchLevelSources(Collection<BfsItem> level) {
+        if (level == null || level.isEmpty()) return;
+        if (downloader.getConnManager() == null) return;
+        boolean sqlServer = downloader.getConnManager().isSqlServer();
+        List<Runnable> tasks = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (BfsItem item : level) {
+            String name = item.packageName != null ? item.packageName : item.subprogramName;
+            if (name == null || name.isBlank()) continue;
+            String upper = name.toUpperCase();
+            if (!seen.add(upper)) continue;
+            if (isBuiltInPackage(upper) || knownMissingObjects.contains(upper)) continue;
+            if (parseCache.containsKey(upper)) continue;
+            final String pkg = item.packageName;
+            final String sub = item.subprogramName;
+            final String schema = item.schema;
+            tasks.add(() -> {
+                try {
+                    if (pkg != null) {
+                        String s = downloader.downloadPackageBody(pkg);
+                        if (s == null) downloader.downloadPackageSpec(pkg);
+                    } else {
+                        // SQL Server resolves the owner from a "schema.name" hint; Oracle matches the
+                        // bare name (same rule as downloadAndParse).
+                        String fetchName = (sqlServer && schema != null && !schema.isEmpty())
+                                ? schema + "." + sub : sub;
+                        downloader.downloadAny(fetchName);
+                    }
+                } catch (Exception ignored) {
+                    // a failed prefetch just means the serial pass fetches it (again)
+                }
+            });
+        }
+        fanOut(tasks, sourceParallelism);
+    }
+
     /**
      * Batch-check all pending unknown names against ALL_OBJECTS in one query.
      * Names not found as PACKAGE/PROCEDURE/FUNCTION/PACKAGE BODY are added to
@@ -1584,56 +1843,21 @@ public class DependencyCrawler {
             return;
         }
 
-        java.sql.Connection conn = null;
-        try {
-            conn = downloader.getConnManager().getAnyConnection();
-            List<String> nameList = new ArrayList<>(batch);
-            int batchSize = 500;
-            // name -> best object_type found in our schemas (PACKAGE BODY preferred over PACKAGE)
-            Map<String, String> foundInOracle = new HashMap<>();
-            for (int i = 0; i < nameList.size(); i += batchSize) {
-                List<String> sub = nameList.subList(i, Math.min(i + batchSize, nameList.size()));
-                String ph = String.join(",", java.util.Collections.nCopies(sub.size(), "?"));
-                // Include owner filter so we only count objects our schemas can actually download.
-                // Return object_type so nodeCache peek can target exactly the right type (1 call vs 2).
-                // PACKAGE BODY ranks first (most specific) so it wins when both PACKAGE and PACKAGE BODY exist.
-                String sql = "SELECT object_name, object_type FROM all_objects " +
-                        "WHERE object_name IN (" + ph + ") " +
-                        "AND object_type IN ('PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION') " +
-                        "AND owner IN (" + buildSchemaInClause() + ") " +
-                        "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
-                downloader.getConnManager().incrementDbCalls();
-                try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
-                    for (int j = 0; j < sub.size(); j++) ps.setString(j + 1, sub.get(j));
-                    try (java.sql.ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            String name = rs.getString(1).toUpperCase();
-                            String type = rs.getString(2).toUpperCase();
-                            // First row wins (PACKAGE BODY preferred due to ORDER BY)
-                            foundInOracle.putIfAbsent(name, type);
-                        }
-                    }
-                }
+        TypeLookup lookup = queryObjectTypes(batch);
+        Map<String, String> foundInOracle = lookup.found();
+        // Populate type cache for present objects; mark absent ones as missing. A name whose chunk
+        // failed is left unresolved (retried on a later level) rather than wrongly marked missing.
+        for (String name : batch) {
+            if (lookup.unresolved().contains(name)) continue;
+            String type = foundInOracle.get(name);
+            if (type != null) {
+                knownObjectTypes.put(name, type);
+            } else {
+                knownMissingObjects.add(name);
             }
-            downloader.getConnManager().returnToPool(conn);
-            conn = null;
-            // Populate type cache for present objects; mark absent ones as missing
-            for (String name : batch) {
-                String type = foundInOracle.get(name);
-                if (type != null) {
-                    knownObjectTypes.put(name, type);
-                } else {
-                    knownMissingObjects.add(name);
-                }
-            }
-            log.info("[Crawler] MissingBatch: checked={} existInOracle={} markedMissing={}",
-                    batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
-        } catch (Exception e) {
-            log.warn("[Crawler] MissingBatch check failed: {}", e.getMessage());
-        } finally {
-            // Never leak the connection/permit on error (would starve the pool over time).
-            if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
         }
+        log.info("[Crawler] MissingBatch: checked={} existInOracle={} markedMissing={}",
+                batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
     }
 
     /**
@@ -1664,60 +1888,44 @@ public class DependencyCrawler {
             return;
         }
 
-        java.sql.Connection conn = null;
-        try {
-            conn = downloader.getConnManager().getAnyConnection();
-            List<String> nameList = new ArrayList<>(batch);
-            // name -> best object_type (PACKAGE BODY preferred)
-            Map<String, String> foundInOracle = new HashMap<>();
-            int batchSize = 500;
-            for (int i = 0; i < nameList.size(); i += batchSize) {
-                List<String> sub = nameList.subList(i, Math.min(i + batchSize, nameList.size()));
-                String ph = String.join(",", java.util.Collections.nCopies(sub.size(), "?"));
-                String sql = "SELECT object_name, object_type FROM all_objects "
-                        + "WHERE object_name IN (" + ph + ") "
-                        + "AND object_type IN ('PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION') "
-                        + "AND owner IN (" + buildSchemaInClause() + ") "
-                        + "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
-                downloader.getConnManager().incrementDbCalls();
-                try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
-                    for (int j = 0; j < sub.size(); j++) ps.setString(j + 1, sub.get(j));
-                    try (java.sql.ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            String name = rs.getString(1).toUpperCase();
-                            String type = rs.getString(2).toUpperCase();
-                            foundInOracle.putIfAbsent(name, type);
-                        }
-                    }
-                }
+        TypeLookup lookup = queryObjectTypes(batch);
+        Map<String, String> foundInOracle = lookup.found();
+        List<Runnable> resolveTasks = new ArrayList<>();
+        for (String name : batch) {
+            if (lookup.unresolved().contains(name)) continue;
+            String type = foundInOracle.get(name);
+            if (type != null) {
+                resolvedPresentObjects.add(name);
+                knownObjectTypes.put(name, type);
+                // Populate the schema map (already attempted-guarded inside). Run in parallel across
+                // the level — this was the per-procedure catalog query that dominated the crawl.
+                resolveTasks.add(() -> schemaResolver.tryResolveFromDb(name));
+            } else {
+                knownMissingObjects.add(name);
             }
-            downloader.getConnManager().returnToPool(conn);
-            conn = null;
-            for (String name : batch) {
-                String type = foundInOracle.get(name);
-                if (type != null) {
-                    resolvedPresentObjects.add(name);
-                    knownObjectTypes.put(name, type);
-                    schemaResolver.tryResolveFromDb(name); // populate schema map (already attempted guard inside)
-                } else {
-                    knownMissingObjects.add(name);
-                }
+        }
+        fanOut(resolveTasks, catalogParallelism);
+        log.info("[Crawler] PendingResolve flush: checked={} found={} missing={}",
+                batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
+
+        // Any name whose chunk failed is retried individually (in parallel), so a transient catalog
+        // error never silently drops a valid call — mirrors the old per-name fallback.
+        Set<String> unresolved = lookup.unresolved();
+        if (!unresolved.isEmpty()) {
+            log.warn("[Crawler] flushPendingResolve: {} name(s) unresolved by batch, retrying individually", unresolved.size());
+            Map<String, Boolean> resolved = new ConcurrentHashMap<>();
+            List<Runnable> fallbackTasks = new ArrayList<>();
+            for (String name : unresolved) {
+                fallbackTasks.add(() -> resolved.put(name, schemaResolver.tryResolveFromDb(name)));
             }
-            log.info("[Crawler] PendingResolve flush: checked={} found={} missing={}",
-                    batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
-        } catch (Exception e) {
-            // Fall back: try each name individually so we don't silently drop valid calls
-            log.warn("[Crawler] flushPendingResolve batch failed ({}), falling back to individual lookups", e.getMessage());
-            for (String name : batch) {
-                if (schemaResolver.tryResolveFromDb(name)) {
+            fanOut(fallbackTasks, catalogParallelism);
+            for (String name : unresolved) {
+                if (Boolean.TRUE.equals(resolved.get(name))) {
                     resolvedPresentObjects.add(name);
                 } else {
                     knownMissingObjects.add(name);
                 }
             }
-        } finally {
-            // Never leak the connection/permit on error (would starve the pool over time).
-            if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
         }
     }
 

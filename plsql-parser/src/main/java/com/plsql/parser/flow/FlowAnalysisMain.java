@@ -77,6 +77,14 @@ public class FlowAnalysisMain {
 
         /** CLI only: local directory the LOCAL store is rooted at. Ignored by in-process callers. */
         public String dataRoot = "data";
+
+        /**
+         * Upper bound on concurrent database work fanned out per BFS level (catalog lookups and
+         * source fetches). Default 8; lower it to match a database's connection limit.
+         * See {@link DependencyCrawler#setCatalogParallelism(int)} /
+         * {@link DependencyCrawler#setSourceParallelism(int)}.
+         */
+        public int parallelism = 8;
     }
 
     /** Parses a key from its '/'-joined form. Empty segments are dropped. */
@@ -146,6 +154,17 @@ public class FlowAnalysisMain {
                 case "--data-root":
                     if (i + 1 < args.length) o.dataRoot = args[++i];
                     else fail("--data-root requires a path argument");
+                    break;
+                case "--parallelism":
+                    if (i + 1 < args.length) {
+                        try {
+                            o.parallelism = Math.max(1, Integer.parseInt(args[++i]));
+                        } catch (NumberFormatException e) {
+                            fail("--parallelism requires a numeric argument");
+                        }
+                    } else {
+                        fail("--parallelism requires a numeric argument");
+                    }
                     break;
                 case "--clear-cache":
                     o.clearCache = true;
@@ -250,6 +269,9 @@ public class FlowAnalysisMain {
             // Advisory: lets the depth-0 lookup fall back from e.g. PROCEDURE to PACKAGE and name
             // what it tried when it still finds nothing (Fix C).
             crawler.setEntryObjectType(opts.entryObjectType);
+            // Bound the per-level parallel catalog + source fan-out (default 8).
+            crawler.setCatalogParallelism(opts.parallelism);
+            crawler.setSourceParallelism(opts.parallelism);
             if (opts.outputKey != null) {
                 crawler.setOutputDir(store, opts.outputKey);
                 if (opts.outputName != null && !opts.outputName.isBlank()) {
@@ -369,6 +391,8 @@ public class FlowAnalysisMain {
         System.err.println("                        (default: cache)");
         System.err.println("  --clear-cache         Delete the schema-resolver cache before running");
         System.err.println("  --allow-empty-analysis  Permit writing a 0-node analysis (default: fail loud)");
+        System.err.println("  --parallelism <N>     Max concurrent DB lookups/source fetches per BFS");
+        System.err.println("                        level (default: 8; lower to match a DB conn limit)");
         System.err.println("  --max-depth <N>       Maximum recursion depth (default: -1 = unlimited)");
         System.err.println("  --pretty              Pretty-print the JSON output");
         System.err.println();
