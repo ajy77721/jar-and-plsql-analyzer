@@ -234,6 +234,62 @@ class EstateFacetsTest {
         assertEquals(2, usedBy.path("count").asInt(), "read + write on PKG_A.G_X");
     }
 
+    /**
+     * The fields the crawl now persists must reach the facet reader: MV refresh metadata
+     * (mvRefreshMode/mvRefreshMethod/lastRefresh on the tables-index per-view entry), the
+     * source-parsed trigger WHEN/level/body (whenClause/level/definition on the tables-index
+     * triggers[] row), and the package-global DECLARATIONS (packageGlobalDeclarations on the
+     * package node). One fixture carrying all three proves the whole persisted→reader path.
+     */
+    @Test
+    void persistedMvRefreshTriggerWhenLevelBodyAndGlobalDeclarationsFlowThrough() throws Exception {
+        put("api/index.json", "{\"entryPoint\":\"DEMO\",\"nodes\":[]}");
+        put("api/tables/index.json", """
+                {"tables":[
+                 {"name":"MV_C","schema":"S","objectType":"MATERIALIZED_VIEW","dbColumns":[],
+                  "viewDefinition":"SELECT 1 FROM base_a","usedBy":[],
+                  "mvRefreshMode":"DEMAND","mvRefreshMethod":"FAST",
+                  "lastRefresh":"2026-09-01T10:15:30Z","lastRefreshType":"FAST"},
+                 {"name":"T1","schema":"S","objectType":"TABLE",
+                  "triggers":[{"nodeId":"S$TRG1","name":"TRG1","schema":"S",
+                               "event":"INSERT","timing":"AFTER","level":"ROW",
+                               "whenClause":"NEW.STATUS = 'ACTIVE'","source":"SOURCE",
+                               "definition":"TRIGGER TRG1 AFTER INSERT ON T1 FOR EACH ROW WHEN (NEW.STATUS = 'ACTIVE') BEGIN NULL; END;"}],
+                  "usedBy":[]}
+                ]}""");
+        // Package node carrying its own global declarations (what the Oracle visitor now persists).
+        put("api/nodes/S$PKG_A.json", """
+                {"nodeId":"S$PKG_A","name":"PKG_A","objectName":"PKG_A","schema":"S",
+                 "objectType":"PACKAGE_BODY",
+                 "packageGlobalDeclarations":[
+                   {"name":"G_X","dataType":"NUMBER","defaultValue":"0","constant":false}]}""");
+        // A reference to PKG_A.G_X so the package also appears through the usage path.
+        put("api/nodes/S$P1.json", """
+                {"nodeId":"S$P1","name":"P1","schema":"S","objectType":"PROCEDURE",
+                 "externalPackageVarRefDetails":[
+                   {"packageName":"PKG_A","variableName":"G_X","line":4,"accessType":"READ"}]}""");
+
+        // MV refresh metadata flows off the tables-index entry.
+        JsonNode mv = row(staticReader.getViews(NAME), "name", "MV_C");
+        assertEquals("DEMAND", mv.path("mvRefreshMode").asText());
+        assertEquals("FAST", mv.path("mvRefreshMethod").asText());
+        assertEquals("2026-09-01T10:15:30Z", mv.path("lastRefresh").asText());
+
+        // Source-parsed trigger WHEN/level/body flow off the tables-index triggers[] row.
+        JsonNode trg = row(staticReader.getTriggers(NAME), "name", "TRG1");
+        assertEquals("ROW", trg.path("level").asText(), "persisted level wins over derivation");
+        assertEquals("NEW.STATUS = 'ACTIVE'", trg.path("whenClause").asText());
+        assertTrue(trg.path("bodyAvailable").asBoolean(), "body persisted from the trigger definition");
+
+        // Package-global declarations flow off the package node detail.
+        JsonNode gx = row(staticReader.getGlobals(NAME), "package", "PKG_A")
+                .path("variables").get(0);
+        assertEquals("G_X", gx.path("name").asText());
+        assertTrue(gx.path("declared").asBoolean(), "declaration present → declared:true");
+        assertEquals("NUMBER", gx.path("dataType").asText());
+        assertEquals("0", gx.path("defaultValue").asText());
+    }
+
     @Test
     void absentFacetsDegradeToEmpty() throws Exception {
         put("api/index.json", "{\"entryPoint\":\"DEMO\",\"nodes\":[]}");

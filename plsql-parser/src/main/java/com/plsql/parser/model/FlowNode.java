@@ -49,6 +49,19 @@ public class FlowNode {
     private String triggerEvent;
     private String triggerTable;
     private String triggerTiming;
+    // Source-parsed trigger facets — persisted to the tables-index triggers[] and node detail so the
+    // estate trigger facet can report the WHEN condition, the ROW/STATEMENT level and the body.
+    private String triggerWhenClause;
+    private String triggerLevel;
+    private String triggerBody;
+    /**
+     * Package-level variable DECLARATIONS ({@code name/dataType/defaultValue/constant}) for a node
+     * that is a package (PACKAGE_BODY/PACKAGE_SPEC). Must live on FlowNode, not only on
+     * ParsedObject, because the node is written to chunks/chunk_*.json and read back before the
+     * api/nodes document is built — a field absent here does not survive that round trip. Empty for
+     * every non-package node.
+     */
+    private List<VariableInfo> packageVariables = new ArrayList<>();
     private int overloadParamCount = -1;   // >=0 only for overloaded package members
     private boolean autonomousTransaction; // PRAGMA AUTONOMOUS_TRANSACTION (Oracle)
     /**
@@ -127,6 +140,14 @@ public class FlowNode {
     public void setTriggerTable(String triggerTable) { this.triggerTable = triggerTable; }
     public String getTriggerTiming() { return triggerTiming; }
     public void setTriggerTiming(String triggerTiming) { this.triggerTiming = triggerTiming; }
+    public String getTriggerWhenClause() { return triggerWhenClause; }
+    public void setTriggerWhenClause(String triggerWhenClause) { this.triggerWhenClause = triggerWhenClause; }
+    public String getTriggerLevel() { return triggerLevel; }
+    public void setTriggerLevel(String triggerLevel) { this.triggerLevel = triggerLevel; }
+    public String getTriggerBody() { return triggerBody; }
+    public void setTriggerBody(String triggerBody) { this.triggerBody = triggerBody; }
+    public List<VariableInfo> getPackageVariables() { return packageVariables; }
+    public void setPackageVariables(List<VariableInfo> packageVariables) { this.packageVariables = packageVariables; }
 
     public void generateNodeId() {
         this.nodeId = buildShortId();

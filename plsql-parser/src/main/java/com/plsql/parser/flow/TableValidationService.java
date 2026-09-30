@@ -141,6 +141,23 @@ public class TableValidationService {
             // Gap 1: follow synonyms one level so metadata queries use the real table name
             Map<String, String[]> synonymTargets = resolveSynonyms(conn, resolvedInfo, foundObjects);
 
+            // MV refresh metadata (ALL_MVIEWS.refresh_mode/refresh_method/last_refresh_type/date) is
+            // always refreshed — like triggers, MV state changes between runs — so it is queried for
+            // every confirmed materialized view, not only the ones still missing dbColumns. On a
+            // re-analysis of an old analysis (columns already stored, nothing to enrich) this is the
+            // one query that still fills the MV refresh fields in. Collected after synonym resolution
+            // so a synonym standing in for an MV also contributes its target's refresh metadata.
+            Set<String> allMViewNames = new LinkedHashSet<>();
+            for (Map.Entry<String, String> e : foundObjects.entrySet()) {
+                if (!e.getKey().contains(".")) continue; // qualified keys only
+                if ("MATERIALIZED VIEW".equals(e.getValue())) {
+                    allMViewNames.add(e.getKey().split("\\.", 2)[1]);
+                }
+            }
+            Map<String, ObjectNode> mviewRefreshMap = allMViewNames.isEmpty()
+                    ? Collections.emptyMap()
+                    : bulkQueryMViewRefresh(conn, mapper, allMViewNames);
+
             // Build namesForMetadata: replace synonym names with their target table names
             Map<String, String> synTargetToSource = new LinkedHashMap<>();
             Set<String> namesForMetadata = new LinkedHashSet<>();
@@ -338,6 +355,16 @@ public class TableValidationService {
                             ArrayNode arr = mapper.createArrayNode();
                             trigs.forEach(arr::add);
                             tObj.set("dbTriggers", arr);
+                        }
+                        // Attach MV refresh metadata (always refresh — MV state changes between runs).
+                        // Keys mvRefreshMode/mvRefreshMethod/lastRefresh are exactly what the estate
+                        // views facet's EstateFacetReader.viewRow reads off this per-view entry.
+                        if ("MATERIALIZED VIEW".equals(resolvedType)) {
+                            ObjectNode mvMeta = mviewRefreshMap.get(ownerKey);
+                            if (mvMeta == null) mvMeta = mviewRefreshMap.get(metaName);
+                            if (mvMeta != null) {
+                                mvMeta.fields().forEachRemaining(en -> tObj.set(en.getKey(), en.getValue()));
+                            }
                         }
                     } else {
                         notFoundCount++;
@@ -632,6 +659,51 @@ public class TableValidationService {
                 }
             } catch (Exception e) {
                 log.warn("[TableValidation] all_mviews error: {}", e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * ALL_MVIEWS refresh metadata for the given MV names — refresh_mode/refresh_method and
+     * last_refresh_type/date. Keyed "OWNER.MVIEW_NAME" and bare "MVIEW_NAME". Values are emitted
+     * under the exact keys the estate views facet reads ({@code mvRefreshMode},
+     * {@code mvRefreshMethod}, {@code lastRefresh}); {@code lastRefreshType} is carried alongside
+     * for completeness. Missing/null columns are simply omitted, never guessed.
+     */
+    private static Map<String, ObjectNode> bulkQueryMViewRefresh(
+            Connection conn, ObjectMapper mapper, Set<String> names) {
+        Map<String, ObjectNode> result = new LinkedHashMap<>();
+        List<String> nameList = new ArrayList<>(names);
+        for (int i = 0; i < nameList.size(); i += BATCH_SIZE) {
+            List<String> batch = nameList.subList(i, Math.min(i + BATCH_SIZE, nameList.size()));
+            String ph  = ph(batch.size());
+            String sql = "SELECT owner, mview_name, refresh_mode, refresh_method, " +
+                    "last_refresh_type, last_refresh_date FROM all_mviews " +
+                    "WHERE mview_name IN (" + ph + ")";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                bind(ps, 1, batch);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String owner     = rs.getString("owner").toUpperCase();
+                        String mviewName = rs.getString("mview_name").toUpperCase();
+                        ObjectNode meta = mapper.createObjectNode();
+                        String mode = rs.getString("refresh_mode");
+                        if (mode != null) meta.put("mvRefreshMode", mode);
+                        String method = rs.getString("refresh_method");
+                        if (method != null) meta.put("mvRefreshMethod", method);
+                        String lrType = rs.getString("last_refresh_type");
+                        if (lrType != null) meta.put("lastRefreshType", lrType);
+                        java.sql.Timestamp lrDate = rs.getTimestamp("last_refresh_date");
+                        if (lrDate != null) meta.put("lastRefresh", lrDate.toInstant().toString());
+                        if (!meta.isEmpty()) {
+                            result.putIfAbsent(owner + "." + mviewName, meta);
+                            result.putIfAbsent(mviewName, meta); // bare-name fallback key
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[TableValidation] all_mviews refresh error: {}", e.getMessage());
             }
         }
         return result;

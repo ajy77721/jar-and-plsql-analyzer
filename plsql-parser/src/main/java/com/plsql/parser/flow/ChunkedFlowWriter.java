@@ -817,6 +817,9 @@ public class ChunkedFlowWriter {
             if (node.getTriggerTable() != null)  idx.put("triggerTable", node.getTriggerTable());
             if (node.getTriggerEvent() != null)  idx.put("triggerEvent", node.getTriggerEvent());
             if (node.getTriggerTiming() != null) idx.put("triggerTiming", node.getTriggerTiming());
+            if (node.getTriggerWhenClause() != null) idx.put("triggerWhenClause", node.getTriggerWhenClause());
+            if (node.getTriggerLevel() != null) idx.put("triggerLevel", node.getTriggerLevel());
+            if (node.getTriggerBody() != null) idx.put("triggerBody", node.getTriggerBody());
             idx.put("lineStart", node.getLineStart());
             idx.put("lineEnd", node.getLineEnd());
             idx.put("linesOfCode", node.getLinesOfCode());
@@ -1056,6 +1059,10 @@ public class ChunkedFlowWriter {
             String pkg = node.getPackageName() != null ? node.getPackageName() : "";
             String obj = node.getObjectName() != null ? node.getObjectName() : "";
             detail.put("name", pkg.isEmpty() ? obj : pkg + "." + obj);
+            // packageName/objectName are emitted so the estate globals facet can key a package's
+            // declaration list by its own package name (the display `name` is "PKG.SUB").
+            if (!pkg.isEmpty()) detail.put("packageName", pkg);
+            detail.put("objectName", obj);
             detail.put("schema", node.getSchema());
             detail.put("objectType", node.getObjectType());
             detail.put("depth", node.getDepth());
@@ -1067,6 +1074,16 @@ public class ChunkedFlowWriter {
             if (node.getTriggerTable() != null)  detail.put("triggerTable", node.getTriggerTable());
             if (node.getTriggerEvent() != null)  detail.put("triggerEvent", node.getTriggerEvent());
             if (node.getTriggerTiming() != null) detail.put("triggerTiming", node.getTriggerTiming());
+            if (node.getTriggerWhenClause() != null) detail.put("triggerWhenClause", node.getTriggerWhenClause());
+            if (node.getTriggerLevel() != null) detail.put("triggerLevel", node.getTriggerLevel());
+            if (node.getTriggerBody() != null) detail.put("triggerBody", node.getTriggerBody());
+
+            // Package-global DECLARATIONS (PACKAGE_BODY/PACKAGE_SPEC nodes only) — the estate
+            // globals facet's declared variables (name/dataType/defaultValue/constant). Each
+            // VariableInfo already carries exactly those fields.
+            if (node.getPackageVariables() != null && !node.getPackageVariables().isEmpty()) {
+                detail.put("packageGlobalDeclarations", node.getPackageVariables());
+            }
 
             // Parameters
             if (node.getParameters() != null && !node.getParameters().isEmpty()) {
@@ -1709,7 +1726,8 @@ public class ChunkedFlowWriter {
     private record LightNode(String nodeId, String schema, String packageName, String objectName,
                              int depth, String objectType, List<TableOperationInfo> tableOperations,
                              List<CursorInfo> cursors, String triggerTable, String triggerEvent,
-                             String triggerTiming, String fullId, int linesOfCode) {
+                             String triggerTiming, String triggerWhenClause, String triggerLevel,
+                             String triggerBody, String fullId, int linesOfCode) {
         String getNodeId() { return nodeId; }
         String getSchema() { return schema; }
         String getPackageName() { return packageName; }
@@ -1721,6 +1739,9 @@ public class ChunkedFlowWriter {
         String getTriggerTable() { return triggerTable; }
         String getTriggerEvent() { return triggerEvent; }
         String getTriggerTiming() { return triggerTiming; }
+        String getTriggerWhenClause() { return triggerWhenClause; }
+        String getTriggerLevel() { return triggerLevel; }
+        String getTriggerBody() { return triggerBody; }
         /** {@link FlowNode#buildFullId()}'s own result, precomputed once — {@code
          *  writeNodeIdMap} (MID-026's 4th converted consumer) only ever needs the finished string,
          *  never the raw {@code parameters} list {@code buildFullId()} itself reads, so the light
@@ -1736,7 +1757,8 @@ public class ChunkedFlowWriter {
     private static LightNode toLightNode(FlowNode n) {
         return new LightNode(n.getNodeId(), n.getSchema(), n.getPackageName(), n.getObjectName(),
                 n.getDepth(), n.getObjectType(), n.getTableOperations(), n.getCursors(),
-                n.getTriggerTable(), n.getTriggerEvent(), n.getTriggerTiming(), n.buildFullId(),
+                n.getTriggerTable(), n.getTriggerEvent(), n.getTriggerTiming(),
+                n.getTriggerWhenClause(), n.getTriggerLevel(), n.getTriggerBody(), n.buildFullId(),
                 n.getLinesOfCode());
     }
 
@@ -1771,7 +1793,8 @@ public class ChunkedFlowWriter {
     private static LightNode withNodeId(LightNode n, String nodeId) {
         return new LightNode(nodeId, n.schema(), n.packageName(), n.objectName(), n.depth(),
                 n.objectType(), n.tableOperations(), n.cursors(), n.triggerTable(), n.triggerEvent(),
-                n.triggerTiming(), n.fullId(), n.linesOfCode());
+                n.triggerTiming(), n.triggerWhenClause(), n.triggerLevel(), n.triggerBody(),
+                n.fullId(), n.linesOfCode());
     }
 
     /** {@link #safeNodeId(FlowNode)}'s own logic, over a {@link LightNode} instead. */
@@ -1935,6 +1958,13 @@ public class ChunkedFlowWriter {
                     trigInfo.put("schema", node.getSchema());
                     trigInfo.put("event", node.getTriggerEvent());
                     trigInfo.put("timing", node.getTriggerTiming());
+                    // Source-parsed trigger facets — the same keys the estate trigger facet reads
+                    // (whenClause/level/definition), so a source-parsed trigger reports its WHEN
+                    // condition, ROW/STATEMENT level and body without a re-parse at read time.
+                    if (node.getTriggerWhenClause() != null) trigInfo.put("whenClause", node.getTriggerWhenClause());
+                    if (node.getTriggerLevel() != null) trigInfo.put("level", node.getTriggerLevel());
+                    if (node.getTriggerBody() != null) trigInfo.put("definition", node.getTriggerBody());
+                    trigInfo.put("source", "SOURCE");
                     triggers.add(trigInfo);
                     break;
                 }

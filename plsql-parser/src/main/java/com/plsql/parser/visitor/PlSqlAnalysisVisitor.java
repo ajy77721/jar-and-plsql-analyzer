@@ -1358,6 +1358,24 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             }
         }
 
+        // Level: FOR EACH ROW on a simple DML trigger → ROW; a compound trigger fires at
+        // statement level (its own per-timing-point sections carry their own level).
+        if (ctx.simple_dml_trigger() != null) {
+            po.setTriggerLevel(ctx.simple_dml_trigger().for_each_row() != null ? "ROW" : "STATEMENT");
+        } else if (ctx.compound_dml_trigger() != null) {
+            po.setTriggerLevel("STATEMENT");
+        }
+
+        // WHEN (...) condition — the condition text only, never the wrapping WHEN ( ).
+        if (ctx.trigger_when_clause() != null && ctx.trigger_when_clause().condition() != null) {
+            po.setTriggerWhenClause(getOriginalText(ctx.trigger_when_clause().condition(), 4000));
+        }
+
+        // Trigger body source, sliced from the same input stream already parsed — never a re-parse.
+        if (ctx.trigger_body() != null) {
+            po.setTriggerBody(getOriginalText(ctx.trigger_body(), 20000));
+        }
+
         currentPackageName = null;
         currentPackageSubprograms.clear();
         declaredTypeNames.clear();

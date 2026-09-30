@@ -31,6 +31,12 @@ public class ParsedObject {
     private String triggerEvent;
     private String triggerTable;
     private String triggerTiming;
+    // Source-parsed trigger facets: the WHEN (...) condition text, the ROW/STATEMENT level, and the
+    // trigger body's own source. Persisted into api/tables/index.json's triggers[] so the estate
+    // trigger facet can report them (DB-discovered triggers already carry definition/status).
+    private String triggerWhenClause;
+    private String triggerLevel;
+    private String triggerBody;
     private String viewQuery;
     /** True when this is a standalone PIPELINED FUNCTION (table function). */
     private boolean pipelined;
@@ -106,6 +112,12 @@ public class ParsedObject {
     public void setTriggerTable(String t) { this.triggerTable = t; }
     public String getTriggerTiming() { return triggerTiming; }
     public void setTriggerTiming(String t) { this.triggerTiming = t; }
+    public String getTriggerWhenClause() { return triggerWhenClause; }
+    public void setTriggerWhenClause(String t) { this.triggerWhenClause = t; }
+    public String getTriggerLevel() { return triggerLevel; }
+    public void setTriggerLevel(String t) { this.triggerLevel = t; }
+    public String getTriggerBody() { return triggerBody; }
+    public void setTriggerBody(String t) { this.triggerBody = t; }
     public String getViewQuery() { return viewQuery; }
     public void setViewQuery(String v) { this.viewQuery = v; }
     public boolean isPipelined() { return pipelined; }

@@ -36,12 +36,12 @@ import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.textOrNu
  *       path ({@code TriggerDiscoverer}) already carries {@code definition} (the body), {@code
  *       triggerType} (e.g. {@code AFTER STATEMENT}), {@code status} and {@code tableOps} (what the
  *       body touches); the source-parsed path carries the node id, and its {@code api/nodes/*.json}
- *       detail carries the trigger body's own {@code tables} (its table operations).</li>
+ *       detail carries the trigger body's own {@code tables} (its table operations), plus the
+ *       grammar-captured {@code triggerWhenClause}/{@code triggerLevel}/{@code triggerBody}.</li>
  *   <li><b>Package globals</b> — {@code api/nodes/*.json}'s {@code externalPackageVarRefDetails},
- *       one row per {@code PKG.VAR} read/write with the referencing node, line and access type.
- *       This is the only package-global data the crawl persists today; package-global
- *       <em>declarations</em> ({@code name/type/default}) are captured by the Oracle visitor but not
- *       yet written to an artifact, so they are reported as {@code declared:false} (see
+ *       one row per {@code PKG.VAR} read/write with the referencing node, line and access type,
+ *       merged with each package node's {@code packageGlobalDeclarations} (the grammar-captured
+ *       {@code name/dataType/defaultValue/constant} of its package-level variables — see
  *       {@link #getGlobals(String)}).</li>
  * </ul>
  *
@@ -50,9 +50,9 @@ import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.textOrNu
  * <p>Each facet is empty — never wrong — where the concept or the artifact does not exist:
  * MySQL has no materialized views; PostgreSQL triggers have no body (the dependency edge is the
  * handler function); package globals exist only in Oracle PL/SQL, so the other four dialects
- * report none. {@code mvRefreshMode}/{@code mvRefreshMethod}/{@code lastRefresh} and the trigger
- * {@code whenClause} are not persisted by the crawler today and are returned as JSON null rather
- * than guessed.
+ * report none. Where a field was not persisted (e.g. an MV whose refresh metadata predates this
+ * crawl, or a reference-only global with no declaration) it is returned as JSON null /
+ * {@code declared:false} rather than guessed.
  */
 class EstateFacetReader {
 
@@ -200,10 +200,16 @@ class EstateFacetReader {
         for (JsonNode u : t.path("usedBy")) usedBy.add(usedByRow(m, u));
         row.put("usedByCount", usedBy.size());
 
-        // Not persisted by the crawler today — reported honestly as null, never guessed.
-        row.putNull("mvRefreshMode");
-        row.putNull("mvRefreshMethod");
-        row.putNull("lastRefresh");
+        // MV refresh metadata — persisted on the per-view entry by the crawl's Oracle ALL_MVIEWS
+        // enrichment (TableValidationService.bulkQueryMViewRefresh), read straight off the entry.
+        // Absent for plain views and for dialects without a refresh concept: reported null, never
+        // guessed.
+        String mode = textOrNull(t, "mvRefreshMode");
+        if (mode != null) row.put("mvRefreshMode", mode); else row.putNull("mvRefreshMode");
+        String method = textOrNull(t, "mvRefreshMethod");
+        if (method != null) row.put("mvRefreshMethod", method); else row.putNull("mvRefreshMethod");
+        String lastRefresh = textOrNull(t, "lastRefresh");
+        if (lastRefresh != null) row.put("lastRefresh", lastRefresh); else row.putNull("lastRefresh");
         return row;
     }
 
@@ -424,7 +430,15 @@ class EstateFacetReader {
             }
             putIfAbsent(row, "timing", textOrNull(n, "triggerTiming"));
             putIfAbsent(row, "event", textOrNull(n, "triggerEvent"));
-            putIfAbsent(row, "body", bodyFromSource(name, n));
+            putIfAbsent(row, "whenClause", textOrNull(n, "triggerWhenClause"));
+            putIfAbsent(row, "level", textOrNull(n, "triggerLevel"));
+            // The persisted body (source-parsed trigger) wins; the source-line slice is the fallback
+            // for triggers whose body was never persisted (older analyses / DB rows without a body).
+            if (row.path("body").asText("").isBlank()) {
+                String tb = textOrNull(n, "triggerBody");
+                if (tb != null && !tb.isBlank()) row.put("body", tb);
+                else putIfAbsent(row, "body", bodyFromSource(name, n));
+            }
             if (row.path("touches").isEmpty()) setTouches(row, m, n.path("tables"));
         }
 
@@ -464,6 +478,8 @@ class EstateFacetReader {
         putIfAbsent(row, "triggerType", textOrNull(trg, "triggerType"));
         putIfAbsent(row, "status", textOrNull(trg, "status"));
         putIfAbsent(row, "source", textOrNull(trg, "source"));
+        putIfAbsent(row, "whenClause", textOrNull(trg, "whenClause"));
+        putIfAbsent(row, "level", textOrNull(trg, "level"));
         putIfAbsent(row, "body", textOrNull(trg, "definition"));
         putIfAbsent(row, "nodeId", textOrNull(trg, "nodeId"));
         if (row.path("touches").isEmpty() && trg.has("tableOps")) setTouches(row, m, trg.path("tableOps"));
@@ -542,7 +558,12 @@ class EstateFacetReader {
     }
 
     private void finalizeTrigger(ObjectMapper m, ObjectNode row) {
-        String level = levelOf(row.path("triggerType").asText(""), row.path("body").asText(""));
+        // A level persisted by the crawl (source-parsed trigger: the grammar's FOR EACH ROW) is
+        // authoritative; only derive it from triggerType/body when the crawl did not supply one.
+        String level = row.path("level").asText("");
+        if (level.isBlank()) {
+            level = levelOf(row.path("triggerType").asText(""), row.path("body").asText(""));
+        }
         row.put("level", level);
         row.put("touchesCount", row.path("touches").size());
         row.put("bodyAvailable", !row.path("body").asText("").isBlank());
@@ -722,9 +743,10 @@ class EstateFacetReader {
      *
      * <p>Oracle-only by nature: package-level variables exist only in PL/SQL packages, so MySQL,
      * PostgreSQL, SQL Server and DB2 report an empty facet. Declarations ({@code dataType},
-     * {@code defaultValue}) are captured by the Oracle visitor but not yet persisted to an artifact,
-     * so each variable is reported with {@code declared:false} and null type/default rather than a
-     * guess.
+     * {@code defaultValue}, {@code constant}) come from the package node's persisted
+     * {@code packageGlobalDeclarations}; a variable known only through a reference (no declaration
+     * found, e.g. an analysis predating declaration persistence) is reported with
+     * {@code declared:false} and null type/default rather than a guess.
      */
     JsonNode getGlobals(String name) throws IOException {
         ObjectMapper m = r.mapper;
@@ -732,8 +754,29 @@ class EstateFacetReader {
         JsonNode cached = r.synthesizedCache.get(ck);
         if (cached != null) return cached;
 
+        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+
+        // Declaration lists persisted per package (PACKAGE_BODY/PACKAGE_SPEC node details): the
+        // declaring package plus name/dataType/defaultValue/constant — the exact shape each
+        // variable row uses. Keyed package → variable → declaration so a ref can pick up its own
+        // declaration, and a declared-but-unreferenced variable still appears.
+        Map<String, Map<String, JsonNode>> declarations = new LinkedHashMap<>();
+        for (JsonNode node : nodeFiles) {
+            JsonNode decls = node.get("packageGlobalDeclarations");
+            if (decls == null || !decls.isArray() || decls.isEmpty()) continue;
+            String pkg = textOrNull(node, "packageName");
+            if (pkg == null || pkg.isBlank()) pkg = textOrNull(node, "objectName");
+            if (pkg == null || pkg.isBlank()) pkg = textOrNull(node, "name");
+            if (pkg == null || pkg.isBlank()) continue;
+            Map<String, JsonNode> byVar = declarations.computeIfAbsent(norm(pkg), k -> new LinkedHashMap<>());
+            for (JsonNode d : decls) {
+                String vn = textOrNull(d, "name");
+                if (vn != null && !vn.isBlank()) byVar.putIfAbsent(norm(vn), d);
+            }
+        }
+
         Map<String, ObjectNode> byPackage = new LinkedHashMap<>();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
             if (refs == null || !refs.isArray()) continue;
             for (JsonNode ref : refs) {
@@ -741,22 +784,22 @@ class EstateFacetReader {
                 String var = textOrNull(ref, "variableName");
                 if (pkg == null || pkg.isBlank() || var == null || var.isBlank()) continue;
                 String pkey = norm(pkg);
-                ObjectNode row = byPackage.computeIfAbsent(pkey, k -> {
-                    ObjectNode o = m.createObjectNode();
-                    o.put("package", k);
-                    o.putArray("variables");
-                    o.put("usageCount", 0);
-                    o.put("readCount", 0);
-                    o.put("writeCount", 0);
-                    return o;
-                });
-                addVariable(row, norm(var));
+                ObjectNode row = byPackage.computeIfAbsent(pkey, k -> newPackageRow(m, k));
+                addVariable(row, norm(var), declarationFor(declarations, pkey, var));
                 row.put("usageCount", row.get("usageCount").asInt() + 1);
                 String access = textOrNull(ref, "accessType");
                 if ("WRITE".equalsIgnoreCase(access)) row.put("writeCount", row.get("writeCount").asInt() + 1);
                 else if ("READ".equalsIgnoreCase(access)) row.put("readCount", row.get("readCount").asInt() + 1);
             }
         }
+
+        // Declared-but-unreferenced packages/variables still surface (declared:true), appended after
+        // the referenced ones so the common case keeps its existing order.
+        for (Map.Entry<String, Map<String, JsonNode>> e : declarations.entrySet()) {
+            ObjectNode row = byPackage.computeIfAbsent(e.getKey(), k -> newPackageRow(m, k));
+            for (JsonNode d : e.getValue().values()) addVariable(row, norm(textOrNull(d, "name")), d);
+        }
+
         ArrayNode out = m.createArrayNode();
         for (ObjectNode row : byPackage.values()) row.put("variableCount", row.path("variables").size());
         byPackage.values().forEach(out::add);
@@ -764,15 +807,42 @@ class EstateFacetReader {
         return out;
     }
 
-    private static void addVariable(ObjectNode row, String var) {
+    private static ObjectNode newPackageRow(ObjectMapper m, String pkey) {
+        ObjectNode o = m.createObjectNode();
+        o.put("package", pkey);
+        o.putArray("variables");
+        o.put("usageCount", 0);
+        o.put("readCount", 0);
+        o.put("writeCount", 0);
+        return o;
+    }
+
+    private static JsonNode declarationFor(Map<String, Map<String, JsonNode>> declarations,
+                                           String pkey, String var) {
+        Map<String, JsonNode> byVar = declarations.get(pkey);
+        return byVar == null ? null : byVar.get(norm(var));
+    }
+
+    /** Adds a variable row; when a persisted declaration exists it fills declared/type/default/const
+     *  instead of the honest {@code declared:false} fallback used for reference-only variables. */
+    private static void addVariable(ObjectNode row, String var, JsonNode decl) {
         ArrayNode vars = (ArrayNode) row.get("variables");
         for (JsonNode v : vars) if (v.path("name").asText("").equalsIgnoreCase(var)) return;
         ObjectNode v = row.objectNode();
         v.put("name", var);
-        v.putNull("dataType");
-        v.putNull("defaultValue");
-        v.put("constant", false);
-        v.put("declared", false);
+        if (decl != null) {
+            v.put("declared", true);
+            String dt = textOrNull(decl, "dataType");
+            if (dt != null) v.put("dataType", dt); else v.putNull("dataType");
+            String dv = textOrNull(decl, "defaultValue");
+            if (dv != null) v.put("defaultValue", dv); else v.putNull("defaultValue");
+            v.put("constant", decl.path("constant").asBoolean(false));
+        } else {
+            v.putNull("dataType");
+            v.putNull("defaultValue");
+            v.put("constant", false);
+            v.put("declared", false);
+        }
         vars.add(v);
     }
 

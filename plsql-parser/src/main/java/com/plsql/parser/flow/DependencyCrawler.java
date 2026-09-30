@@ -655,6 +655,15 @@ public class DependencyCrawler {
                     if (targetObj.getTriggerEvent() != null) node.setTriggerEvent(targetObj.getTriggerEvent());
                     if (targetObj.getTriggerTable() != null) node.setTriggerTable(targetObj.getTriggerTable());
                     if (targetObj.getTriggerTiming() != null) node.setTriggerTiming(targetObj.getTriggerTiming());
+                    if (targetObj.getTriggerWhenClause() != null) node.setTriggerWhenClause(targetObj.getTriggerWhenClause());
+                    if (targetObj.getTriggerLevel() != null) node.setTriggerLevel(targetObj.getTriggerLevel());
+                    if (targetObj.getTriggerBody() != null) node.setTriggerBody(targetObj.getTriggerBody());
+                    // Package-level variable declarations — the estate globals facet's declaration
+                    // list. Only package bodies/specs have these; a standalone routine's body-level
+                    // variables live in globalVariables and are already surfaced as locals.
+                    if (targetObj.getPackageVariables() != null && !targetObj.getPackageVariables().isEmpty()) {
+                        node.setPackageVariables(targetObj.getPackageVariables());
+                    }
 
                     // When a specific subprogram within a package was requested but could not be
                     // located by name, do NOT merge all other subprograms' data.  Merging the whole
