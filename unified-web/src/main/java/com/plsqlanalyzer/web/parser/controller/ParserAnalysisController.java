@@ -1029,6 +1029,154 @@ public class ParserAnalysisController {
                 AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL);
     }
 
+    /* ═══════════════════ estate facets: views / triggers / globals ═══════════════════
+     *
+     * The three index endpoints are paged facets through the same {@link #facet} helper the seven
+     * node-scan facets use — so an analysis with no views/triggers/globals returns an empty page,
+     * exactly like an analysis with no sequences. The detail / chain / used-by sub-resources are
+     * plain documents served from their per-object sidecar; a name the analysis does not have is a
+     * 404, which is the "no facet" answer for a named sub-resource.
+     */
+
+    /** {@code /views} — every view/MV with its columns, definition and base tables. */
+    @GetMapping("/analyses/{name}/views")
+    public ResponseEntity<JsonNode> getViews(
+            @PathVariable("name") String name,
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestParam(value = "after", required = false) String after,
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "types", required = false) String types,
+            @RequestParam(value = "cf", required = false) List<String> cf,
+            @RequestParam(value = "scope", required = false) String scope,
+            @RequestParam(value = "procId", required = false) String procId,
+            @RequestHeader(value = "Accept", required = false) String accept) {
+        return facet(name, ParserFacetSpecs.VIEWS, null, limit, after, sort, q, types, cf, scope,
+                procId, accept, AnalysisQuery.Dataset.PLSQL_VIEWS);
+    }
+
+    @GetMapping("/analyses/{name}/views/{view}")
+    public ResponseEntity<JsonNode> getViewDetail(
+            @PathVariable("name") String name, @PathVariable("view") String view) {
+        try {
+            return okOrNotFound(service.getViewDetail(name, view));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** The full view→view→…→base-table chain. */
+    @GetMapping("/analyses/{name}/views/{view}/chain")
+    public ResponseEntity<JsonNode> getViewChain(
+            @PathVariable("name") String name, @PathVariable("view") String view) {
+        try {
+            return okOrNotFound(service.getViewChain(name, view));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    @GetMapping("/analyses/{name}/views/{view}/used-by")
+    public ResponseEntity<JsonNode> getViewUsedBy(
+            @PathVariable("name") String name, @PathVariable("view") String view) {
+        try {
+            return okOrNotFound(service.getViewUsedBy(name, view));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** {@code /triggers} — every trigger with its binding, timing, events, level and body. */
+    @GetMapping("/analyses/{name}/triggers")
+    public ResponseEntity<JsonNode> getTriggers(
+            @PathVariable("name") String name,
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestParam(value = "after", required = false) String after,
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "types", required = false) String types,
+            @RequestParam(value = "cf", required = false) List<String> cf,
+            @RequestParam(value = "scope", required = false) String scope,
+            @RequestParam(value = "procId", required = false) String procId,
+            @RequestHeader(value = "Accept", required = false) String accept) {
+        return facet(name, ParserFacetSpecs.TRIGGERS, null, limit, after, sort, q, types, cf, scope,
+                procId, accept, AnalysisQuery.Dataset.PLSQL_TRIGGERS);
+    }
+
+    @GetMapping("/analyses/{name}/triggers/{trigger}")
+    public ResponseEntity<JsonNode> getTriggerDetail(
+            @PathVariable("name") String name, @PathVariable("trigger") String trigger) {
+        try {
+            return okOrNotFound(service.getTriggerDetail(name, trigger));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** The trigger→touched-table→other-triggers chain. */
+    @GetMapping("/analyses/{name}/triggers/{trigger}/chain")
+    public ResponseEntity<JsonNode> getTriggerChain(
+            @PathVariable("name") String name, @PathVariable("trigger") String trigger) {
+        try {
+            return okOrNotFound(service.getTriggerChain(name, trigger));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    @GetMapping("/analyses/{name}/triggers/{trigger}/used-by")
+    public ResponseEntity<JsonNode> getTriggerUsedBy(
+            @PathVariable("name") String name, @PathVariable("trigger") String trigger) {
+        try {
+            return okOrNotFound(service.getTriggerUsedBy(name, trigger));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** {@code /globals} — package global variables, grouped by package. */
+    @GetMapping("/analyses/{name}/globals")
+    public ResponseEntity<JsonNode> getGlobals(
+            @PathVariable("name") String name,
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestParam(value = "after", required = false) String after,
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "types", required = false) String types,
+            @RequestParam(value = "cf", required = false) List<String> cf,
+            @RequestParam(value = "scope", required = false) String scope,
+            @RequestParam(value = "procId", required = false) String procId,
+            @RequestHeader(value = "Accept", required = false) String accept) {
+        return facet(name, ParserFacetSpecs.GLOBALS, null, limit, after, sort, q, types, cf, scope,
+                procId, accept, AnalysisQuery.Dataset.PLSQL_GLOBALS);
+    }
+
+    @GetMapping("/analyses/{name}/globals/{pkg}")
+    public ResponseEntity<JsonNode> getGlobalDetail(
+            @PathVariable("name") String name, @PathVariable("pkg") String pkg) {
+        try {
+            return okOrNotFound(service.getGlobalDetail(name, pkg));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** Where one global variable is read/written across the estate. */
+    @GetMapping("/analyses/{name}/globals/{variable}/used-by")
+    public ResponseEntity<JsonNode> getGlobalUsedBy(
+            @PathVariable("name") String name, @PathVariable("variable") String variable) {
+        try {
+            return okOrNotFound(service.getGlobalUsedBy(name, variable));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** A named sub-resource's document, or 404 when the analysis has no such object. */
+    private static ResponseEntity<JsonNode> okOrNotFound(JsonNode doc) {
+        return doc == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(doc);
+    }
+
     /**
      * UI-045/§256 — the real, cross-facet Global Search results grid, replacing {@code
      * PA.globalSearch}'s old same-tab-only DOM filter (`plsql/js/app.js`).

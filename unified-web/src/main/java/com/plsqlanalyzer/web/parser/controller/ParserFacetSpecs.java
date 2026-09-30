@@ -405,4 +405,87 @@ final class ParserFacetSpecs {
             // above.
             Map.of("2", row -> row.path("name").asText(""),
                    "3", row -> row.path("matchedField").asText("")));
+
+    /* ═══════════════════════ estate facets ═══════════════════════
+     * Views/MVs, triggers and package globals. Same paging contract as the seven above; the row
+     * shapes are the ones {@code EstateFacetReader} emits (see that class's doc).
+     */
+
+    /** Which nodes read a view — {@code usedBy[].nodeId}. */
+    private static List<String> viewProcedureIds(JsonNode row) {
+        List<String> out = new java.util.ArrayList<>();
+        for (JsonNode u : row.path("usedBy")) {
+            String id = u.path("nodeId").asText("");
+            if (!id.isEmpty()) out.add(id.toUpperCase(Locale.ROOT));
+        }
+        return out;
+    }
+
+    /** Views and materialized views. Merged by {@code schema.name}, so that is the identity. */
+    static final FacetSpec VIEWS = new FacetSpec(
+            "views",
+            FacetSort.byName(
+                    FacetSort.text("NAME_ASC", "name", false),
+                    FacetSort.text("NAME_DESC", "name", true),
+                    FacetSort.text("SCHEMA_ASC", "schema", false),
+                    FacetSort.text("SCHEMA_DESC", "schema", true),
+                    FacetSort.number("COLUMNS_ASC", "columnCount", false),
+                    FacetSort.number("COLUMNS_DESC", "columnCount", true),
+                    FacetSort.number("BASETABLES_ASC", "baseTableCount", false),
+                    FacetSort.number("BASETABLES_DESC", "baseTableCount", true),
+                    FacetSort.number("USEDBY_ASC", "usedByCount", false),
+                    FacetSort.number("USEDBY_DESC", "usedByCount", true)),
+            "NAME_ASC",
+            50,
+            row -> row.path("schema").asText("").toUpperCase(Locale.ROOT) + "."
+                    + row.path("name").asText("").toUpperCase(Locale.ROOT),
+            row -> lower(row.path("name").asText("") + " " + row.path("schema").asText("") + " "
+                    + row.path("definition").asText("")),
+            row -> List.of(row.path("objectType").asText("VIEW")),
+            ParserFacetSpecs::viewProcedureIds,
+            Map.of("1", FacetSpec.scalarColumn("schema", "")));
+
+    /** Triggers. Merged by {@code schema.name}, so that is the identity. */
+    static final FacetSpec TRIGGERS = new FacetSpec(
+            "triggers",
+            FacetSort.byName(
+                    FacetSort.text("NAME_ASC", "name", false),
+                    FacetSort.text("NAME_DESC", "name", true),
+                    FacetSort.text("TABLE_ASC", "table", false),
+                    FacetSort.text("TABLE_DESC", "table", true),
+                    FacetSort.text("TIMING_ASC", "timing", false),
+                    FacetSort.text("TIMING_DESC", "timing", true),
+                    FacetSort.text("EVENT_ASC", "event", false),
+                    FacetSort.text("EVENT_DESC", "event", true)),
+            "NAME_ASC",
+            50,
+            row -> row.path("schema").asText("").toUpperCase(Locale.ROOT) + "."
+                    + row.path("name").asText("").toUpperCase(Locale.ROOT),
+            row -> lower(row.path("name").asText("") + " " + row.path("table").asText("") + " "
+                    + row.path("body").asText("")),
+            row -> List.of(row.path("event").asText("")),
+            row -> List.of(),
+            Map.of("1", FacetSpec.scalarColumn("timing", "")));
+
+    /** Package global variables, one row per package. The package name is the identity. */
+    static final FacetSpec GLOBALS = new FacetSpec(
+            "global variables",
+            FacetSort.byName(
+                    FacetSort.text("PACKAGE_ASC", "package", false),
+                    FacetSort.text("PACKAGE_DESC", "package", true),
+                    FacetSort.number("VARIABLES_ASC", "variableCount", false),
+                    FacetSort.number("VARIABLES_DESC", "variableCount", true),
+                    FacetSort.number("USAGES_ASC", "usageCount", false),
+                    FacetSort.number("USAGES_DESC", "usageCount", true)),
+            "PACKAGE_ASC",
+            50,
+            row -> row.path("package").asText("").toUpperCase(Locale.ROOT),
+            row -> {
+                StringBuilder b = new StringBuilder(row.path("package").asText(""));
+                for (JsonNode v : row.path("variables")) b.append(' ').append(v.path("name").asText(""));
+                return lower(b.toString());
+            },
+            row -> List.of(),
+            row -> List.of(),
+            Map.of());
 }

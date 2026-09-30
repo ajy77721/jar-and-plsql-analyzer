@@ -64,7 +64,16 @@ public final class LayoutManifest {
             "views/table-columns.json",
             "views/complexity.json",
             "views/summary-stats.json",
-            "views/call-tree/<nodeId>.json");
+            "views/call-tree/<nodeId>.json",
+            "views/views-index.json",
+            "views/views-used-by.json",
+            "views/view-detail/<NAME>.json",
+            "views/triggers-index.json",
+            "views/triggers-used-by.json",
+            "views/trigger-detail/<NAME>.json",
+            "views/globals-index.json",
+            "views/globals-used-by.json",
+            "views/global-detail/<PKG>.json");
 
     private final String analysisIdentity;
     private final long generatedAt;

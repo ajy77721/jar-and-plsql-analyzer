@@ -203,6 +203,15 @@ public class ArtifactScanRepository implements AnalysisRepository {
                     () -> readerFactory.getReader(name).getSequences(name));
             case PLSQL_DYNAMIC_SQL -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.DYNAMIC_SQL,
                     () -> readerFactory.getReader(name).getDynamicSql(name));
+            // Estate facets — synthesized from the tables index / node details by the static reader
+            // (same binding as PLSQL_TABLES: the Claude reader has nothing to add), each cached as
+            // its own sidecar under views/.
+            case PLSQL_VIEWS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.VIEWS_INDEX,
+                    () -> staticReader.getViews(name));
+            case PLSQL_TRIGGERS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.TRIGGERS_INDEX,
+                    () -> staticReader.getTriggers(name));
+            case PLSQL_GLOBALS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.GLOBALS_INDEX,
+                    () -> staticReader.getGlobals(name));
             case PLSQL_PROCEDURES -> readerFactory.getReader(name).getProcedures(name);
             // Static reader, matching getTables' own binding: the tables index is a crawler output,
             // not a node scan, and the Claude reader has nothing to add to it.

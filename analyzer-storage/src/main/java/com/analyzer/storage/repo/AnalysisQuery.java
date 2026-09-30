@@ -48,6 +48,17 @@ public record AnalysisQuery(Dataset dataset, String analysis, String version, St
         PLSQL_DYNAMIC_SQL(true, false),
 
         /**
+         * Views and materialized views, synthesized from {@code api/tables/index.json} (the enriched
+         * per-view entry carries columns, definition, base tables and used-by). See
+         * {@code EstateFacetReader}.
+         */
+        PLSQL_VIEWS(true, false),
+        /** Triggers, from the tables index {@code triggers[]} plus the {@code TRIGGER} nodes. */
+        PLSQL_TRIGGERS(true, false),
+        /** Package global variables, from each node's {@code externalPackageVarRefDetails}. */
+        PLSQL_GLOBALS(true, false),
+
+        /**
          * The procedure list — {@code api/index.json}'s {@code nodes} array. UI-029: added so
          * {@code /procedures} can take {@code scope}/{@code procId} the same way the other four do.
          */

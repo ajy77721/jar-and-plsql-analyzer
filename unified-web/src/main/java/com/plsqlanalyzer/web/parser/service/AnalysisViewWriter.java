@@ -63,10 +63,11 @@ public class AnalysisViewWriter {
 
     /**
      * How many facets {@link #writeAll} attempts — 4 node-scan + 2 table maps + complexity + stats
-     * + callers map + search facets. The per-table split files and the non-default complexity
+     * + callers map + search facets + 3 estate-facet indexes (views/triggers/globals). The
+     * per-table split files, the per-object estate detail files and the non-default complexity
      * variants are members of their facets, not separate counts.
      */
-    public static final int VIEW_COUNT = 10;
+    public static final int VIEW_COUNT = 13;
 
     /**
      * Computes and writes every parser-side view summary for {@code name}. Never throws — each view
@@ -94,6 +95,16 @@ public class AnalysisViewWriter {
         if (facet(name, AnalysisQuery.Dataset.PLSQL_CURSORS, verbose)) written++;
         if (facet(name, AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL, verbose)) written++;
         if (facet(name, AnalysisQuery.Dataset.PLSQL_JOINS, verbose)) written++;
+
+        // The three estate-facet indexes (views/MVs, triggers, package globals). Beside each index,
+        // the per-object detail files and the whole-analysis used-by map — the same split shape the
+        // table maps use, so a per-object request reads one small file.
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_VIEWS, verbose)) written++;
+        writeViewDetails(name, verbose);
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_TRIGGERS, verbose)) written++;
+        writeTriggerDetails(name, verbose);
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_GLOBALS, verbose)) written++;
+        writeGlobalDetails(name, verbose);
 
         // The two table-scoped facets, grouped in one scan each — the endpoint is per-table, so a
         // map is the only shape that serves every table without re-scanning per table. Beside each
@@ -148,6 +159,82 @@ public class AnalysisViewWriter {
         if (writeCallTrees(name, verbose)) written++;
 
         return written;
+    }
+
+    /**
+     * Writes the per-view detail + chain files and the whole-analysis used-by map beside the views
+     * index. Best-effort per view, like {@link #writeTableFiles}.
+     */
+    private void writeViewDetails(String name, boolean verbose) {
+        try {
+            JsonNode index = staticReader.getViews(name);
+            if (index != null && index.isArray()) {
+                for (JsonNode row : index) {
+                    String v = row.path("name").asText("");
+                    if (v.isEmpty()) continue;
+                    try {
+                        views.writeFacetFile(name, AnalysisViewStore.VIEW_DETAIL_DIR, v,
+                                staticReader.getViewDetail(name, v), verbose);
+                        views.writeFacetFile(name, AnalysisViewStore.VIEW_DETAIL_DIR, v + "__chain",
+                                staticReader.getViewChain(name, v), verbose);
+                    } catch (Exception ex) {
+                        log.debug("view detail precompute {} / {} failed: {}", name, v, ex.getMessage());
+                    }
+                }
+            }
+            views.write(name, AnalysisViewStore.VIEWS_USED_BY,
+                    staticReader.getViewsUsedByMap(name), verbose);
+        } catch (Exception e) {
+            logFacet(name, AnalysisViewStore.VIEWS_INDEX, e, verbose);
+        }
+    }
+
+    /** Per-trigger detail + chain files and the fired-by map. Best-effort. */
+    private void writeTriggerDetails(String name, boolean verbose) {
+        try {
+            JsonNode index = staticReader.getTriggers(name);
+            if (index != null && index.isArray()) {
+                for (JsonNode row : index) {
+                    String t = row.path("name").asText("");
+                    if (t.isEmpty()) continue;
+                    try {
+                        views.writeFacetFile(name, AnalysisViewStore.TRIGGER_DETAIL_DIR, t,
+                                staticReader.getTriggerDetail(name, t), verbose);
+                        views.writeFacetFile(name, AnalysisViewStore.TRIGGER_DETAIL_DIR, t + "__chain",
+                                staticReader.getTriggerChain(name, t), verbose);
+                    } catch (Exception ex) {
+                        log.debug("trigger detail precompute {} / {} failed: {}", name, t, ex.getMessage());
+                    }
+                }
+            }
+            views.write(name, AnalysisViewStore.TRIGGERS_USED_BY,
+                    staticReader.getTriggersUsedByMap(name), verbose);
+        } catch (Exception e) {
+            logFacet(name, AnalysisViewStore.TRIGGERS_INDEX, e, verbose);
+        }
+    }
+
+    /** Per-package detail files and the global used-by map. Best-effort. */
+    private void writeGlobalDetails(String name, boolean verbose) {
+        try {
+            JsonNode index = staticReader.getGlobals(name);
+            if (index != null && index.isArray()) {
+                for (JsonNode row : index) {
+                    String pkg = row.path("package").asText("");
+                    if (pkg.isEmpty()) continue;
+                    try {
+                        views.writeFacetFile(name, AnalysisViewStore.GLOBAL_DETAIL_DIR, pkg,
+                                staticReader.getGlobalDetail(name, pkg), verbose);
+                    } catch (Exception ex) {
+                        log.debug("global detail precompute {} / {} failed: {}", name, pkg, ex.getMessage());
+                    }
+                }
+            }
+            views.write(name, AnalysisViewStore.GLOBALS_USED_BY,
+                    staticReader.getGlobalsUsedByMap(name), verbose);
+        } catch (Exception e) {
+            logFacet(name, AnalysisViewStore.GLOBALS_INDEX, e, verbose);
+        }
     }
 
     /**

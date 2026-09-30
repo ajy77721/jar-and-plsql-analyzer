@@ -117,6 +117,35 @@ public class AnalysisViewStore {
     /** The raw facet arrays {@code /global-search} normalizes and filters; see the controller. */
     public static final String SEARCH = "search.json";
 
+    /* ── estate facets (views / triggers / package globals) ──────────────────────────────────
+     *
+     * Each estate facet has three sidecars: a whole-analysis <b>index</b> array (the listing), a
+     * per-object <b>detail</b> file under its own directory (mirroring the {@code table-joins} /
+     * {@code call-tree} split), and a whole-analysis <b>used-by</b> map. All three live under the
+     * same {@code views/} prefix, so the existing {@link #invalidate(String)} and the
+     * {@code api/index.json} mtime staleness rule cover them with no second rule. They are new
+     * keys, not a shape change to an existing one, so {@link #FORMAT_VERSION} is NOT bumped: an
+     * analysis analysed before this feature simply has an incomplete set and is warmed on access.
+     */
+    /** The {@code /views} index — every view/MV with its columns, definition and base tables. */
+    public static final String VIEWS_INDEX = "views-index.json";
+    /** Per-view {@code view-detail/<NAME>.json} — the index row plus its chain and used-by. */
+    public static final String VIEW_DETAIL_DIR = "view-detail";
+    /** {@code {view -> usedBy[]}} for the view used-by facet. */
+    public static final String VIEWS_USED_BY = "views-used-by.json";
+    /** The {@code /triggers} index. */
+    public static final String TRIGGERS_INDEX = "triggers-index.json";
+    /** Per-trigger {@code trigger-detail/<NAME>.json}. */
+    public static final String TRIGGER_DETAIL_DIR = "trigger-detail";
+    /** {@code {trigger -> firedBy[]}}. */
+    public static final String TRIGGERS_USED_BY = "triggers-used-by.json";
+    /** The {@code /globals} index — package global variables by package. */
+    public static final String GLOBALS_INDEX = "globals-index.json";
+    /** Per-package {@code global-detail/<PKG>.json}. */
+    public static final String GLOBAL_DETAIL_DIR = "global-detail";
+    /** {@code {variable -> usedBy[]}} across packages. */
+    public static final String GLOBALS_USED_BY = "globals-used-by.json";
+
     /**
      * The {@code linear} grid neighbours precomputed at save time beside the default: the only two
      * other algorithms {@code complexity.js} offers, both at the endpoint's default weights,
@@ -143,7 +172,8 @@ public class AnalysisViewStore {
      */
     private static final String[] FACET_VIEWS = {
             SEQUENCES, CURSORS, DYNAMIC_SQL, JOINS_SUMMARY,
-            TABLE_JOINS, TABLE_COLUMNS, COMPLEXITY, SUMMARY_STATS, CALLERS, SEARCH
+            TABLE_JOINS, TABLE_COLUMNS, COMPLEXITY, SUMMARY_STATS, CALLERS, SEARCH,
+            VIEWS_INDEX, TRIGGERS_INDEX, GLOBALS_INDEX
     };
 
     private final ArtifactStore store;
@@ -603,6 +633,40 @@ public class AnalysisViewStore {
     public boolean writeTableFile(String name, String dir, String table, JsonNode rows, boolean logFailure) {
         if (table == null || table.isBlank() || rows == null) return false;
         return write(name, dir + "/" + tableFileName(table), rows, logFailure);
+    }
+
+    /* ─────────────────── estate-facet per-object files ─────────────────── */
+
+    /**
+     * The file name for one estate facet's per-object sidecar (a view, a trigger, a package), e.g.
+     * {@code ERP_V_ORDER_SUMMARY.json}. Upper-cased and folded to the id alphabet because the key is
+     * untrusted REST input that {@link ArtifactKey} would otherwise reject.
+     */
+    public static String facetFileName(String key) {
+        if (key == null) return "";
+        return key.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Za-z0-9._$-]", "_") + ".json";
+    }
+
+    /**
+     * One estate object's detail out of its own {@code views/<dir>/<KEY>.json} sidecar, or
+     * {@code null} when absent/stale. {@code dir} is one of {@link #VIEW_DETAIL_DIR},
+     * {@link #TRIGGER_DETAIL_DIR}, {@link #GLOBAL_DETAIL_DIR}.
+     */
+    public JsonNode readFacetFile(String name, String dir, String key) {
+        if (key == null || key.isBlank()) return null;
+        return read(name, dir + "/" + facetFileName(key));
+    }
+
+    /** Writes one estate object's per-object sidecar. Best-effort — never throws. */
+    public boolean writeFacetFile(String name, String dir, String key, JsonNode doc, boolean logFailure) {
+        if (key == null || key.isBlank() || doc == null) return false;
+        return write(name, dir + "/" + facetFileName(key), doc, logFailure);
+    }
+
+    /** A whole-analysis estate-facet map sidecar (used-by maps) read by its view name. */
+    public JsonNode readFacetMap(String name, String view) {
+        JsonNode doc = read(name, view);
+        return (doc != null && doc.isObject()) ? doc : null;
     }
 
     /* ────────────────────── complexity variants ────────────────────── */

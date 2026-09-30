@@ -48,6 +48,8 @@ public class StaticAnalysisReader implements AnalysisDataReader {
     private final CoreFileReader coreFile;
     private final TableDetailFacetReader tableDetailFacet;
     private final TableColumnDetailReader tableColumnDetail;
+    /** Estate facets — views/MVs, triggers, package globals. See {@link EstateFacetReader}. */
+    private final EstateFacetReader estateFacet;
 
     /**
      * No data-dir parameter: every location this reader touches is an {@link ArtifactKey} built by
@@ -73,6 +75,73 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         this.coreFile = new CoreFileReader(this);
         this.tableDetailFacet = new TableDetailFacetReader(this);
         this.tableColumnDetail = new TableColumnDetailReader(this);
+        this.estateFacet = new EstateFacetReader(this);
+    }
+
+    /* ── estate facets: views/MVs, triggers, package globals ── */
+
+    /** Every view / materialized view — see {@link EstateFacetReader#getViews(String)}. */
+    public JsonNode getViews(String name) throws IOException {
+        return estateFacet.getViews(name);
+    }
+
+    /** One view's full detail (row + chain + used-by), or null when the analysis has no such view. */
+    public JsonNode getViewDetail(String name, String view) throws IOException {
+        return estateFacet.getViewDetail(name, view);
+    }
+
+    /** The full view-on-view→base-table chain for one view. */
+    public JsonNode getViewChain(String name, String view) throws IOException {
+        return estateFacet.viewChain(name, view);
+    }
+
+    /** Which nodes read one view. */
+    public JsonNode getViewUsedBy(String name, String view) throws IOException {
+        return estateFacet.getViewUsedBy(name, view);
+    }
+
+    /** Every trigger — see {@link EstateFacetReader#getTriggers(String)}. */
+    public JsonNode getTriggers(String name) throws IOException {
+        return estateFacet.getTriggers(name);
+    }
+
+    public JsonNode getTriggerDetail(String name, String trigger) throws IOException {
+        return estateFacet.getTriggerDetail(name, trigger);
+    }
+
+    /** The trigger→touched-table→other-triggers chain for one trigger. */
+    public JsonNode getTriggerChain(String name, String trigger) throws IOException {
+        return estateFacet.triggerChain(name, trigger);
+    }
+
+    public JsonNode getTriggerUsedBy(String name, String trigger) throws IOException {
+        return estateFacet.getTriggerUsedBy(name, trigger);
+    }
+
+    /** Package global variables with their estate-wide usage — see {@link EstateFacetReader#getGlobals(String)}. */
+    public JsonNode getGlobals(String name) throws IOException {
+        return estateFacet.getGlobals(name);
+    }
+
+    public JsonNode getGlobalDetail(String name, String pkg) throws IOException {
+        return estateFacet.getGlobalDetail(name, pkg);
+    }
+
+    public JsonNode getGlobalUsedBy(String name, String variable) throws IOException {
+        return estateFacet.getGlobalUsedBy(name, variable);
+    }
+
+    /** {@code {VIEW -> usedBy[]}} whole-analysis map — the {@code views/views-used-by.json} sidecar. */
+    public JsonNode getViewsUsedByMap(String name) throws IOException {
+        return estateFacet.getViewsUsedByMap(name);
+    }
+
+    public JsonNode getTriggersUsedByMap(String name) throws IOException {
+        return estateFacet.getTriggersUsedByMap(name);
+    }
+
+    public JsonNode getGlobalsUsedByMap(String name) throws IOException {
+        return estateFacet.getGlobalsUsedByMap(name);
     }
 
     /** Q59 — joins touching one table, in either direction. See {@link TableDetailFacetReader}. */
@@ -223,6 +292,11 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         synthesizedCache.remove(cacheKey(analysisName, "sequences"));
         synthesizedCache.remove(cacheKey(analysisName, "tables"));
         synthesizedCache.remove(cacheKey(analysisName, "dynamicSql"));
+        // Estate facets: the synthesized index and the memoized tables-index read they derive from.
+        synthesizedCache.remove(cacheKey(analysisName, "views"));
+        synthesizedCache.remove(cacheKey(analysisName, "triggers"));
+        synthesizedCache.remove(cacheKey(analysisName, "globals"));
+        synthesizedCache.remove(cacheKey(analysisName, "estate-tables-raw"));
         // The table-scoped scans are keyed per table, so there is no fixed list to remove. Left
         // behind they would serve rows from the superseded run after a re-analysis — the modal
         // would show joins for procedures that no longer exist, with nothing to indicate why.

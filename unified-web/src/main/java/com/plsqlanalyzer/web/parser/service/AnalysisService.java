@@ -374,6 +374,90 @@ public class AnalysisService {
         return computed;
     }
 
+    /* ═══════════════ estate facets: views/MVs, triggers, globals ═══════════════
+     *
+     * The three whole-analysis index documents ({@code /views}, {@code /triggers}, {@code /globals})
+     * are served through {@link com.analyzer.storage.AnalysisRepository#document} with an
+     * {@code AnalysisQuery.Dataset}, exactly like sequences/cursors — so they get the sidecar,
+     * lazy backfill and staleness contract for free. The per-object detail/chain and the whole-
+     * analysis used-by maps below use the same contract through the per-object / per-map sidecar
+     * helpers, mirroring {@link #getCallTree}/{@link #getCallers}.
+     */
+
+    /** Upper-cases the last dotted segment — the artifact key form. */
+    private static String facetKey(String raw) {
+        if (raw == null) return "";
+        String t = raw.trim();
+        int dot = t.lastIndexOf('.');
+        if (dot >= 0) t = t.substring(dot + 1);
+        return t.toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /** Per-object sidecar: read-through, compute on miss, backfill. Never null-checks the result. */
+    private JsonNode facetFile(String name, String dir, String key,
+                               AnalysisViewStore.IoSupplier<JsonNode> compute) throws IOException {
+        JsonNode cached = viewStore == null ? null : viewStore.readFacetFile(name, dir, key);
+        if (cached != null) return cached;
+        JsonNode computed = compute.get();
+        if (computed != null && viewStore != null) {
+            viewStore.writeFacetFile(name, dir, key, computed, true);
+        }
+        return computed;
+    }
+
+    /** A whole-analysis used-by map sidecar, returning one entry (or null → caller falls back). */
+    private JsonNode facetMapEntry(String name, String mapView, String key,
+                                   AnalysisViewStore.IoSupplier<JsonNode> wholeMap) throws IOException {
+        if (viewStore == null) return null;
+        JsonNode map = viewStore.readOrCompute(name, mapView, wholeMap);
+        if (map == null || !map.isObject()) return null;
+        JsonNode entry = map.get(facetKey(key));
+        return (entry == null || entry.isNull()) ? null : entry;
+    }
+
+    public JsonNode getViewDetail(String name, String view) throws IOException {
+        return facetFile(name, AnalysisViewStore.VIEW_DETAIL_DIR, view,
+                () -> staticReader.getViewDetail(name, view));
+    }
+
+    public JsonNode getViewChain(String name, String view) throws IOException {
+        return facetFile(name, AnalysisViewStore.VIEW_DETAIL_DIR, view + "__chain",
+                () -> staticReader.getViewChain(name, view));
+    }
+
+    public JsonNode getViewUsedBy(String name, String view) throws IOException {
+        JsonNode entry = facetMapEntry(name, AnalysisViewStore.VIEWS_USED_BY, view,
+                () -> staticReader.getViewsUsedByMap(name));
+        return entry != null ? entry : staticReader.getViewUsedBy(name, view);
+    }
+
+    public JsonNode getTriggerDetail(String name, String trigger) throws IOException {
+        return facetFile(name, AnalysisViewStore.TRIGGER_DETAIL_DIR, trigger,
+                () -> staticReader.getTriggerDetail(name, trigger));
+    }
+
+    public JsonNode getTriggerChain(String name, String trigger) throws IOException {
+        return facetFile(name, AnalysisViewStore.TRIGGER_DETAIL_DIR, trigger + "__chain",
+                () -> staticReader.getTriggerChain(name, trigger));
+    }
+
+    public JsonNode getTriggerUsedBy(String name, String trigger) throws IOException {
+        JsonNode entry = facetMapEntry(name, AnalysisViewStore.TRIGGERS_USED_BY, trigger,
+                () -> staticReader.getTriggersUsedByMap(name));
+        return entry != null ? entry : staticReader.getTriggerUsedBy(name, trigger);
+    }
+
+    public JsonNode getGlobalDetail(String name, String pkg) throws IOException {
+        return facetFile(name, AnalysisViewStore.GLOBAL_DETAIL_DIR, pkg,
+                () -> staticReader.getGlobalDetail(name, pkg));
+    }
+
+    public JsonNode getGlobalUsedBy(String name, String variable) throws IOException {
+        JsonNode entry = facetMapEntry(name, AnalysisViewStore.GLOBALS_USED_BY, variable,
+                () -> staticReader.getGlobalsUsedByMap(name));
+        return entry != null ? entry : staticReader.getGlobalUsedBy(name, variable);
+    }
+
     /** Clear the in-memory synthesized cache: one analysis if {@code name} given, else all. */
     public int clearCache(String name) {
         if (name != null && !name.isBlank()) {
