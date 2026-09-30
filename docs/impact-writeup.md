@@ -2,25 +2,26 @@
 
 ## What it is, and why it matters
 
-AMP Analyzer is a static analyzer for legacy modernization: it parses PL/SQL across **five dialects**
-(Oracle, Microsoft SQL Server, MySQL, IBM Db2, PostgreSQL stored procedures) and Java JAR/WAR archives,
-then surfaces the evidence analysts need to convert legacy systems — sequences, cursors, dynamic SQL,
-joins, table dependencies, complexity scoring, call trees, and endpoint inventories. It is deployed
-internally at MongoDB on **Kanopy** (staging + prod), built and shipped by **Drone CI** to **GHCR**,
-with analysis artifacts stored in **AWS S3** and **per-user AWS SSO identity** carried through every
-request and background job. The "why" behind this work: results were already correct, but the read paths
-were too slow to use interactively and, for the largest inputs, silently incomplete — an analyst doing a
-modernization assessment waited seconds to minutes per click and could not trust large-jar source views.
-The hardening described below turned the analyzer into a responsive, durable, multi-user platform.
+AMP Analyzer is a static analyzer for legacy ERP modernization whose **primary target is Oracle stored
+procedures** — the large ERP packages an Oracle ERP conversion has to take apart, e.g. `USP_RUN_CYCLE` and
+`ERP$USP_PROCESSSALESORDER`. For these packages it surfaces the evidence analysts need — sequences,
+cursors, dynamic SQL, joins, table dependencies, complexity scoring, and the call chains inside Oracle
+packages — as the evidence base for the migration. It is deployed internally at MongoDB on **Kanopy**
+(staging + prod), built and shipped by **Drone CI** to **GHCR**, with analysis artifacts stored in
+**AWS S3** and **per-user AWS SSO identity** carried through every request and background job. The "why"
+behind this work: results were already correct, but the read paths were too slow to use interactively and,
+for the largest inputs, silently incomplete — an analyst doing a modernization assessment waited seconds
+to minutes per click and could not trust large-artifact source views. The hardening described below turned
+the analyzer into a responsive, durable, multi-user platform.
 
 ## Before → After
 
 | Capability | Before | After | Work saved (assumptions inline) |
 |---|---|---|---|
-| Analysis facets (`/sequences`, `/cursors`, `/dynamic-sql`, `/joins`) | 71.5s per request | Precomputed sidecars: **0.6s** first access, **2ms** warm; p50 across all **769** endpoint combinations = **5ms** (405 successful, zero 5xx) | At **50 facet lookups/day**: 50 × 71.5s ≈ **1 hour/day** of analyst wait eliminated (after: 50 × 2ms = 0.1s/day) |
-| Global search | **35–41s** per query, scanning ~**116** files | **7–19ms** | At **20 searches/day** and 38s midpoint: ≈12.7 min/day → ~0.2s/day, i.e. **~12–13 min/day saved** |
-| Call-tree callers | Full call-graph re-parse **every request** | **4.6ms** | Removes a re-parse from every callers lookup; effectively instant at interactive click rates |
-| Large-jar handling | Per-class decompile of the **105MB / 11,264-class** jar failed entirely (source views silently missing) | Decompiles with **one** local read per analysis; **200MB** uploads persist to S3 (**7-part multipart**) and stay visible | Turns an unusable analysis into source-accurate results (no before/after time ratio — it previously did not complete) |
+| Oracle analysis facets (`/sequences`, `/cursors`, `/dynamic-sql`, `/joins`) | 71.5s per request | Precomputed sidecars: **0.6s** first access, **2ms** warm; p50 across all **769** endpoint combinations = **5ms** (405 successful, zero 5xx) | At **50 facet lookups/day**: 50 × 71.5s ≈ **1 hour/day** of analyst wait eliminated (after: 50 × 2ms = 0.1s/day) |
+| Global search (Oracle package estate) | **35–41s** per query, scanning ~**116** files | **7–19ms** | At **20 searches/day** and 38s midpoint: ≈12.7 min/day → ~0.2s/day, i.e. **~12–13 min/day saved** |
+| Call-tree callers (Oracle package call chains) | Full call-graph re-parse **every request** | **4.6ms** | Removes a re-parse from every callers lookup; effectively instant at interactive click rates |
+| Large-artifact handling | Per-class decompile of the **105MB / 11,264-class** artifact failed entirely (source views silently missing) | Decompiles with **one** local read per analysis; **200MB** uploads persist to S3 (**7-part multipart**) and stay visible | Turns an unusable analysis into source-accurate results (no before/after time ratio — it previously did not complete) |
 | Data durability | Critical bug silently lost **every** background S3 upload (artifacts gone on pod restart) | Fixed with per-entry credential carry; **0 failed uploads** verified | Prevents total loss of completed analyses |
 | Reliability | — | **3,452**-test suite green; **40+** new contract tests; a **769**-combination automated sweep with zero 5xx | Steady-state latency regression caught before users see it |
 | Multi-user | Identity and connection state could be dropped across threads/redeploys | Per-user AWS SSO identity travels with every background task; concurrent users verified isolated (dedicated tests); page-lock for unauthenticated users | Safe concurrent use across accounts |
@@ -32,15 +33,16 @@ from real sessions. Numbers elsewhere are exactly as measured on the project.
 
 ## Customer experience
 
-For an analyst running a modernization assessment, the difference is the shift from "wait and wonder" to
-"instant and complete." Facet views that used to stall for more than a minute now render from precomputed
-sidecars in milliseconds, so exploring sequences, cursors, dynamic SQL, and joins across a stored-procedure
+For an analyst running an Oracle ERP modernization assessment, the difference is the shift from "wait and
+wonder" to "instant and complete." Facet views over a large Oracle package — like `USP_RUN_CYCLE` or
+`ERP$USP_PROCESSSALESORDER` — that used to stall for more than a minute now render from precomputed
+sidecars in milliseconds, so exploring sequences, cursors, dynamic SQL, and joins across the package
 estate feels like flipping through a document rather than queuing jobs. Global search across an analysis
 returns in milliseconds instead of half a minute, which makes the analyzer viable as a primary evidence
 tool during a conversion workshop. Call-tree "who calls this?" questions answer in ~4.6ms. And the largest
-inputs — 105MB jars with 11,264 classes, 200MB uploads — are no longer a silent dead end: source views
-actually appear, and uploads survive. The net effect is that assessments that once required defensive
-batching of queries can proceed at conversational speed.
+inputs — 105MB artifacts with 11,264 classes, 200MB uploads — are no longer a silent dead end: source
+views actually appear, and uploads survive. The net effect is that assessments that once required
+defensive batching of queries can proceed at conversational speed.
 
 ## Reliability and platform
 
@@ -68,9 +70,9 @@ bottleneck, solves it inside their own work, and the fix compounds into an organ
 capability.** No company-specific numbers are claimed here; the measurable results belong to AMP itself.
 
 AMP is exactly this pattern. The analyzer was built by the engineer who hit the bottleneck every day —
-waiting 71.5s for a single facet view, 35–41s per search, watching a 105MB / 11,264-class jar fail to
+waiting 71.5s for a single facet view, 35–41s per search, watching a 105MB / 11,264-class artifact fail to
 decompile. Solving that personal pain, piece by piece, produced precomputed sidecars that serve facets in
-2ms and search in 7–19ms, made 105MB / 11,264-class jars analyze end-to-end, and — after a
+2ms and search in 7–19ms, made 105MB / 11,264-class artifacts analyze end-to-end, and — after a
 769-combination sweep with zero 5xx — turned a local workaround into a deployed internal platform. The
 same dynamic shows up in the numbers: **~1 hour/day of analyst waiting eliminated** per analyst, from one
 engineer's daily annoyance to a shared capability.
@@ -80,11 +82,12 @@ engineer's daily annoyance to a shared capability.
 AMP is not a demo handed over to someone else; our own team uses it every day, and we are building
 **batch-optimize** and **batch-validation** workflows on top of it.
 
-- **Piece-to-piece (proc-to-proc) validation.** When modernizing a large stored procedure, we validate the
-  conversion **piece by piece**. The tool's call-tree, callers, and cross-reference output let an analyst
-  confirm that each converted piece behaves like its original — same call chain, same data touched —
-  instead of testing randomly and hoping.
-- **Why confidence scales with size.** The bigger the procedure and the longer the call chain, the more
+- **Piece-to-piece (proc-to-proc) validation, Oracle first.** When modernizing a large Oracle ERP package
+  such as `USP_RUN_CYCLE` or `ERP$USP_PROCESSSALESORDER`, we validate the conversion **piece by piece** —
+  walking its call tree one procedure at a time. The tool's call-tree, callers, and cross-reference output
+  let an analyst confirm that each converted piece behaves like its original — same call chain, same data
+  touched — instead of testing randomly and hoping.
+- **Why confidence scales with size.** The bigger the package and the longer the call chain, the more
   that human testing alone misses. AMP makes every branch of the chain visible and checkable, so confidence
   comes from evidence, not hope.
 - **Batch-optimize / batch-validation (in preparation).** The same analysis outputs let us run these
@@ -93,3 +96,9 @@ AMP is not a demo handed over to someone else; our own team uses it every day, a
   batch-scale validation feasible at all.
 - **The metrics are the enabler.** Removing **~1 hour/day** of waiting per analyst and returning search in
   milliseconds is precisely what makes those batch workflows practical.
+
+## Scope
+
+Oracle stored procedures are the primary target. The same engine also reads Microsoft SQL Server, MySQL,
+IBM Db2, and PostgreSQL procedures, plus Java JAR/WAR archives — additional coverage on the same
+analysis model, not the headline.
