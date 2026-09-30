@@ -165,6 +165,21 @@ public class JarDataPaths {
     /** {@code jar/<id>/views/collections-count.json} — the {@code /collections} aggregate. */
     public ArtifactKey collectionsViewKey(String jarName) { return viewsDirKey(jarName).resolve("collections-count.json"); }
     public ArtifactKey storedJarKey(String jarName)      { return jarRootKey(jarName).resolve("stored.jar"); }
+
+    /**
+     * {@code jar/<id>/db-calls/} — the JAR-to-DB call facet. {@code index.json} is the full list
+     * of detected calls; the per-JAR aggregate is the {@code views/db-calls.json} sidecar (see
+     * {@link #dbCallsViewKey}).
+     *
+     * <p>Its presence is what distinguishes "analysed, no DB calls found" (an empty array) from
+     * "analysed before this facet existed" (the key is absent). Detection runs at parse time, so an
+     * old analysis cannot be backfilled lazily — it must be re-analysed.
+     */
+    public ArtifactKey dbCallsDirKey(String jarName)     { return jarRootKey(jarName).resolve("db-calls"); }
+    /** {@code jar/<id>/db-calls/index.json} — every detected DB call, as an array. */
+    public ArtifactKey dbCallsIndexKey(String jarName)   { return dbCallsDirKey(jarName).resolve("index.json"); }
+    /** {@code jar/<id>/views/db-calls.json} — the precomputed {@code /db-calls/summary} payload. */
+    public ArtifactKey dbCallsViewKey(String jarName)    { return viewsDirKey(jarName).resolve("db-calls.json"); }
     public ArtifactKey domainConfigKey(String jarName)   { return jarRootKey(jarName).resolve("domain-config.json"); }
     public ArtifactKey connectionsKey(String jarName)    { return jarRootKey(jarName).resolve("connections.json"); }
     public ArtifactKey bundledJarsKey(String jarName)    { return jarRootKey(jarName).resolve("bundled-jars.json"); }

@@ -6,6 +6,7 @@ import com.plsqlanalyzer.web.page.FacetSort;
 import com.plsqlanalyzer.web.page.FacetSpec;
 
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -229,6 +230,57 @@ public final class JarFacetSpecs {
             }
         }
         return lower(sb.toString());
+    }
+
+    /* ── Database calls — the JAR -> DB procedure/function facet ─────────────────────────── */
+
+    /**
+     * The DB-call list. Default order is {@code PACKAGE} — schema, then procedure, then the calling
+     * class — which groups a package's procedures together the way a reader scans them, and puts
+     * unqualified calls (schema absent) first.
+     *
+     * <p>Row identity is the call site's natural key (kind + object + class + method + raw text),
+     * never the array index: a re-analysis renumbers the array, so an ordinal would move under a
+     * paging reader.
+     */
+    static final FacetSpec DB_CALLS = new FacetSpec(
+            "database calls",
+            FacetSort.byName(
+                    FacetSort.derived("PACKAGE", JarFacetSpecs::dbCallPackageKey, false),
+                    FacetSort.text("PROCEDURE_ASC", "dbObject", false),
+                    FacetSort.text("PROCEDURE_DESC", "dbObject", true),
+                    FacetSort.text("CLASS_ASC", "className", false),
+                    FacetSort.text("CLASS_DESC", "className", true),
+                    FacetSort.text("KIND_ASC", "kind", false),
+                    FacetSort.number("PARAMS_DESC", "paramCount", true)),
+            "PACKAGE",
+            100,
+            JarFacetSpecs::dbCallId,
+            JarFacetSpecs::dbCallSearchText,
+            row -> List.of(lower(row.path("kind").asText(""))),
+            null,
+            Map.of("0", FacetSpec.scalarColumn("kind", "")));
+
+    /** Schema, then procedure, then class — the grouping the table shows by default. */
+    private static String dbCallPackageKey(JsonNode row) {
+        return (row.path("schema").asText("") + ' '
+                + row.path("dbObject").asText("") + ' '
+                + row.path("className").asText("") + ' '
+                + row.path("methodName").asText("")).toUpperCase(Locale.ROOT);
+    }
+
+    private static String dbCallId(JsonNode row) {
+        return row.path("kind").asText("") + "::" + row.path("dbObject").asText("") + "::"
+                + row.path("className").asText("") + "::" + row.path("methodName").asText("") + "::"
+                + row.path("rawCall").asText("");
+    }
+
+    private static String dbCallSearchText(JsonNode row) {
+        return lower(row.path("dbObject").asText("") + ' '
+                + row.path("kind").asText("") + ' '
+                + row.path("className").asText("") + ' '
+                + row.path("methodName").asText("") + ' '
+                + row.path("rawCall").asText(""));
     }
 
     /* ── Global Search — cross-facet normalized rows ─────────────────────────────────────── */

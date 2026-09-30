@@ -2,6 +2,7 @@ package com.jaranalyzer.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.analyzer.queue.AnalysisQueueService;
 import com.analyzer.queue.QueueJob;
 import com.jaranalyzer.model.CorrectionResult;
@@ -2243,5 +2244,83 @@ public class AnalyzerController {
     @GetMapping("/{id}/jar-dep-map")
     public Map<String, java.util.Set<String>> getJarDepMap(@PathVariable String id) {
         return persistenceService.loadJarDepsMap(id);
+    }
+
+    /* ── Database calls (JAR -> DB procedure/function) ────────────────────────────────────── */
+
+    /**
+     * Marks whether the analysis recorded a DB-call facet at all. {@code false} means the JAR was
+     * analysed before this facet existed; the body is then the standard empty/unavailable shape and
+     * the caller must re-analyse to populate it (detection runs at parse time — there is nothing to
+     * backfill lazily).
+     */
+    public static final String DB_CALLS_AVAILABLE_HEADER = "X-Analyzer-Db-Calls-Available";
+
+    /**
+     * The JAR's detected database calls.
+     *
+     * <p>Two responses from one URL, decided by the request alone (PLAN-08 §3.5): with no paging
+     * parameter the whole array is returned; with one, a page envelope. Either way the
+     * {@link #DB_CALLS_AVAILABLE_HEADER} says whether the facet exists at all.
+     */
+    @GetMapping("/{id}/db-calls")
+    public ResponseEntity<JsonNode> getDbCalls(
+            @PathVariable String id,
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestParam(value = "after", required = false) String after,
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "cf", required = false) java.util.List<String> cf,
+            @RequestHeader(value = "Accept", required = false) String accept) {
+        var params = new com.plsqlanalyzer.web.page.FacetPageResponder.Params(
+                limit, after, sort, q, null, cf, accept);
+        JsonNode document = persistenceService.loadDbCalls(id);
+        if (document == null) {
+            JsonNode body = params.wantsEnvelope()
+                    ? unavailableDbCallsEnvelope()
+                    : objectMapper.createArrayNode();
+            return ResponseEntity.ok()
+                    .header(DB_CALLS_AVAILABLE_HEADER, "false")
+                    .body(body);
+        }
+        try {
+            ResponseEntity<JsonNode> resp =
+                    facets.respond(document, null, JarFacetSpecs.DB_CALLS, params, null);
+            return ResponseEntity.status(resp.getStatusCode())
+                    .header(DB_CALLS_AVAILABLE_HEADER, "true")
+                    .body(resp.getBody());
+        } catch (IllegalArgumentException | Cursor.InvalidCursorException e) {
+            return com.plsqlanalyzer.web.page.FacetPageResponder.badRequest(objectMapper, e.getMessage());
+        }
+    }
+
+    /** The empty/unavailable envelope: a page-shaped body with no rows and a stated reason. */
+    private JsonNode unavailableDbCallsEnvelope() {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.putArray("items");
+        ObjectNode page = out.putObject("page");
+        page.putNull("nextCursor");
+        page.put("hasMore", false);
+        page.put("total", 0);
+        page.put("totalIsExact", true);
+        page.put("limit", JarFacetSpecs.DB_CALLS.defaultLimit());
+        page.put("sort", JarFacetSpecs.DB_CALLS.defaultSort());
+        out.put("available", false);
+        out.put("reason", "DB call detection runs at analysis time; re-analyze this JAR to populate it.");
+        return out;
+    }
+
+    /**
+     * The DB-call aggregate — counts by kind, by schema/package and by procedure. Served from the
+     * precomputed {@code views/db-calls.json} sidecar when present, recomputed from the index
+     * otherwise, and the unavailable shape for a JAR analysed before the facet existed.
+     */
+    @GetMapping("/{id}/db-calls/summary")
+    public ResponseEntity<JsonNode> getDbCallsSummary(@PathVariable String id) {
+        JsonNode summary = persistenceService.loadDbCallsSummary(id);
+        if (summary == null) {
+            return ResponseEntity.ok(objectMapper.valueToTree(DbCallSummary.unavailable()));
+        }
+        return ResponseEntity.ok(summary);
     }
 }

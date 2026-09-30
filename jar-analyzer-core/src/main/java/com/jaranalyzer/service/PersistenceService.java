@@ -1615,6 +1615,86 @@ public class PersistenceService {
         }
     }
 
+    /* ---- DB calls facet (JAR -> database procedure/function calls) ---- */
+
+    /**
+     * Writes the DB-call facet for a JAR: {@code db-calls/index.json} (the full list) and the
+     * {@code views/db-calls.json} sidecar (the precomputed summary).
+     *
+     * <p>Always writes, even when {@code refs} is empty. The file's <b>presence</b> is the signal
+     * that this analysis ran the detector and found nothing, which is a different answer from an
+     * analysis written before the facet existed (no file at all) — see {@link #hasDbCalls}.
+     *
+     * <p>A failure here is logged and swallowed, exactly like the other optional per-JAR artifacts
+     * ({@code bundled-jars.json}, {@code jar-dep-map.json}): a missing facet must never fail an
+     * otherwise-complete analysis.
+     */
+    public void storeDbCalls(String jarName, List<com.jaranalyzer.model.DbCallRef> refs) {
+        List<com.jaranalyzer.model.DbCallRef> list = refs == null ? List.of() : refs;
+        try {
+            paths.ensureJarRoot(jarName);
+            try (OutputStream out = openWrite(paths.dbCallsIndexKey(jarName))) {
+                objectMapper.writeValue(out, list);
+            }
+            Map<String, Object> summary = DbCallSummary.build(list);
+            try (OutputStream out = openWrite(paths.dbCallsViewKey(jarName))) {
+                objectMapper.writeValue(out, summary);
+            }
+            log.info("Stored db-calls for {} ({} call(s))", jarName, list.size());
+        } catch (IOException e) {
+            log.warn("Failed to store db-calls for {}: {}", jarName, e.getMessage());
+        }
+    }
+
+    /**
+     * The full DB-call list as an array, or {@code null} when this analysis predates the facet.
+     *
+     * <p>{@code null} and an empty array are different answers on purpose: {@code null} means
+     * "not analysed for DB calls — re-analyse", an empty array means "analysed, none found".
+     */
+    public com.fasterxml.jackson.databind.JsonNode loadDbCalls(String jarName) {
+        var key = paths.dbCallsIndexKey(jarName);
+        if (!store.exists(key)) return null;
+        try (InputStream in = openRead(key)) {
+            return objectMapper.readTree(in);
+        } catch (Exception e) {
+            log.warn("Failed to load db-calls for {}: {}", jarName, e.getMessage());
+            return null;
+        }
+    }
+
+    /** True when the analysis recorded a DB-call facet (even an empty one). */
+    public boolean hasDbCalls(String jarName) {
+        return store.exists(paths.dbCallsIndexKey(jarName));
+    }
+
+    /**
+     * The summary payload for {@code /db-calls/summary}: the precomputed sidecar when present, else
+     * recomputed from the index so a correction that cleared {@code views/} does not lose it.
+     *
+     * @return the summary object, or {@code null} when this analysis predates the facet
+     */
+    public com.fasterxml.jackson.databind.JsonNode loadDbCallsSummary(String jarName) {
+        var viewKey = paths.dbCallsViewKey(jarName);
+        if (store.exists(viewKey)) {
+            try (InputStream in = openRead(viewKey)) {
+                return objectMapper.readTree(in);
+            } catch (Exception e) {
+                log.debug("db-calls view unreadable for {}: {}", jarName, e.getMessage());
+            }
+        }
+        var index = loadDbCalls(jarName);
+        if (index == null) return null;
+        try {
+            List<com.jaranalyzer.model.DbCallRef> refs = objectMapper.convertValue(index,
+                    new TypeReference<List<com.jaranalyzer.model.DbCallRef>>() {});
+            return objectMapper.valueToTree(DbCallSummary.build(refs));
+        } catch (Exception e) {
+            log.warn("Failed to rebuild db-calls summary for {}: {}", jarName, e.getMessage());
+            return null;
+        }
+    }
+
     /* ---- Delete ---- */
 
     public boolean delete(String jarName) throws IOException {

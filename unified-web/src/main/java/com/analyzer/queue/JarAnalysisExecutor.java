@@ -35,6 +35,7 @@ public class JarAnalysisExecutor {
     private final com.jaranalyzer.extapi.ExternalApiLinkService externalApiLinkService;
     private final RepositoryStereotypeResolver repositoryStereotypeResolver;
     private final com.analyzer.repo.EntityIngestTrigger entityIngest;
+    private final DbCallDetector dbCallDetector;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ArtifactStore store;
 
@@ -61,8 +62,10 @@ public class JarAnalysisExecutor {
                                com.jaranalyzer.extapi.ExternalApiLinkService externalApiLinkService,
                                RepositoryStereotypeResolver repositoryStereotypeResolver,
                                com.analyzer.repo.EntityIngestTrigger entityIngest,
+                               DbCallDetector dbCallDetector,
                                @Qualifier("jarArtifactStore") ArtifactStore store) {
         this.store = store;
+        this.dbCallDetector = dbCallDetector;
         this.parserService = parserService;
         this.callGraphService = callGraphService;
         this.persistenceService = persistenceService;
@@ -180,7 +183,14 @@ public class JarAnalysisExecutor {
                     callGraphService.setConfigProperties(props);
                 }
             }
-            parserService.streamClasses(classesFile, cls -> callGraphService.addToIndex(cls));
+            // DB-call facet (JAR -> database procedure/function calls). Detected in the SAME pass
+            // that feeds the call-graph index, so no extra read of the JAR or the classes JSONL is
+            // introduced; the result is persisted further down alongside the other per-JAR sidecars.
+            List<com.jaranalyzer.model.DbCallRef> dbCalls = new ArrayList<>();
+            parserService.streamClasses(classesFile, cls -> {
+                callGraphService.addToIndex(cls);
+                dbCalls.addAll(dbCallDetector.detectClass(cls));
+            });
             progress(job, broadcast, "Index built from " + parseResult.totalClasses() + " classes");
             checkCancelled(job);
 
@@ -296,9 +306,16 @@ public class JarAnalysisExecutor {
                 Path jarForResources = storedJar != null ? storedJar : tempJar;
                 Map<String, String> resourceFiles = parserService.extractResourceFiles(jarForResources.toFile());
                 persistenceService.storeResourceFiles(jarName, resourceFiles);
+                // MyBatis mapper XMLs shipped inside the JAR carry call sites the bytecode does
+                // not. Same resource set already extracted above — no new read.
+                dbCalls.addAll(dbCallDetector.detectResources(resourceFiles));
             } catch (Exception e) {
                 log.warn("Resource file extraction failed (non-fatal): {}", e.getMessage());
             }
+
+            // Written unconditionally, even when empty: the artifact's presence is how the API
+            // distinguishes "analysed, no DB calls" from "analysed before this facet existed".
+            persistenceService.storeDbCalls(jarName, dbCalls);
 
             try {
                 Path jarForBundled = storedJar != null ? storedJar : tempJar;

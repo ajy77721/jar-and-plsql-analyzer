@@ -51,6 +51,7 @@ class JarAnalysisExecutorEmptyJarGuardTest {
                 mock(com.jaranalyzer.extapi.ExternalApiLinkService.class),
                 mock(RepositoryStereotypeResolver.class),
                 mock(EntityIngestTrigger.class),
+                mock(DbCallDetector.class),
                 store);
 
         Map<String, Object> meta = new LinkedHashMap<>();
