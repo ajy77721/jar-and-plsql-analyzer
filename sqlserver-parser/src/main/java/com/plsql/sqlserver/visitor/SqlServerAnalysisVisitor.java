@@ -33,6 +33,25 @@ import java.util.regex.Pattern;
  *   visitDeleteStatement    → DELETE table op
  *   visitSelectStatement    → SELECT table op (scans stmtTail for FROM clause)
  */
+ * <p><b>Regex to grammar migration status (batch 2).</b> SELECT/FROM/JOIN extraction was already
+ * migrated onto the {@code queryUnit} parse tree in Stages 1-9. This batch moved the following
+ * further constructs onto real grammar rules, each keeping its legacy regex ONLY as a counted
+ * fallback (see the per-site {@code *_REGEX_FALLBACKS} counters): trigger header
+ * (triggerOnTable/triggerTiming/triggerEvent), NEXT VALUE FOR (nextValueFor), CTE names
+ * (withStatement/cteDefinition), cursor lifecycle (cursorStatement), EXISTS-in-IF (existsPredicate),
+ * IDENTITY columns (createTableStatement/identitySpec), CREATE SYNONYM in a routine body
+ * (createSynonym), sp_executesql arguments (SP_EXECUTESQL token + spExecuteSqlArgs), and the
+ * CREATE SEQUENCE / CREATE INDEX option tails (sequenceOption/indexOption).
+ *
+ * <p><b>Deliberately deferred (still regex-primary, documented, not counted as fallback):</b>
+ * qualified-call extraction (QUALIFIED_CALL_PATTERN, needs a call-expression rule), the
+ * otherStatement text recovery for MERGE/WITH-led statements (KEYWORD_OP_PATTERN /
+ * DELETE_TARGET_FROM_PATTERN / TABLE_REF_PATTERN / JOIN_PATTERN / FROM_PATTERN / ALIAS_TABLE_PATTERN),
+ * CASE/SUBQUERY statement-inventory counting (CASE has no grammar context), and the helpers
+ * SQL_LIKE_PATTERN / STATEMENT_HEAD / PERMISSION_STMT_PATTERN / ARG_OUTPUT_TRAILING_PATTERN.
+ * Promoting MERGE/WITH to structural rules is the largest remaining piece (effort L), left for a
+ * follow-up; the WITH side is partially covered by withStatement/cteDefinition.
+ */
 public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
     // Bug (comment-between-schema-and-dot audit): a block comment (already blanked to spaces by
@@ -79,13 +98,10 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     // Bug 7: SQL Server's fixed set of built-in XML data-type methods (col.value/.exist/.query/.nodes).
     private static final Set<String> XML_METHOD_NAMES = Set.of("VALUE", "EXIST", "QUERY", "NODES");
 
-    // Schema-qualified table in FROM/JOIN/MERGE/INTO/UPDATE — used to recover tables from
-    // statements consumed by the generic otherStatement rule (WITH-CTEs, MERGE, …).
-    // Qualified-only so CTE aliases / pseudo-tables (inserted, deleted, cte names) are skipped.
-    // Bug (bracketed-identifier-with-space audit): same either/or fix as TABLE_REF_PATTERN/
-    // FROM_PATTERN — `\w` cannot represent a bracketed identifier containing a space.
-    private static final Pattern QUALIFIED_TABLE_PATTERN = Pattern.compile(
-            "(?i)\\b(?:FROM|JOIN|MERGE|INTO|UPDATE)\\s+(\\[(?:[^\\]]|\\]\\])+\\]|[\\w#$]+)\\.(\\[(?:[^\\]]|\\]\\])+\\]|[\\w#$]+)");
+    // REMOVED (batch 2 cleanup): QUALIFIED_TABLE_PATTERN was declared here but never referenced by
+    // any matcher — dead code. The recovery it was intended for is actually done by
+    // KEYWORD_OP_PATTERN / scanOps(). Deleting it removes one entry from the regex cluster without
+    // changing any behaviour.
 
     // JOIN clause:  [<type>] JOIN | <type> APPLY  schema.table[(args)] [AS] alias [WITH (hint)] [ON <condition>]
     //
