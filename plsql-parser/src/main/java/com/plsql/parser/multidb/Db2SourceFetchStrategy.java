@@ -35,6 +35,7 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
                 "WHERE ROUTINENAME = ? " +
                 (schema != null ? "AND ROUTINESCHEMA = ? " : "") +
                 "AND ROUTINETYPE IN ('P', 'F') " +
+                "ORDER BY SPECIFICNAME " +
                 "FETCH FIRST 1 ROWS ONLY";
 
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -55,17 +56,47 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
         }
     }
 
+    /**
+     * Fetch ONE exact overload by its {@code SPECIFICNAME} — unique per routine in DB2, so it
+     * addresses the exact overload where ROUTINENAME alone cannot (name-based fetch would return
+     * an arbitrary one via {@code FETCH FIRST 1 ROWS ONLY}).
+     */
+    @Override
+    public String fetchSourceBySpecificName(Connection conn, String specificName, String schema)
+            throws SQLException {
+        if (specificName == null || specificName.isBlank()) return null;
+        String sql = "SELECT TEXT FROM SYSCAT.ROUTINES WHERE SPECIFICNAME = ? "
+                + (schema != null ? "AND ROUTINESCHEMA = ? " : "")
+                + "FETCH FIRST 1 ROWS ONLY";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, specificName);
+            if (schema != null) ps.setString(2, schema.toUpperCase());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String text = rs.getString("TEXT");
+                    return (text != null && !text.isBlank()) ? text : null;
+                }
+                return null;
+            }
+        } catch (SQLException e) {
+            log.warn("DB2 SYSCAT.ROUTINES fetch by specific name {} failed: {}", specificName, e.getMessage());
+            throw e;
+        }
+    }
+
     @Override
     public List<ObjectRef> listObjects(Connection conn, String schema) throws SQLException {
+        // SPECIFICNAME comes back with each row so the crawler can key every overload distinctly
+        // (it is unique per routine; ROUTINENAME is not) and fetch it by specific name.
         String sql = schema != null
-                ? "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA " +
+                ? "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA, SPECIFICNAME " +
                   "FROM SYSCAT.ROUTINES " +
                   "WHERE ROUTINESCHEMA = ? AND ROUTINETYPE IN ('P', 'F') " +
-                  "ORDER BY ROUTINESCHEMA, ROUTINENAME"
-                : "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA " +
+                  "ORDER BY ROUTINESCHEMA, ROUTINENAME, SPECIFICNAME"
+                : "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA, SPECIFICNAME " +
                   "FROM SYSCAT.ROUTINES " +
                   "WHERE ROUTINETYPE IN ('P', 'F') " +
-                  "ORDER BY ROUTINESCHEMA, ROUTINENAME";
+                  "ORDER BY ROUTINESCHEMA, ROUTINENAME, SPECIFICNAME";
 
         List<ObjectRef> result = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -77,7 +108,10 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
                     result.add(new ObjectRef(
                             rs.getString("ROUTINENAME"),
                             normalizedType,
-                            rs.getString("ROUTINESCHEMA")));
+                            rs.getString("ROUTINESCHEMA"),
+                            null,
+                            null,
+                            rs.getString("SPECIFICNAME")));
                 }
             }
         }

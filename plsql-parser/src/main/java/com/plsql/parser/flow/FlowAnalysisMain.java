@@ -60,6 +60,26 @@ public class FlowAnalysisMain {
         public boolean clearCache = false;
 
         /**
+         * Bypass the analysis-level idempotency registry so every reachable object is re-fetched
+         * and re-analysed even when unchanged. {@code --force-refresh} on the CLI; the analyze
+         * endpoint's {@code forceRefresh} form field. See
+         * {@link DependencyCrawler#setForceRefresh(boolean)}.
+         */
+        public boolean forceRefresh = false;
+
+        /**
+         * W3 DB-impact safety knobs. Defaults are deliberately gentle; the web layer wires them
+         * from {@code app.crawl.db.qps} / {@code app.crawl.db.timeout-seconds} /
+         * {@code app.crawl.db.circuit-breaker-threshold}.
+         */
+        /** Catalog/source query QPS cap (token bucket). {@code <=0} disables throttling. */
+        public double dbQps = 20.0;
+        /** Per-statement JDBC queryTimeout in seconds. {@code <=0} leaves the driver default. */
+        public int dbTimeoutSeconds = 30;
+        /** Consecutive failures that abort the crawl to protect the DB. {@code <=0} disables it. */
+        public int dbCircuitBreakerThreshold = 5;
+
+        /**
          * When false (the default) a crawl that produces zero nodes throws instead of writing an
          * empty analysis over the output key. Wired from {@code app.parser.allow-empty-analysis}
          * by the web layer; {@code --allow-empty-analysis} on the CLI. See
@@ -169,6 +189,31 @@ public class FlowAnalysisMain {
                 case "--clear-cache":
                     o.clearCache = true;
                     break;
+                case "--force-refresh":
+                    o.forceRefresh = true;
+                    break;
+                case "--db-qps":
+                    if (i + 1 < args.length) {
+                        try {
+                            o.dbQps = Double.parseDouble(args[++i]);
+                        } catch (NumberFormatException e) {
+                            fail("--db-qps requires a numeric argument");
+                        }
+                    } else {
+                        fail("--db-qps requires a numeric argument");
+                    }
+                    break;
+                case "--db-timeout-seconds":
+                    if (i + 1 < args.length) {
+                        try {
+                            o.dbTimeoutSeconds = Integer.parseInt(args[++i]);
+                        } catch (NumberFormatException e) {
+                            fail("--db-timeout-seconds requires a numeric argument");
+                        }
+                    } else {
+                        fail("--db-timeout-seconds requires a numeric argument");
+                    }
+                    break;
                 case "--allow-empty-analysis":
                     o.allowEmptyAnalysis = true;
                     break;
@@ -240,6 +285,12 @@ public class FlowAnalysisMain {
         long totalStart = System.currentTimeMillis();
 
         try (DbConnectionManager connManager = new DbConnectionManager(opts.configPath)) {
+            // W3 DB-impact safety: rate-limit catalog/source queries, bound every statement with a
+            // JDBC queryTimeout, and abort the crawl if the database stops responding. The analyzed
+            // database is only ever SELECTed (see DbConnectionManager's statement creators).
+            connManager.setRateLimitQps(opts.dbQps);
+            connManager.setStatementTimeoutSeconds(opts.dbTimeoutSeconds);
+            connManager.setGlobalCircuitThreshold(opts.dbCircuitBreakerThreshold);
             System.err.println("=== PL/SQL Flow Analysis ===");
             System.err.println("Config: " + opts.configPath);
             System.err.println("Schemas: " + connManager.getAvailableSchemas());
@@ -266,6 +317,7 @@ public class FlowAnalysisMain {
             DependencyCrawler crawler = new DependencyCrawler(engine, downloader, schemaResolver);
             crawler.setMaxDepth(opts.maxDepth);
             crawler.setAllowEmptyAnalysis(opts.allowEmptyAnalysis);
+            crawler.setForceRefresh(opts.forceRefresh);
             // Advisory: lets the depth-0 lookup fall back from e.g. PROCEDURE to PACKAGE and name
             // what it tried when it still finds nothing (Fix C).
             crawler.setEntryObjectType(opts.entryObjectType);

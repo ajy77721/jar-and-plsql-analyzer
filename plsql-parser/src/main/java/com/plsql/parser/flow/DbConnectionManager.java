@@ -62,6 +62,42 @@ public class DbConnectionManager implements AutoCloseable {
     private final Map<String, AtomicInteger> failureCounts = new ConcurrentHashMap<>();
     private final Map<String, Long> circuitOpenSince = new ConcurrentHashMap<>();
 
+    // ── W3 DB-impact safety ──────────────────────────────────────────────────────────────────
+    // The customer database must never suffer for an analysis. Three independent guards:
+    //   (1) a token-bucket rate limiter capping catalog/source query QPS,
+    //   (2) a JDBC queryTimeout on every statement the guarded creators build,
+    //   (3) a GLOBAL circuit breaker that aborts the whole crawl after N consecutive failures
+    //       instead of retrying/hanging for minutes.
+    // All three are configurable from the web layer (app.crawl.db.*) / the CLI; the defaults are
+    // deliberately gentle (20 qps, 30s, 5 failures).
+    /** Query-per-second cap for catalog/source queries. <=0 disables throttling. */
+    private volatile double rateLimitQps = 20.0;
+    /** JDBC queryTimeout (seconds) applied to every statement from prepareStatement/createStatement. */
+    private volatile int statementTimeoutSeconds = 30;
+    /** Consecutive query failures that trip the GLOBAL circuit breaker. <=0 disables it. */
+    private volatile int globalCircuitThreshold = 5;
+
+    // Token bucket state (guarded by rateLock).
+    private final Object rateLock = new Object();
+    private double rateTokens = -1;              // -1 = uninitialised; filled to capacity on first use
+    private long rateLastRefillNanos = 0;
+
+    // Global circuit breaker state.
+    private final AtomicInteger consecutiveFailures = new AtomicInteger(0);
+    private volatile boolean globalCircuitOpen = false;
+
+    /** Configure the catalog/source QPS cap (tokens per second). <=0 disables the limiter. */
+    public void setRateLimitQps(double qps) { this.rateLimitQps = qps; }
+    public double getRateLimitQps() { return rateLimitQps; }
+
+    /** Configure the per-statement JDBC queryTimeout (seconds). <=0 leaves the driver default. */
+    public void setStatementTimeoutSeconds(int seconds) { this.statementTimeoutSeconds = seconds; }
+    public int getStatementTimeoutSeconds() { return statementTimeoutSeconds; }
+
+    /** Configure how many consecutive failures trip the global circuit breaker. <=0 disables it. */
+    public void setGlobalCircuitThreshold(int threshold) { this.globalCircuitThreshold = threshold; }
+    public int getGlobalCircuitThreshold() { return globalCircuitThreshold; }
+
     public static class DbUser {
         private final String username;
         private final String password;
@@ -242,6 +278,12 @@ public class DbConnectionManager implements AutoCloseable {
      * MUST be paired with returnToPool() on success or closeAndDiscard() on failure.
      */
     public Connection getAnyConnection() throws SQLException {
+        // Fail fast once the global breaker has tripped: do not open yet another connection to a
+        // database that is clearly not answering. Every catalog/source query borrows a connection
+        // here, so this is the single choke point for "abort to protect the database".
+        throwIfGlobalCircuitOpen();
+        // Throttle: one token per connection borrow == one token per query in this codebase.
+        acquireQueryPermit();
         SQLException lastError = null;
 
         for (int attempt = 1; attempt <= CONNECT_RETRY_MAX; attempt++) {
@@ -586,6 +628,128 @@ public class DbConnectionManager implements AutoCloseable {
         int count = failureCounts.computeIfAbsent(key, k -> new AtomicInteger(0)).incrementAndGet();
         if (count >= CIRCUIT_THRESHOLD) {
             circuitOpenSince.putIfAbsent(key, System.currentTimeMillis());
+        }
+    }
+
+    // ── W3.1 Rate limiter ────────────────────────────────────────────────────────────────────
+
+    /**
+     * Acquire one permit from the token bucket, blocking until a token is available. The bucket
+     * refills at {@link #getRateLimitQps()} tokens/second up to a capacity of the same value, so
+     * the steady-state query rate can never exceed the configured QPS. No-op when the cap is
+     * disabled (&lt;=0). Interrupt-safe: an interrupted waiter returns rather than hanging the
+     * crawl (the breaker/timeout guards bound the rest).
+     */
+    public void acquireQueryPermit() {
+        double qps = rateLimitQps;
+        if (qps <= 0) return;
+        double capacity = Math.max(1.0, qps);
+        synchronized (rateLock) {
+            if (rateTokens < 0) { rateTokens = capacity; rateLastRefillNanos = System.nanoTime(); }
+            while (true) {
+                long now = System.nanoTime();
+                double elapsedSec = (now - rateLastRefillNanos) / 1_000_000_000.0;
+                rateTokens = Math.min(capacity, rateTokens + elapsedSec * qps);
+                rateLastRefillNanos = now;
+                if (rateTokens >= 1.0) { rateTokens -= 1.0; return; }
+                long waitMs = (long) Math.ceil((1.0 - rateTokens) / qps * 1000.0);
+                try {
+                    rateLock.wait(Math.max(1, waitMs));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+    }
+
+    // ── W3.2/W3.4 Statement creator: read-only guard + query timeout ─────────────────────────
+
+    /**
+     * Read-only guarantee: the analyzed database is only ever SELECTed. Every catalog/source query
+     * this crawl issues is built through {@link #prepareStatement}/{@link #createStatement}, which
+     * refuse anything whose SQL does not start with {@code SELECT} or {@code WITH}. This is a
+     * programming guard, not a permissions substitute — the connection is still opened with the
+     * caller's credentials, and the JDBC auto-commit flag is false.
+     *
+     * @throws IllegalArgumentException when {@code sql} is not a SELECT/WITH statement
+     */
+    public static void assertReadOnly(String sql) {
+        String s = sql == null ? "" : sql.stripLeading();
+        String upper = s.toUpperCase();
+        if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) {
+            String preview = s.length() > 120 ? s.substring(0, 120) + "…" : s;
+            throw new IllegalArgumentException(
+                    "Read-only guarantee: refusing a non-SELECT statement on the analyzed database: "
+                    + preview);
+        }
+    }
+
+    /** Create a queryTimeout-bounded PreparedStatement, refusing non-SELECT SQL. */
+    public PreparedStatement prepareStatement(Connection conn, String sql) throws SQLException {
+        assertReadOnly(sql);
+        PreparedStatement ps = conn.prepareStatement(sql);
+        applyQueryTimeout(ps);
+        return ps;
+    }
+
+    /** Create a queryTimeout-bounded Statement, refusing non-SELECT SQL. */
+    public Statement createStatement(Connection conn, String sql) throws SQLException {
+        assertReadOnly(sql);
+        Statement st = conn.createStatement();
+        applyQueryTimeout(st);
+        return st;
+    }
+
+    private void applyQueryTimeout(Statement st) {
+        int timeout = statementTimeoutSeconds;
+        if (timeout <= 0) return;
+        try {
+            st.setQueryTimeout(timeout);
+        } catch (SQLException e) {
+            log.debug("[DB] Could not set queryTimeout={}s: {}", timeout, e.getMessage());
+        }
+    }
+
+    // ── W3.3 Global circuit breaker ──────────────────────────────────────────────────────────
+
+    /** Record a successful query — resets the consecutive-failure counter. */
+    public void noteQuerySuccess() {
+        consecutiveFailures.set(0);
+    }
+
+    /** Record a failed query; trips the global breaker at the configured threshold. */
+    public void noteQueryFailure() {
+        int n = consecutiveFailures.incrementAndGet();
+        int threshold = globalCircuitThreshold;
+        if (threshold > 0 && n >= threshold && !globalCircuitOpen) {
+            globalCircuitOpen = true;
+            log.error("[DB] GLOBAL CIRCUIT BREAKER TRIPPED after {} consecutive failures — "
+                    + "aborting crawl to protect the database", n);
+        }
+    }
+
+    public boolean isGlobalCircuitOpen() { return globalCircuitOpen; }
+
+    public int getConsecutiveFailures() { return consecutiveFailures.get(); }
+
+    /** Reset the global breaker (used by tests and by an operator after the DB recovers). */
+    public void resetGlobalCircuit() {
+        globalCircuitOpen = false;
+        consecutiveFailures.set(0);
+    }
+
+    /**
+     * Throw the fail-fast abort when the global breaker is open. The message is deliberately
+     * explicit so an operator reading the job log knows the crawl stopped to protect the DB rather
+     * than hanging.
+     */
+    public void throwIfGlobalCircuitOpen() {
+        if (globalCircuitOpen) {
+            throw new IllegalStateException(
+                    "The database is not responding — aborting to protect it "
+                    + "(circuit breaker tripped after " + consecutiveFailures.get()
+                    + " consecutive failures).");
         }
     }
 

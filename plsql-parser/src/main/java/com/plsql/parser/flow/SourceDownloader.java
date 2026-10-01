@@ -4,6 +4,7 @@ import com.plsql.parser.multidb.Db2SourceFetchStrategy;
 import com.plsql.parser.multidb.MySqlSourceFetchStrategy;
 import com.plsql.parser.multidb.PostgresSourceFetchStrategy;
 import com.plsql.parser.multidb.SqlServerSourceFetchStrategy;
+import com.plsql.parser.multidb.SourceFetchStrategy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,6 +117,163 @@ public class SourceDownloader {
     public boolean hasSourceCache() {
         return sourceCacheStore != null && sourceCacheDir != null
                 && sourceCacheIdentity != null && !sourceCacheIdentity.isEmpty();
+    }
+
+    // ── Postgres / DB2 routine catalog + per-overload fetch (W1) ──────────────────────────────
+    // A single catalog query per crawl lists every routine WITH its per-overload identity
+    // (Postgres oid + pg_get_function_identity_arguments; DB2 SPECIFICNAME). The crawler uses it to
+    // key each overload by its true signature and fetch that exact overload's source, instead of a
+    // name-based LIMIT 1 that silently returns an arbitrary overload.
+    private volatile List<SourceFetchStrategy.ObjectRef> postgresRoutineCatalog;
+    private volatile List<SourceFetchStrategy.ObjectRef> db2RoutineCatalog;
+
+    /** Cached Postgres routine catalog (empty when the connection is not Postgres or on error). */
+    public List<SourceFetchStrategy.ObjectRef> listPostgresRoutines() {
+        List<SourceFetchStrategy.ObjectRef> cached = postgresRoutineCatalog;
+        if (cached != null) return cached;
+        List<SourceFetchStrategy.ObjectRef> out = Collections.emptyList();
+        if (connManager != null && connManager.isPostgres()) {
+            Connection conn = null;
+            try {
+                conn = connManager.getAnyConnection();
+                out = postgresStrategy.listObjects(conn, null);
+                connManager.returnToPool(conn);
+                conn = null;
+            } catch (Exception e) {
+                log.warn("[SourceDownloader] Postgres routine catalog list failed: {}", e.getMessage());
+            } finally {
+                if (conn != null) connManager.closeAndDiscard(conn);
+            }
+        }
+        postgresRoutineCatalog = out;
+        return out;
+    }
+
+    /** Cached DB2 routine catalog (empty when the connection is not DB2 or on error). */
+    public List<SourceFetchStrategy.ObjectRef> listDb2Routines() {
+        List<SourceFetchStrategy.ObjectRef> cached = db2RoutineCatalog;
+        if (cached != null) return cached;
+        List<SourceFetchStrategy.ObjectRef> out = Collections.emptyList();
+        if (connManager != null && connManager.isDB2()) {
+            Connection conn = null;
+            try {
+                conn = connManager.getAnyConnection();
+                out = db2Strategy.listObjects(conn, null);
+                connManager.returnToPool(conn);
+                conn = null;
+            } catch (Exception e) {
+                log.warn("[SourceDownloader] DB2 routine catalog list failed: {}", e.getMessage());
+            } finally {
+                if (conn != null) connManager.closeAndDiscard(conn);
+            }
+        }
+        db2RoutineCatalog = out;
+        return out;
+    }
+
+    /** Fetch ONE Postgres overload's DDL by {@code pg_proc.oid} (in-memory cached per oid). */
+    public String downloadPostgresSourceByOid(String oid) {
+        if (oid == null || oid.isBlank()) return null;
+        String key = "OID:" + oid;
+        String cached = sourceCache.get(key);
+        if (cached != null) return cached;
+        if (connManager == null || !connManager.isPostgres()) return null;
+        Connection conn = null;
+        try {
+            conn = connManager.getAnyConnection();
+            String src = postgresStrategy.fetchSourceByOid(conn, oid);
+            if (src != null) {
+                sourceCache.put(key, src);
+                connManager.incrementDbCalls();
+            }
+            connManager.returnToPool(conn);
+            conn = null;
+            return src;
+        } catch (SQLException e) {
+            log.debug("[SourceDownloader] Postgres fetch by oid {} failed: {}", oid, e.getMessage());
+            return null;
+        } finally {
+            if (conn != null) connManager.closeAndDiscard(conn);
+        }
+    }
+
+    /** Fetch ONE DB2 overload's DDL by its unique {@code SPECIFICNAME} (in-memory cached). */
+    public String downloadDb2SourceBySpecificName(String specificName, String schema) {
+        if (specificName == null || specificName.isBlank()) return null;
+        String key = "SPECIFIC:" + specificName;
+        String cached = sourceCache.get(key);
+        if (cached != null) return cached;
+        if (connManager == null || !connManager.isDB2()) return null;
+        Connection conn = null;
+        try {
+            conn = connManager.getAnyConnection();
+            String src = db2Strategy.fetchSourceBySpecificName(conn, specificName, schema);
+            if (src != null) {
+                sourceCache.put(key, src);
+                connManager.incrementDbCalls();
+            }
+            connManager.returnToPool(conn);
+            conn = null;
+            return src;
+        } catch (SQLException e) {
+            log.debug("[SourceDownloader] DB2 fetch by specific name {} failed: {}", specificName, e.getMessage());
+            return null;
+        } finally {
+            if (conn != null) connManager.closeAndDiscard(conn);
+        }
+    }
+
+    /**
+     * The object's current LAST_DDL from the catalog metadata the crawler primed for this level,
+     * or null when unknown (non-Oracle dialects, or a level that was never primed). Used by the
+     * analysis idempotency registry to decide whether an object changed since its last analysis.
+     */
+    public String getCatalogLastDdl(String objectName) {
+        if (objectName == null) return null;
+        return cacheLastDdl(objectName.toUpperCase());
+    }
+
+    // ── Trigger source cache ─────────────────────────────────────────────────────────────────
+    // Trigger bodies were the ONE crawl path that bypassed the persistent source cache: the
+    // TriggerDiscoverer fetched each trigger with its own ALL_SOURCE / DBMS_METADATA query (N+1).
+    // These reuse the SAME cache dir and on-disk shape as the object source cache, keyed by
+    // (identity, owner, trigger name, type=TRIGGER). A re-crawl of an unchanged trigger reads the
+    // cached body instead of hitting the database again; DDL is not tracked for triggers, so an
+    // entry is reused until the cache dir is cleared (the discoverer's batched pull refills it).
+
+    /** Cached trigger body for {@code owner.triggerName}, or null on miss. */
+    public String getCachedTriggerSource(String owner, String triggerName) {
+        if (!hasSourceCache() || owner == null || triggerName == null) return null;
+        ArtifactKey file = triggerCacheKey(owner, triggerName);
+        try (InputStream in = sourceCacheStore.read(file)) {
+            CachedSource entry = sourceCacheMapper.readValue(in, CachedSource.class);
+            if (entry == null || entry.source == null) return null;
+            log.info("[SourceDownloader] SourceCache HIT: TRIGGER {}.{}", owner, triggerName);
+            return entry.source;
+        } catch (IOException e) {
+            return null;   // absent (the common miss) or unreadable — fall through to the DB
+        }
+    }
+
+    /** Persist a freshly fetched trigger body. Best-effort. */
+    public void storeTriggerSource(String owner, String triggerName, String source) {
+        if (!hasSourceCache() || owner == null || triggerName == null || source == null) return;
+        ArtifactKey file = triggerCacheKey(owner, triggerName);
+        try (OutputStream out = sourceCacheStore.write(file)) {
+            sourceCacheMapper.writeValue(out, new CachedSource(null, source));
+        } catch (IOException e) {
+            log.debug("[SourceDownloader] Trigger source-cache store failed for {}.{}: {}",
+                    owner, triggerName, e.getMessage());
+        }
+    }
+
+    private ArtifactKey triggerCacheKey(String owner, String triggerName) {
+        String upOwner = owner.toUpperCase();
+        String upName = triggerName.toUpperCase();
+        String leaf = sanitize(upOwner) + "." + sanitize(upName) + ".TRIGGER."
+                + shortHash(sourceCacheIdentity + "|" + upOwner + "|" + upName + "|TRIGGER")
+                + ".srccache";
+        return sourceCacheDir.resolve(leaf);
     }
 
     /** Prime catalog metadata for one object (owner / type / LAST_DDL) so the cache can validate. */
@@ -266,6 +424,7 @@ public class SourceDownloader {
                 storeSourceCache(objectName, objectType, source);
                 connManager.recordSuccess(objectName);
             }
+            connManager.noteQuerySuccess();
             connManager.returnToPool(conn);
             conn = null;
             return source;
@@ -274,6 +433,7 @@ public class SourceDownloader {
             conn = null;
             log.debug("[SourceDownloader] Error downloading {} {}: {}", objectType, objectName, e.getMessage());
             connManager.recordFailure(objectName, e.getMessage());
+            connManager.noteQueryFailure();
             return null;
         } finally {
             // Safety net: if an unexpected exception bypassed the explicit return/catch above
@@ -467,12 +627,14 @@ public class SourceDownloader {
                 sourceCache.put(typeAndSource[0] + ":" + objectName, typeAndSource[1]);
                 storeSourceCache(objectName, typeAndSource[0], typeAndSource[1]);
                 connManager.recordSuccess(objectName);
+                connManager.noteQuerySuccess();
                 return typeAndSource[1];
             }
         } catch (SQLException e) {
             connManager.closeAndDiscard(conn);
             conn = null;
             connManager.recordFailure(objectName, e.getMessage());
+            connManager.noteQueryFailure();
             log.warn("[SourceDownloader] Oracle fetch failed for {}: {}", objectName, e.getMessage());
         } finally {
             if (conn != null) connManager.closeAndDiscard(conn);
@@ -493,7 +655,7 @@ public class SourceDownloader {
                 + "ORDER BY OWNER, TYPE, LINE";
         java.util.Map<String, Integer> rank = new java.util.HashMap<>();
         rank.put("PACKAGE BODY", 0); rank.put("PROCEDURE", 1); rank.put("FUNCTION", 2); rank.put("PACKAGE", 3);
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
             ps.setString(1, objectName);
             ps.setFetchSize(10000);
             connManager.incrementDbCalls();
@@ -685,7 +847,7 @@ public class SourceDownloader {
                 + "AND OWNER IN (" + buildOwnerInClause() + ") "
                 + "ORDER BY OWNER, LINE";
 
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
             ps.setString(1, objectName);
             ps.setString(2, objectType);
             ps.setFetchSize(10000);

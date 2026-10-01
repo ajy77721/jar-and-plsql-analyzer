@@ -4294,14 +4294,16 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 fullName = sb.toString();
             }
             int argCount = 0;
+            List<String> argTypes = null;
             if (ctx.function_argument() != null && !ctx.function_argument().isEmpty()) {
                 PlSqlParser.Function_argumentContext fa = ctx.function_argument(0);
                 if (fa.argument() != null) {
                     argCount = fa.argument().size();
+                    argTypes = captureArgTypes(fa);
                 }
             }
 
-            CallInfo ci = classifyCall(fullName, argCount, getStartLine(ctx));
+            CallInfo ci = classifyCall(fullName, argCount, argTypes, getStartLine(ctx));
             addCall(ci);
 
             // Check for RAISE_APPLICATION_ERROR
@@ -4406,6 +4408,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             boolean hasArgs = false;
             int totalArgs = 0;
             int argsOnPartIndex = -1;
+            List<String> argTypes = null;
 
             for (int pi = 0; pi < parts.size(); pi++) {
                 PlSqlParser.General_element_partContext part = parts.get(pi);
@@ -4418,6 +4421,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                     PlSqlParser.Function_argumentContext fa = part.function_argument(0);
                     if (fa.argument() != null) {
                         totalArgs = fa.argument().size();
+                        argTypes = captureArgTypes(fa);
                     }
                 }
             }
@@ -4458,7 +4462,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             if (hasArgs && !partNames.isEmpty()) {
                 // This is a function/procedure call
                 String fullName = String.join(".", partNames);
-                CallInfo ci = classifyCall(fullName, totalArgs, getStartLine(ctx));
+                CallInfo ci = classifyCall(fullName, totalArgs, argTypes, getStartLine(ctx));
                 addCall(ci);
 
                 // Check for RAISE_APPLICATION_ERROR used as expression (non-CALL path)
@@ -4560,10 +4564,42 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         return false;
     }
 
+    /**
+     * Coarse argument-type hints for a call, used to match a call against a declared overload
+     * SIGNATURE (W1). Only statically-obvious literals get a type (string → VARCHAR2, numeric →
+     * NUMBER); anything else is null (unknown). Returns null when NO argument type is known, so
+     * the overload resolver cleanly falls back to arity.
+     */
+    private List<String> captureArgTypes(PlSqlParser.Function_argumentContext fa) {
+        if (fa == null || fa.argument() == null || fa.argument().isEmpty()) return null;
+        List<String> types = new ArrayList<>();
+        boolean any = false;
+        for (PlSqlParser.ArgumentContext a : fa.argument()) {
+            String t = literalTypeHint(a);
+            types.add(t);
+            if (t != null) any = true;
+        }
+        return any ? types : null;
+    }
+
+    private String literalTypeHint(PlSqlParser.ArgumentContext a) {
+        if (a == null || a.expression() == null) return null;
+        String text = a.expression().getText();
+        if (text == null || text.isEmpty()) return null;
+        if (text.charAt(0) == '\'') return "VARCHAR2";           // string literal
+        if (text.matches("\\d+(\\.\\d+)?")) return "NUMBER";     // numeric literal
+        return null;                                              // variable/expression — unknown
+    }
+
     private CallInfo classifyCall(String fullName, int argCount, int line) {
+        return classifyCall(fullName, argCount, null, line);
+    }
+
+    private CallInfo classifyCall(String fullName, int argCount, List<String> argTypes, int line) {
         CallInfo ci = new CallInfo();
         ci.setLine(line);
         ci.setArguments(argCount);
+        if (argTypes != null && !argTypes.isEmpty()) ci.setArgTypes(argTypes);
 
         String[] parts = fullName.split("\\.");
         if (parts.length == 1) {

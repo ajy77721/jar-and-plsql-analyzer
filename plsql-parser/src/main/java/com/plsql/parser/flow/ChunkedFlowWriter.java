@@ -376,10 +376,11 @@ public class ChunkedFlowWriter {
         }
     }
 
-    /** The node's id with its leading schema segment removed (keeps any {@code __<arity>}). */
+    /** The node's id with its leading schema segment removed (keeps any overload discriminator). */
     private static String schemalessKey(FlowNode n) {
+        String disc = n.getOverloadDiscriminator();
         return normalizeIdPart(n.getPackageName(), n.getObjectName())
-                + (n.getOverloadParamCount() >= 0 ? "__" + n.getOverloadParamCount() : "");
+                + (disc != null ? "__" + disc : "");
     }
 
     /**
@@ -390,12 +391,16 @@ public class ChunkedFlowWriter {
                                         Set<String> realNodeIds, String nodeId,
                                         String pkg, String object) {
         if (nodeId == null || nodeId.isEmpty() || realNodeIds.contains(nodeId)) return null;
-        // Preserve the overload discriminator the edge already carries.
+        // Preserve the overload discriminator the edge already carries. It is either the legacy
+        // all-digits arity (__2) or a signature token (__NUM_VARCHAR2, __FUNCTION_NUM) — the
+        // latter never contains "__" because FlowNode.sanitizeType collapses runs of "_".
         String arity = "";
         int us = nodeId.lastIndexOf("__");
-        if (us > 0 && nodeId.substring(us + 2).chars().allMatch(Character::isDigit)
-                && us + 2 < nodeId.length()) {
-            arity = nodeId.substring(us);
+        if (us > 0 && us + 2 < nodeId.length()) {
+            String tail = nodeId.substring(us + 2);
+            if (!tail.contains("__") && tail.matches("[A-Z0-9_]+")) {
+                arity = nodeId.substring(us);
+            }
         }
         List<FlowNode> candidates = bySchemalessKey.get(normalizeIdPart(pkg, object) + arity);
         if (candidates == null || candidates.size() != 1) return null;
@@ -1037,6 +1042,27 @@ public class ChunkedFlowWriter {
         indexRoot.put("discoverMs", result.getDiscoverMs());
         indexRoot.put("saveMs", result.getSaveMs());
         indexRoot.put("dbCallCount", result.getDbCallCount());
+
+        // Overload visibility (W1): per-member count for every genuinely-overloaded routine —
+        // the SAME package+object name split into >1 distinct node by its signature discriminator.
+        // Derived from the resolved node list (the nodes ARE the overloads); empty when none, so
+        // non-overloaded analyses gain only an empty map.
+        Map<String, Integer> overloadCounts = new LinkedHashMap<>();
+        for (Map<String, Object> idx : indexNodes) {
+            Object objRaw = idx.get("objectName");
+            if (objRaw == null) continue;
+            String obj = objRaw.toString();
+            if (obj.isEmpty()) continue;
+            Object pkgRaw = idx.get("packageName");
+            String pkg = pkgRaw != null ? pkgRaw.toString() : "";
+            overloadCounts.merge(pkg.isEmpty() ? obj : pkg + "." + obj, 1, Integer::sum);
+        }
+        Map<String, Integer> overloads = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> e : overloadCounts.entrySet()) {
+            if (e.getValue() > 1) overloads.put(e.getKey(), e.getValue());
+        }
+        indexRoot.put("overloads", overloads);
+
         indexRoot.put("nodes", indexNodes);
 
         ArtifactKey indexKey = apiDir.resolve("index.json");

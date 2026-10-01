@@ -6,6 +6,7 @@ import com.plsql.parser.multidb.Db2ProcedureParser;
 import com.plsql.parser.multidb.MySqlProcedureParser;
 import com.plsql.parser.multidb.PostgresProcedureParser;
 import com.plsql.parser.multidb.SqlServerProcedureParser;
+import com.plsql.parser.multidb.SourceFetchStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,6 +51,18 @@ public class DependencyCrawler {
     private String outputFolderName;
     private NodeParseCache nodeCache;
     private ParseResultCache parseResultCache;
+    /**
+     * Analysis-level idempotency registry (the third gate of the central fetch decision). Null
+     * unless a persistent output namespace is configured. See {@link AnalysisRegistry} — it is
+     * PER-ANALYSIS (under {@code outputKey}), per-user via the routed store, never global.
+     */
+    private AnalysisRegistry registry;
+    /**
+     * Force-refresh: when true the registry gate is bypassed and every reachable object is
+     * re-fetched/re-analysed, even when its LAST_DDL is unchanged and the prior run was complete.
+     * Wired from {@code --force-refresh} on the CLI and the analyze endpoint's form field.
+     */
+    private boolean forceRefresh = false;
 
     /**
      * When {@code false} (the default), a crawl that produces ZERO nodes is a failure: the writer
@@ -110,6 +123,13 @@ public class DependencyCrawler {
     private final AtomicLong discoverNanos = new AtomicLong();
     private final AtomicLong saveNanos = new AtomicLong();
 
+    // Overload-resolution fallbacks (W1). Mirrors the visitor's AtomicLong fallback-counter
+    // pattern: exact-signature matching needs call argument types the grammar rarely supplies, so
+    // most overloaded calls resolve by arity and, when the arity is ambiguous, by first match.
+    // Public so tests/telemetry can read them without a getter.
+    public static final AtomicLong OVERLOAD_ARITY_FALLBACKS = new AtomicLong();
+    public static final AtomicLong OVERLOAD_FIRST_MATCH_FALLBACKS = new AtomicLong();
+
     public DependencyCrawler(PlSqlParserEngine engine, SourceDownloader downloader,
                              SchemaResolver schemaResolver) {
         this.engine = engine;
@@ -153,6 +173,14 @@ public class DependencyCrawler {
 
     public void setNodeCache(NodeParseCache nodeCache) {
         this.nodeCache = nodeCache;
+    }
+
+    /**
+     * Force-refresh: bypass the idempotency-registry skip so every reachable object is re-analysed
+     * even when unchanged. Default false.
+     */
+    public void setForceRefresh(boolean forceRefresh) {
+        this.forceRefresh = forceRefresh;
     }
 
     public void setParseResultCache(ParseResultCache parseResultCache) {
@@ -233,6 +261,11 @@ public class DependencyCrawler {
                     downloader.setSourceCache(store, outputKey.resolve(".source-cache"),
                             downloader.getConnManager().getConnectionIdentity());
                 }
+                // Analysis-level idempotency registry (central decision step 3). Deliberately under
+                // the PARENT outputKey — like the source cache — so it survives the per-analysis
+                // folder being archived on re-run. PER-ANALYSIS scope, per-user via the routed
+                // store; there is no global registry location. Corrupt/missing => re-analyse all.
+                registry = new AnalysisRegistry(store, outputKey);
                 log.info("[Crawler] Chunked output: " + buildKey);
             } catch (IOException e) {
                 log.info("[Crawler] Failed to init chunked writer: " + e.getMessage());
@@ -300,12 +333,12 @@ public class DependencyCrawler {
                 level.add(item);
                 level.addAll(levelRest);
 
-                flushPendingResolve();
-                // Flush standalone names queued by enqueueExternalCalls so they are
-                // confirmed present/absent before their BFS nodes are processed.
-                flushMissingBatch();
-                // Catalog metadata for the level (LAST_DDL validation for the source cache).
-                Map<String, String[]> levelMeta = fetchLevelCatalogMeta(level);
+                // ONE catalog query per level: the union of the pending resolve/missing names and
+                // the level's own objects, returning owner / object_type / LAST_DDL. This replaces
+                // the previous up-to-three ALL_OBJECTS queries (flushPendingResolve +
+                // flushMissingBatch + fetchLevelCatalogMeta) and primes the type map so the
+                // node-cache peek no longer fires blind per-object source probes.
+                Map<String, String[]> levelMeta = prepareLevelCatalog(level);
                 if (!levelMeta.isEmpty()) downloader.primeCatalogMeta(levelMeta);
                 // Parallel source fan-out: every level-N source fetched simultaneously.
                 prefetchLevelSources(level);
@@ -313,11 +346,15 @@ public class DependencyCrawler {
                 for (int i = levelRest.size() - 1; i >= 0; i--) queue.addFirst(levelRest.get(i));
             }
             String visitKey = buildVisitKey(item.schema, item.packageName, item.subprogramName);
-            // Overloaded package member: distinguish by arg count so each overload becomes
-            // its own node (gated on the package actually having >1 overload of this name).
-            boolean isOverloaded = item.packageName != null && item.argCount >= 0
-                    && overloadCount(item.packageName, item.subprogramName) > 1;
-            if (isOverloaded) visitKey = visitKey + "#" + item.argCount;
+            // Overloaded member: distinguish by SIGNATURE (types when known, else arity) so each
+            // overload becomes its own node. Package members resolve against the parsed package;
+            // standalone Postgres/DB2 routines against the routine catalog (disc resolved at
+            // enqueue and carried on the item). Null → not overloaded → id stays byte-identical.
+            String itemOverloadDisc = item.packageName != null
+                    ? resolveOverload(item.packageName, item.subprogramName, item.argCount, item.argTypes)
+                    : item.overloadDisc;
+            boolean isOverloaded = itemOverloadDisc != null;
+            if (isOverloaded) visitKey = visitKey + "#" + itemOverloadDisc;
 
             if (visited.contains(visitKey)) continue;
             visited.add(visitKey);
@@ -334,6 +371,53 @@ public class DependencyCrawler {
             }
 
             if (item.depth > maxDepthReached) maxDepthReached = item.depth;
+
+            // ── Central fetch decision, step 3: analysis-level idempotency registry ────────────
+            // Consulted ONCE per object per crawl, after in-run dedup and before any DB work. An
+            // object whose LAST_DDL is UNCHANGED and whose previous run was COMPLETE is restored
+            // from the node cache with ZERO database fetches and ZERO re-parse. Force-refresh,
+            // a missing/corrupt node-cache entry, or a partial previous run all fall through to a
+            // normal analysis (fail-safe).
+            if (registry != null && nodeCache != null && !forceRefresh) {
+                String regObj = item.packageName != null ? item.packageName : item.subprogramName;
+                String currentDdl = downloader.getCatalogLastDdl(regObj);
+                AnalysisRegistry.Entry regEntry = registry.entryFor(visitKey);
+                if (registry.isCompleteAndUnchanged(regEntry, currentDdl)) {
+                    FlowNode restored = nodeCache.getByLeaf(regEntry.nodeCacheLeaf);
+                    if (restored != null) {
+                        orderCounter++;
+                        restored.setOrder(orderCounter);
+                        restored.setDepth(item.depth);
+                        if (item.depth == 0 && restored.getSchema() != null) {
+                            entrySchema = restored.getSchema();
+                        }
+                        String restoredOwner = restored.getSchema();
+                        edgeBatch.clear();
+                        enqueueExternalCalls(restored.getCalls(), item.depth,
+                                item.packageName, item.subprogramName,
+                                restoredOwner, queue, edgeBatch,
+                                isOverloaded ? itemOverloadDisc : null);
+                        aggregateTableInfo(tableInfoMap, restored.getTableOperations(), visitKey);
+                        if (chunkedWriter != null) {
+                            long tSave0 = System.nanoTime();
+                            try {
+                                chunkedWriter.writeChunk(restored);
+                                chunkedWriter.appendEdges(new ArrayList<>(edgeBatch), orderCounter);
+                                chunkedWriter.markDone(visitKey);
+                                writeNodeSource(chunkedWriter, restored, restoredOwner);
+                            } catch (IOException e) {
+                                errors.add("Chunk write error for " + visitKey + ": " + e.getMessage());
+                            } finally {
+                                saveNanos.addAndGet(System.nanoTime() - tSave0);
+                            }
+                        }
+                        log.info("[Crawler] Done (registry skip — no fetch, no re-parse): {}", visitKey);
+                        continue;
+                    }
+                    // Node cache entry gone/corrupt → re-analyse this object (fail-safe).
+                    log.info("[Crawler] Registry entry for {} has no restorable node — re-analysing", visitKey);
+                }
+            }
 
             // Mark progress
             if (chunkedWriter != null) {
@@ -434,7 +518,7 @@ public class DependencyCrawler {
                             enqueueExternalCalls(cachedNode.getCalls(), item.depth,
                                     item.packageName, item.subprogramName,
                                     cachedOwnerSchema, queue, edgeBatch,
-                                    isOverloaded ? item.argCount : -1);
+                                    isOverloaded ? itemOverloadDisc : null);
                             aggregateTableInfo(tableInfoMap, cachedNode.getTableOperations(), visitKey);
 
                             if (chunkedWriter != null) {
@@ -452,7 +536,8 @@ public class DependencyCrawler {
                 }
 
                 long parseStart = System.currentTimeMillis();
-                ParseResult parseResult = downloadAndParse(item.packageName, item.subprogramName, item.schema);
+                ParseResult parseResult = downloadAndParse(item.packageName, item.subprogramName, item.schema,
+                        item.overloadId);
                 log.info("[Crawler] downloadAndParse({}) took {}ms", visitKey, System.currentTimeMillis() - parseStart);
 
                 // Entry-object resolution (Fix C). A bare name that downloaded nothing is retried as
@@ -545,10 +630,20 @@ public class DependencyCrawler {
                                     objName.isEmpty() ? item.packageName : objName,
                                     obj.getSchema());
                             SubprogramInfo firstMatch = null;
+                            // Exact-signature preference (W1): when the call supplied argument
+                            // types, pick the overload whose declared signature matches — this is
+                            // what separates same-arity-different-type overloads.
+                            String wantSig = FlowNode.allTypesKnown(item.argTypes)
+                                    ? FlowNode.signatureOfTypes(item.argTypes) : null;
                             for (SubprogramInfo sub : obj.getSubprograms()) {
                                 if (sub.getName() != null
                                         && sub.getName().equalsIgnoreCase(item.subprogramName)) {
                                     if (firstMatch == null) firstMatch = sub;
+                                    if (isOverloaded && wantSig != null
+                                            && wantSig.equals(FlowNode.typeSignature(sub.getParameters()))) {
+                                        targetSub = sub;
+                                        break;
+                                    }
                                     // Overload resolution by arity: pick the overload whose
                                     // parameter count matches the call's argument count.
                                     if (isOverloaded && item.argCount >= 0
@@ -645,7 +740,7 @@ public class DependencyCrawler {
                     aggregateTableInfo(tableInfoMap, resolvedTableOps, visitKey);
                     enqueueExternalCalls(resolvedCalls, item.depth, item.packageName,
                             item.subprogramName, ownerSchema, queue, edgeBatch,
-                            isOverloaded ? item.argCount : -1);
+                            isOverloaded ? itemOverloadDisc : null);
 
                 } else if (targetObj != null) {
                     node.setObjectType(targetObj.getType());
@@ -788,7 +883,7 @@ public class DependencyCrawler {
                     aggregateTableInfo(tableInfoMap, allTableOps, visitKey);
                     enqueueExternalCalls(allCalls, item.depth, item.packageName,
                             item.subprogramName, ownerSchema, queue, edgeBatch,
-                            isOverloaded ? item.argCount : -1);
+                            isOverloaded ? itemOverloadDisc : null);
 
                 } else {
                     // targetObj is null: package/object itself was not matched in the parse result.
@@ -818,7 +913,7 @@ public class DependencyCrawler {
                         aggregateTableInfo(tableInfoMap, objTableOps, visitKey);
                         enqueueExternalCalls(objCalls, item.depth, item.packageName,
                                 item.subprogramName, ownerSchema, queue, edgeBatch,
-                                isOverloaded ? item.argCount : -1);
+                                isOverloaded ? itemOverloadDisc : null);
                     }
                 }
 
@@ -855,10 +950,11 @@ public class DependencyCrawler {
                 }
                 node.setStatementSummary(stmtSummary);
 
-                // Overloaded member: stamp the arity discriminator so its nodeId is distinct.
-                if (isOverloaded && targetSub != null) {
-                    int pc = targetSub.getParameters() != null ? targetSub.getParameters().size() : 0;
-                    node.setOverloadParamCount(pc);
+                // Overloaded member: stamp the SIGNATURE discriminator (types when known, else the
+                // legacy arity count) so its nodeId is distinct — and identical to the one the
+                // call edge carries (both come from resolveOverload with the same inputs).
+                if (isOverloaded) {
+                    node.setOverloadSignature(itemOverloadDisc);
                 }
                 node.generateNodeId();
 
@@ -883,7 +979,15 @@ public class DependencyCrawler {
                     String srcObjForStore = item.packageName != null ? item.packageName : item.subprogramName;
                     String storedSource = downloader.getCachedSource(srcObjForStore);
                     if (storedSource != null) {
-                        nodeCache.put(visitKey, storedSource, node);
+                        ArtifactKey leaf = nodeCache.put(visitKey, storedSource, node);
+                        // Record this COMPLETE object in the idempotency registry (written once at
+                        // the end of the crawl) so the next crawl of the same scope can skip it
+                        // without any DB fetch. The node-cache leaf lets that skip restore the node.
+                        if (registry != null && leaf != null) {
+                            registry.record(visitKey, node.getSchema(), item.subprogramName,
+                                    node.getObjectType(),
+                                    downloader.getCatalogLastDdl(srcObjForStore), 1, leaf.leaf());
+                        }
                     }
                 }
 
@@ -915,9 +1019,9 @@ public class DependencyCrawler {
             }
         }
 
-        // Final flush for any names accumulated in the last BFS level
-        flushPendingResolve();
-        flushMissingBatch();
+        // Final flush for any names accumulated in the last BFS level — ONE catalog query for the
+        // remaining pending resolve/missing names (no per-name probes).
+        prepareLevelCatalog(Collections.emptyList());
 
         // Fail loud on an empty crawl — BEFORE any artifact for this analysis is written.
         //
@@ -934,6 +1038,13 @@ public class DependencyCrawler {
             throw new IllegalStateException(
                     "Crawled 0 sources — the database had nothing to analyze (is it up and does the "
                     + "schema contain objects?). Refusing to write an empty analysis.");
+        }
+
+        // Persist the idempotency registry ONCE for the whole crawl (the read happened when the
+        // registry was constructed). Placed AFTER the empty-crawl guard so a dead-DB crawl never
+        // records "complete" for objects it never analysed.
+        if (registry != null) {
+            registry.save();
         }
 
         // Write tables once after all nodes processed (was previously per-node — unnecessary rewrites)
@@ -953,7 +1064,8 @@ public class DependencyCrawler {
         if (chunkedWriter != null) {
             long tDiscover0 = System.nanoTime();
             try {
-                TriggerDiscoverer triggerDiscoverer = new TriggerDiscoverer(downloader.getConnManager(), schemaResolver);
+                TriggerDiscoverer triggerDiscoverer = new TriggerDiscoverer(
+                        downloader.getConnManager(), schemaResolver, downloader);
                 List<Map<String, Object>> dbTriggers = triggerDiscoverer.discover(tableInfoMap);
                 discoverNanos.addAndGet(System.nanoTime() - tDiscover0);
                 if (!dbTriggers.isEmpty()) {
@@ -1404,7 +1516,17 @@ public class DependencyCrawler {
     }
 
     private ParseResult downloadAndParse(String packageName, String subprogramName, String schema) {
-        return downloadAndParse(packageName, subprogramName, schema, false);
+        return downloadAndParse(packageName, subprogramName, schema, false, null);
+    }
+
+    /**
+     * W1: {@code overloadId} is a Postgres {@code pg_proc.oid} / DB2 {@code SPECIFICNAME} addressing
+     * ONE exact standalone overload, so its source is fetched individually instead of a name-based
+     * LIMIT 1. Null for every other case (all existing callers) — behaviour is then unchanged.
+     */
+    private ParseResult downloadAndParse(String packageName, String subprogramName, String schema,
+                                         String overloadId) {
+        return downloadAndParse(packageName, subprogramName, schema, false, overloadId);
     }
 
     /**
@@ -1412,9 +1534,10 @@ public class DependencyCrawler {
      *                    name instead of the all-types probe {@code downloadAny} does. Used by the
      *                    depth-0 entry fallback, which must not reinterpret a bare name that is
      *                    genuinely something else.
+     * @param overloadId  per-overload catalog id (Postgres oid / DB2 SPECIFICNAME), else null.
      */
     private ParseResult downloadAndParse(String packageName, String subprogramName, String schema,
-                                         boolean packageOnly) {
+                                         boolean packageOnly, String overloadId) {
         String objectName = packageName != null ? packageName : subprogramName;
         // Standalone objects: qualify the cache key by schema so same-named objects in
         // different schemas don't reuse each other's parse. The FETCH name is schema-qualified
@@ -1424,6 +1547,9 @@ public class DependencyCrawler {
         boolean isSqlServer = downloader.getConnManager() != null && downloader.getConnManager().isSqlServer();
         String fetchName = (standaloneWithSchema && isSqlServer) ? schema + "." + subprogramName : subprogramName;
         String cacheKey = (standaloneWithSchema ? (schema + "$" + subprogramName) : objectName).toUpperCase();
+        // Overloads share a name: keep each overload's parse separate so the second overload does
+        // not reuse the first's ParseResult. Content-addressed parseResultCache is unaffected.
+        if (overloadId != null) cacheKey = cacheKey + "#OVL:" + overloadId;
 
         // Fast-skip: confirmed absent from Oracle via prior ALL_OBJECTS batch check. Deliberately
         // bypassed for the entry package fallback: that is an explicit second attempt, and skipping
@@ -1454,6 +1580,14 @@ public class DependencyCrawler {
         } else if (packageOnly) {
             source = downloader.downloadPackageBody(fetchName);
             if (source == null) source = downloader.downloadPackageSpec(fetchName);
+        } else if (overloadId != null && downloader.getConnManager() != null
+                && downloader.getConnManager().isPostgres()) {
+            // Exact overload by oid — never a name-based LIMIT 1.
+            source = downloader.downloadPostgresSourceByOid(overloadId);
+        } else if (overloadId != null && downloader.getConnManager() != null
+                && downloader.getConnManager().isDB2()) {
+            // Exact overload by SPECIFICNAME.
+            source = downloader.downloadDb2SourceBySpecificName(overloadId, schema);
         } else {
             source = downloader.downloadAny(fetchName);
         }
@@ -1525,7 +1659,7 @@ public class DependencyCrawler {
      */
     private ParseResult tryPackageFallback(String name, String schema) {
         if (isPackageType(entryObjectType)) return null;
-        ParseResult asPackage = downloadAndParse(null, name, schema, true);
+        ParseResult asPackage = downloadAndParse(null, name, schema, true, null);
         if (asPackage == null || asPackage.getObjects() == null || asPackage.getObjects().isEmpty()) {
             return null;
         }
@@ -1761,28 +1895,55 @@ public class DependencyCrawler {
     }
 
     /**
-     * One batched ALL_OBJECTS query for the level returning owner / object_type / LAST_DDL_TIME for
-     * every object the level will fetch, chunked and run in parallel like {@link #queryObjectTypes}.
-     * Only issued for Oracle when a source cache is configured (otherwise it is pure overhead). The
-     * returned metadata is used ONLY to key/validate the source cache — it never feeds the serial
-     * parse path, so it cannot change the analysis output.
+     * The ONE catalog query per BFS level (central decision, dedup fix): the union of
+     * <ul>
+     *   <li>the level's own objects (owner / type / LAST_DDL, for the source-cache validation and
+     *       for priming the type map before the node-cache peek's negative probes),</li>
+     *   <li>names queued for the pending resolve batch (external calls awaiting an existence
+     *       check), and</li>
+     *   <li>standalone names queued by {@code enqueueExternalCalls} for the missing batch.</li>
+     * </ul>
+     * It replaces the previous up-to-three ALL_OBJECTS queries per level. Found names populate
+     * {@code knownObjectTypes} and, for pending-resolve names, {@code resolvedPresentObjects} plus
+     * the resolver's owner/type maps via {@link SchemaResolver#registerBatchResolution} — so the
+     * per-name {@code tryResolveFromDb} round-trips are gone. Absent pending names are marked
+     * missing; names in a failed chunk are re-queued for a later level rather than probed
+     * individually. Returns the level metadata for the source cache; empty on non-Oracle.
      */
-    private Map<String, String[]> fetchLevelCatalogMeta(Collection<BfsItem> level) {
+    private Map<String, String[]> prepareLevelCatalog(Collection<BfsItem> level) {
         Map<String, String[]> meta = new ConcurrentHashMap<>();
-        if (!downloader.hasSourceCache()) return meta;
-        if (downloader.getConnManager() == null || !downloader.getConnManager().isOracle()) return meta;
-        Set<String> names = new LinkedHashSet<>();
-        for (BfsItem it : level) {
-            String n = it.packageName != null ? it.packageName : it.subprogramName;
-            if (n != null && !n.isBlank()) names.add(n.toUpperCase());
+        Set<String> levelNames = new LinkedHashSet<>();
+        if (level != null) {
+            for (BfsItem it : level) {
+                String n = it.packageName != null ? it.packageName : it.subprogramName;
+                if (n != null && !n.isBlank()) levelNames.add(n.toUpperCase());
+            }
         }
+        Set<String> pendingResolve = drain(pendingResolveCheck);
+        Set<String> pendingMissing = drain(pendingMissingCheck);
+        Set<String> names = new LinkedHashSet<>(levelNames);
+        names.addAll(pendingResolve);
+        names.addAll(pendingMissing);
+        names.removeIf(n -> resolvedPresentObjects.contains(n)
+                || knownMissingObjects.contains(n)
+                || parseCache.containsKey(n));
         if (names.isEmpty()) return meta;
+
+        // Non-Oracle dialects have no ALL_OBJECTS; keep the previous "assume present" behaviour
+        // (the downloader's own catalog fetch will decide) and issue no query.
+        if (downloader.getConnManager() == null || !downloader.getConnManager().isOracle()) {
+            resolvedPresentObjects.addAll(pendingResolve);
+            resolvedPresentObjects.addAll(pendingMissing);
+            return meta;
+        }
+
         List<String> nameList = new ArrayList<>(names);
         List<List<String>> chunks = new ArrayList<>();
         int size = Math.max(1, catalogBatchSize);
         for (int i = 0; i < nameList.size(); i += size) {
             chunks.add(new ArrayList<>(nameList.subList(i, Math.min(i + size, nameList.size()))));
         }
+        Set<String> unresolved = ConcurrentHashMap.newKeySet();
         List<Runnable> tasks = new ArrayList<>(chunks.size());
         for (List<String> chunk : chunks) {
             tasks.add(() -> {
@@ -1797,7 +1958,8 @@ public class DependencyCrawler {
                             + "AND owner IN (" + buildSchemaInClause() + ") "
                             + "ORDER BY CASE object_type WHEN 'PACKAGE BODY' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 4 END";
                     downloader.getConnManager().incrementDbCalls();
-                    try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                    try (java.sql.PreparedStatement ps =
+                                 downloader.getConnManager().prepareStatement(conn, sql)) {
                         for (int j = 0; j < chunk.size(); j++) ps.setString(j + 1, chunk.get(j));
                         try (java.sql.ResultSet rs = ps.executeQuery()) {
                             while (rs.next()) {
@@ -1809,9 +1971,12 @@ public class DependencyCrawler {
                             }
                         }
                     }
+                    downloader.getConnManager().noteQuerySuccess();
                     downloader.getConnManager().returnToPool(conn);
                     conn = null;
                 } catch (Exception e) {
+                    unresolved.addAll(chunk);
+                    downloader.getConnManager().noteQueryFailure();
                     log.debug("[Crawler] level catalog-meta chunk failed: {}", e.getMessage());
                 } finally {
                     if (conn != null) downloader.getConnManager().closeAndDiscard(conn);
@@ -1819,7 +1984,42 @@ public class DependencyCrawler {
             });
         }
         fanOut(tasks, catalogParallelism);
+
+        // Prime the type map for EVERY found name (kills the 2-3 blind ALL_SOURCE probes per
+        // untyped function in the node-cache peek) and register owner/type from the batch's own
+        // rows so no per-name resolver query is needed.
+        for (Map.Entry<String, String[]> e : meta.entrySet()) {
+            String name = e.getKey();
+            String[] v = e.getValue();
+            if (v[1] != null) knownObjectTypes.put(name, v[1]);
+            if (pendingResolve.contains(name)) {
+                resolvedPresentObjects.add(name);
+                schemaResolver.registerBatchResolution(name, v[0], v[1]);
+            }
+        }
+        for (String n : names) {
+            if (unresolved.contains(n)) {
+                // Chunk failed: re-queue for a later level rather than probing individually.
+                if (pendingResolve.contains(n)) pendingResolveCheck.add(n);
+                if (pendingMissing.contains(n)) pendingMissingCheck.add(n);
+            } else if (!meta.containsKey(n)
+                    && (pendingResolve.contains(n) || pendingMissing.contains(n))) {
+                knownMissingObjects.add(n);
+            }
+        }
+        log.info("[Crawler] Level catalog: checked={} found={} pendingResolve={} pendingMissing={}",
+                names.size(), meta.size(), pendingResolve.size(), pendingMissing.size());
         return meta;
+    }
+
+    /** Drain a synchronized pending set into a plain snapshot. */
+    private static Set<String> drain(Set<String> pending) {
+        synchronized (pending) {
+            if (pending.isEmpty()) return Collections.emptySet();
+            Set<String> copy = new HashSet<>(pending);
+            pending.clear();
+            return copy;
+        }
     }
 
     /**
@@ -1838,9 +2038,17 @@ public class DependencyCrawler {
             String name = item.packageName != null ? item.packageName : item.subprogramName;
             if (name == null || name.isBlank()) continue;
             String upper = name.toUpperCase();
-            if (!seen.add(upper)) continue;
             if (isBuiltInPackage(upper) || knownMissingObjects.contains(upper)) continue;
             if (parseCache.containsKey(upper)) continue;
+            // Registry fast path: an unchanged, complete object needs no source fetch at all. This
+            // keeps the "no fetch" promise even though the level prefetch runs before the serial
+            // loop's own registry check. Skipped items do NOT claim the dedupe slot, so a sibling
+            // that does need fetching still gets its task.
+            if (registry != null && !forceRefresh) {
+                String baseKey = buildVisitKey(item.schema, item.packageName, item.subprogramName);
+                if (registry.isSkippablePrefix(baseKey, downloader.getCatalogLastDdl(upper))) continue;
+            }
+            if (!seen.add(upper)) continue;
             final String pkg = item.packageName;
             final String sub = item.subprogramName;
             final String schema = item.schema;
@@ -1907,73 +2115,10 @@ public class DependencyCrawler {
     }
 
     /**
-     * Fix C: Flush all accumulated unknown external-call names in ONE ALL_OBJECTS IN(...)
-     * query.  Names confirmed present in Oracle are added to resolvedPresentObjects so
-     * enqueueExternalCalls lets them through on the next BFS pass.
-     * Names absent are added to knownMissingObjects so they are skipped permanently.
-     * Called once per BFS depth advance — replaces ~270 individual tryResolveFromDb calls.
+     * Fix C (now folded into {@link #prepareLevelCatalog}): unknown external-call names are
+     * resolved by the ONE per-level ALL_OBJECTS query, which also registers their owner/type via
+     * {@link SchemaResolver#registerBatchResolution} — no per-name {@code tryResolveFromDb} calls.
      */
-    private void flushPendingResolve() {
-        if (pendingResolveCheck.isEmpty()) return;
-        Set<String> batch;
-        synchronized (pendingResolveCheck) {
-            if (pendingResolveCheck.isEmpty()) return;
-            batch = new HashSet<>(pendingResolveCheck);
-            pendingResolveCheck.clear();
-        }
-        // Skip names already resolved by prior batches or that have source in parseCache
-        batch.removeIf(n -> resolvedPresentObjects.contains(n)
-                || knownMissingObjects.contains(n)
-                || parseCache.containsKey(n));
-        if (batch.isEmpty()) return;
-
-        // MySQL / SQL Server have no ALL_OBJECTS — assume all pending call targets are present
-        if (downloader.getConnManager() != null
-                && (downloader.getConnManager().isMySQL() || downloader.getConnManager().isSqlServer() || downloader.getConnManager().isDB2() || downloader.getConnManager().isPostgres())) {
-            resolvedPresentObjects.addAll(batch);
-            return;
-        }
-
-        TypeLookup lookup = queryObjectTypes(batch);
-        Map<String, String> foundInOracle = lookup.found();
-        List<Runnable> resolveTasks = new ArrayList<>();
-        for (String name : batch) {
-            if (lookup.unresolved().contains(name)) continue;
-            String type = foundInOracle.get(name);
-            if (type != null) {
-                resolvedPresentObjects.add(name);
-                knownObjectTypes.put(name, type);
-                // Populate the schema map (already attempted-guarded inside). Run in parallel across
-                // the level — this was the per-procedure catalog query that dominated the crawl.
-                resolveTasks.add(() -> schemaResolver.tryResolveFromDb(name));
-            } else {
-                knownMissingObjects.add(name);
-            }
-        }
-        fanOut(resolveTasks, catalogParallelism);
-        log.info("[Crawler] PendingResolve flush: checked={} found={} missing={}",
-                batch.size(), foundInOracle.size(), batch.size() - foundInOracle.size());
-
-        // Any name whose chunk failed is retried individually (in parallel), so a transient catalog
-        // error never silently drops a valid call — mirrors the old per-name fallback.
-        Set<String> unresolved = lookup.unresolved();
-        if (!unresolved.isEmpty()) {
-            log.warn("[Crawler] flushPendingResolve: {} name(s) unresolved by batch, retrying individually", unresolved.size());
-            Map<String, Boolean> resolved = new ConcurrentHashMap<>();
-            List<Runnable> fallbackTasks = new ArrayList<>();
-            for (String name : unresolved) {
-                fallbackTasks.add(() -> resolved.put(name, schemaResolver.tryResolveFromDb(name)));
-            }
-            fanOut(fallbackTasks, catalogParallelism);
-            for (String name : unresolved) {
-                if (Boolean.TRUE.equals(resolved.get(name))) {
-                    resolvedPresentObjects.add(name);
-                } else {
-                    knownMissingObjects.add(name);
-                }
-            }
-        }
-    }
 
     /**
      * Fix B: After prefetchSources completes, every ParseResult in parseCache is available.
@@ -2279,14 +2424,14 @@ public class DependencyCrawler {
                                        String callerSchema,
                                        Queue<BfsItem> queue, List<FlowEdge> callGraph) {
         enqueueExternalCalls(calls, currentDepth, callerPackage, callerObject, callerSchema,
-                queue, callGraph, -1);
+                queue, callGraph, null);
     }
 
     private void enqueueExternalCalls(List<CallInfo> calls, int currentDepth,
                                        String callerPackage, String callerObject,
                                        String callerSchema,
                                        Queue<BfsItem> queue, List<FlowEdge> callGraph,
-                                       int callerOverloadArity) {
+                                       String callerOverloadDisc) {
         if (calls == null) return;
 
         String sourceObject = callerPackage != null ? callerPackage : callerObject;
@@ -2412,20 +2557,31 @@ public class DependencyCrawler {
             String targetSchema = crossSchemaOwner != null ? crossSchemaOwner
                     : ((targetPackage == null && call.getSchema() != null && !call.getSchema().isEmpty())
                         ? call.getSchema() : null);
-            // Overloaded target: the edge must carry the SAME arity discriminator as the
-            // callee node so it resolves to the correct overload (else edge → missing node).
-            boolean targetOverloaded = targetPackage != null && call.getArguments() >= 0
-                    && overloadCount(targetPackage, targetObject) > 1;
-            int edgeArity = targetOverloaded ? call.getArguments() : -1;
+            // Overloaded target: the edge must carry the SAME discriminator as the callee node so
+            // it resolves to the correct overload (else edge → missing node). Signature-based when
+            // the call's argument types are known, else the arity fallback — both computed exactly
+            // as the node side computes them.
+            String targetDisc;
+            String targetOverloadId = null;
+            if (targetPackage != null) {
+                targetDisc = resolveOverload(targetPackage, targetObject,
+                        call.getArguments(), call.getArgTypes());
+            } else {
+                StandaloneOverload so = resolveStandaloneOverload(targetObject, targetSchema,
+                        call.getArguments(), call.getArgTypes());
+                targetDisc = so != null ? so.disc : null;
+                if (so != null) targetOverloadId = so.oid != null ? so.oid : so.specificName;
+            }
+            boolean targetOverloaded = targetDisc != null;
 
             String visitKey = buildVisitKey(targetSchema, targetPackage, targetObject);
-            if (targetOverloaded) visitKey = visitKey + "#" + call.getArguments();
+            if (targetOverloaded) visitKey = visitKey + "#" + targetDisc;
             if (visited.contains(visitKey)) {
                 addCallEdge(callGraph, callerSchema, callerPackage, callerObject,
                         targetSchema != null ? targetSchema
                                 : (call.getSchema() != null ? call.getSchema() : callerSchema),
                         targetPackage, targetObject,
-                        call.getLine(), currentDepth, edgeArity, callerOverloadArity);
+                        call.getLine(), currentDepth, targetDisc, callerOverloadDisc);
                 continue;
             }
 
@@ -2433,7 +2589,7 @@ public class DependencyCrawler {
                     targetSchema != null ? targetSchema
                             : (call.getSchema() != null ? call.getSchema() : callerSchema),
                     targetPackage, targetObject,
-                    call.getLine(), currentDepth, edgeArity, callerOverloadArity);
+                    call.getLine(), currentDepth, targetDisc, callerOverloadDisc);
 
             // Pre-queue names for bulk ALL_OBJECTS existence check before download:
             //
@@ -2461,14 +2617,13 @@ public class DependencyCrawler {
                 }
             }
 
-            // Carry the ACTUAL call-site arg count on the work item (not edgeArity, which is
-            // -1 until the callee's package is parsed). The arity is only consulted at poll time
-            // when overloadCount confirms the member is overloaded — by which point the package
-            // is parsed — so an overloaded member reached first at a shallow depth still keys to
-            // its correct #N node instead of a duplicate arity-less node.
-            int itemArity = call.getArguments() >= 0 ? call.getArguments() : edgeArity;
+            // Carry the ACTUAL call-site arg count AND argument type hints on the work item. Package
+            // members re-derive the discriminator at poll time from those inputs (the callee package
+            // is parsed by then); STANDALONE Postgres/DB2 overloads carry the resolved discriminator
+            // and per-overload id, since they are resolved against the routine catalog (not a parse).
             queue.add(new BfsItem(targetPackage, targetObject, targetSchema, currentDepth + 1,
-                    callerPackage, callerObject, call.getLine(), itemArity));
+                    callerPackage, callerObject, call.getLine(), call.getArguments(), call.getArgTypes(),
+                    targetDisc, targetOverloadId));
         }
     }
 
@@ -2480,15 +2635,15 @@ public class DependencyCrawler {
                               String toSchema, String toPackage, String toObject,
                               int line, int depth) {
         addCallEdge(callGraph, fromSchema, fromPackage, fromObject,
-                toSchema, toPackage, toObject, line, depth, -1, -1);
+                toSchema, toPackage, toObject, line, depth, null, null);
     }
 
     private void addCallEdge(List<FlowEdge> callGraph,
                               String fromSchema, String fromPackage, String fromObject,
                               String toSchema, String toPackage, String toObject,
-                              int line, int depth, int toOverloadArity) {
+                              int line, int depth, String toOverloadDisc) {
         addCallEdge(callGraph, fromSchema, fromPackage, fromObject,
-                toSchema, toPackage, toObject, line, depth, toOverloadArity, -1);
+                toSchema, toPackage, toObject, line, depth, toOverloadDisc, null);
     }
 
     /**
@@ -2496,19 +2651,20 @@ public class DependencyCrawler {
      * ORACLE~ORACLEDEMO~LOCAL~ERP_USP_RUN_CYCLE corpus): an overloaded node (e.g.
      * {@code COMPUTE_TOTAL}, crawled as distinct {@code __1}/{@code __2} arity variants) that is
      * itself the SOURCE of an outgoing call previously had its {@code fromNodeId} built with no
-     * arity suffix at all — {@code buildNodeId(fromSchema, fromPkg, fromObject)} alone — which
-     * matches no real node (only the {@code __N} variants exist). That phantom id had no key in
-     * {@code node_id_map.json} either, so it was unresolvable downstream, and any "never appears
+     * discriminator suffix at all — {@code buildNodeId(fromSchema, fromPkg, fromObject)} alone —
+     * which matches no real node (only the {@code __N} variants exist). That phantom id had no key
+     * in {@code node_id_map.json} either, so it was unresolvable downstream, and any "never appears
      * as a to" root-detection heuristic (client-side call-graph rendering) misclassified it as a
-     * second graph root. Fixed by mirroring the existing {@code toOverloadArity} handling on the
-     * FROM side via this new {@code fromOverloadArity} parameter, fed by the current BFS item's
-     * own already-computed {@code isOverloaded}/{@code item.argCount} (the node being processed
-     * IS the "from" side for every edge emitted while processing it).
+     * second graph root. Fixed by mirroring the {@code toOverloadDisc} handling on the FROM side
+     * via this {@code fromOverloadDisc} parameter, fed by the current BFS item's own already-
+     * computed overload discriminator (the node being processed IS the "from" side for every edge
+     * emitted while processing it). W1: the discriminator is now a SIGNATURE (types when known,
+     * else the arity count) — the string form keeps both cases on one code path.
      */
     private void addCallEdge(List<FlowEdge> callGraph,
                               String fromSchema, String fromPackage, String fromObject,
                               String toSchema, String toPackage, String toObject,
-                              int line, int depth, int toOverloadArity, int fromOverloadArity) {
+                              int line, int depth, String toOverloadDisc, String fromOverloadDisc) {
         FlowEdge edge = new FlowEdge();
         edge.setFromSchema(fromSchema);
         edge.setFromPackage(fromPackage);
@@ -2531,12 +2687,16 @@ public class DependencyCrawler {
             }
         }
         String fromNodeId = buildNodeId(fromSchema, fromPkg, fromObject);
-        if (fromOverloadArity >= 0) fromNodeId = fromNodeId + "__" + fromOverloadArity;
+        if (fromOverloadDisc != null && !fromOverloadDisc.isEmpty()) {
+            fromNodeId = fromNodeId + "__" + fromOverloadDisc;
+        }
         edge.setFromNodeId(fromNodeId);
-        // Overloaded target: append the arity discriminator so this edge points at the
-        // matching overload node (buildShortId appends the same "__<paramCount>").
+        // Overloaded target: append the SIGNATURE discriminator so this edge points at the
+        // matching overload node (buildShortId appends the same "__<signature>").
         String toNodeId = buildNodeId(toSchema, toPackage, toObject);
-        if (toOverloadArity >= 0) toNodeId = toNodeId + "__" + toOverloadArity;
+        if (toOverloadDisc != null && !toOverloadDisc.isEmpty()) {
+            toNodeId = toNodeId + "__" + toOverloadDisc;
+        }
         edge.setToNodeId(toNodeId);
         callGraph.add(edge);
     }
@@ -2603,7 +2763,17 @@ public class DependencyCrawler {
     }
 
     private int overloadCount(String packageName, String subName) {
-        if (packageName == null || subName == null) return 0;
+        return overloadsOf(packageName, subName).size();
+    }
+
+    /**
+     * All subprograms of the given name in the ALREADY-PARSED package (parsing on demand from the
+     * prefetched source when the member is reached before its package's own BFS node, so overload
+     * detection is order-independent). Shared by {@link #overloadCount} and the W1 signature
+     * resolver so both see the identical overload set.
+     */
+    private List<SubprogramInfo> overloadsOf(String packageName, String subName) {
+        if (packageName == null || subName == null) return Collections.emptyList();
         ParseResult pr = parseCache.get(packageName.toUpperCase());
         if (pr == null) {
             // Not parsed yet (member reached before its package's BFS node). Parse the already
@@ -2615,19 +2785,125 @@ public class DependencyCrawler {
                     pr = parseDialect(src, packageName);
                     if (pr != null) parseCache.put(packageName.toUpperCase(), pr);
                 } catch (Exception e) {
-                    return 0;
+                    return Collections.emptyList();
                 }
             }
         }
-        if (pr == null || pr.getObjects() == null) return 0;
-        int n = 0;
+        if (pr == null || pr.getObjects() == null) return Collections.emptyList();
+        List<SubprogramInfo> out = new ArrayList<>();
         for (ParsedObject o : pr.getObjects()) {
             if (o.getSubprograms() == null) continue;
             for (SubprogramInfo s : o.getSubprograms()) {
-                if (s.getName() != null && s.getName().equalsIgnoreCase(subName)) n++;
+                if (s.getName() != null && s.getName().equalsIgnoreCase(subName)) out.add(s);
             }
         }
-        return n;
+        return out;
+    }
+
+    /**
+     * W1 overload discriminator for a package member (null when not genuinely overloaded). Uses the
+     * call's argument types for an exact-signature match when the grammar supplied them, else
+     * arity, else first match — the last two counted into {@link #OVERLOAD_ARITY_FALLBACKS}/
+     * {@link #OVERLOAD_FIRST_MATCH_FALLBACKS}.
+     */
+    private String resolveOverload(String packageName, String subName, int argCount, List<String> argTypes) {
+        return FlowNode.resolveOverloadDiscriminator(overloadsOf(packageName, subName), argCount, argTypes,
+                OVERLOAD_ARITY_FALLBACKS, OVERLOAD_FIRST_MATCH_FALLBACKS);
+    }
+
+    /**
+     * Resolved per-overload identity for a STANDALONE Postgres/DB2 routine (W1). {@code disc} is the
+     * node-id discriminator (Postgres identity-arguments signature / DB2 SPECIFICNAME); {@code oid}
+     * / {@code specificName} address that exact overload's source for a per-overload fetch.
+     */
+    private static class StandaloneOverload {
+        final String disc;
+        final String oid;
+        final String specificName;
+        StandaloneOverload(String disc, String oid, String specificName) {
+            this.disc = disc;
+            this.oid = oid;
+            this.specificName = specificName;
+        }
+    }
+
+    /**
+     * Resolve a STANDALONE (no package) Postgres/DB2 routine's overload identity from the cached
+     * routine catalog. Returns null when the name has 0/1 catalog entries (not overloaded) or the
+     * dialect has no overloading. Postgres keys by identity-arguments signature (exact type match
+     * when the call supplied types, else arity, else first match); DB2 keys by SPECIFICNAME
+     * (first match, counted — the catalog carries no call-matchable arity).
+     */
+    private StandaloneOverload resolveStandaloneOverload(String name, String schema,
+            int argCount, List<String> argTypes) {
+        DbConnectionManager cm = downloader.getConnManager();
+        if (cm == null || name == null) return null;
+        if (cm.isPostgres()) {
+            List<SourceFetchStrategy.ObjectRef> mine = new ArrayList<>();
+            for (SourceFetchStrategy.ObjectRef r : downloader.listPostgresRoutines()) {
+                if (r.name != null && r.name.equalsIgnoreCase(name)
+                        && (schema == null || schema.isEmpty()
+                            || (r.schema != null && r.schema.equalsIgnoreCase(schema)))) {
+                    mine.add(r);
+                }
+            }
+            if (mine.size() <= 1) return null;
+            String want = FlowNode.allTypesKnown(argTypes)
+                    ? FlowNode.signatureOfTypes(argTypes) : null;
+            SourceFetchStrategy.ObjectRef pick = null;
+            if (want != null) {
+                for (SourceFetchStrategy.ObjectRef r : mine) {
+                    if (want.equals(FlowNode.sanitizeType(r.identityArgs))) { pick = r; break; }
+                }
+            }
+            if (pick == null) {
+                if (argCount < 0) return null;
+                OVERLOAD_ARITY_FALLBACKS.incrementAndGet();
+                List<SourceFetchStrategy.ObjectRef> byArity = new ArrayList<>();
+                for (SourceFetchStrategy.ObjectRef r : mine) {
+                    if (identityArgCount(r.identityArgs) == argCount) byArity.add(r);
+                }
+                if (byArity.size() == 1) {
+                    pick = byArity.get(0);
+                } else {
+                    OVERLOAD_FIRST_MATCH_FALLBACKS.incrementAndGet();
+                    pick = byArity.isEmpty() ? mine.get(0) : byArity.get(0);
+                }
+            }
+            String disc = FlowNode.sanitizeType(pick.identityArgs);
+            if (disc == null) disc = "NONE";
+            return new StandaloneOverload(disc, pick.oid, null);
+        }
+        if (cm.isDB2()) {
+            List<SourceFetchStrategy.ObjectRef> mine = new ArrayList<>();
+            for (SourceFetchStrategy.ObjectRef r : downloader.listDb2Routines()) {
+                if (r.name != null && r.name.equalsIgnoreCase(name)
+                        && (schema == null || schema.isEmpty()
+                            || (r.schema != null && r.schema.equalsIgnoreCase(schema)))) {
+                    mine.add(r);
+                }
+            }
+            if (mine.size() <= 1) return null;
+            OVERLOAD_FIRST_MATCH_FALLBACKS.incrementAndGet();
+            SourceFetchStrategy.ObjectRef pick = mine.get(0);
+            String disc = FlowNode.sanitizeType(pick.specificName);
+            if (disc == null) disc = "NONE";
+            return new StandaloneOverload(disc, null, pick.specificName);
+        }
+        return null;
+    }
+
+    /** Number of top-level (outside parens) comma-separated arguments in a Postgres identity-args list. */
+    private static int identityArgCount(String identityArgs) {
+        if (identityArgs == null || identityArgs.isBlank()) return 0;
+        int depth = 0, count = 1;
+        for (int i = 0; i < identityArgs.length(); i++) {
+            char c = identityArgs.charAt(i);
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 0) count++;
+        }
+        return count;
     }
 
     /**
@@ -2862,19 +3138,33 @@ public class DependencyCrawler {
         final String callerObject;
         final int callLine;
         final int argCount;           // call-site argument count (for overload resolution); -1 = unknown
+        final List<String> argTypes;  // call-site argument type hints (W1); null/empty = unknown
+        final String overloadDisc;    // resolved standalone overload discriminator (Postgres/DB2), else null
+        final String overloadId;      // Postgres oid / DB2 SPECIFICNAME for that overload, else null
 
         BfsItem(String packageName, String subprogramName, int depth,
                 String callerPackage, String callerObject, int callLine) {
-            this(packageName, subprogramName, null, depth, callerPackage, callerObject, callLine, -1);
+            this(packageName, subprogramName, null, depth, callerPackage, callerObject, callLine, -1, null, null, null);
         }
 
         BfsItem(String packageName, String subprogramName, String schema, int depth,
                 String callerPackage, String callerObject, int callLine) {
-            this(packageName, subprogramName, schema, depth, callerPackage, callerObject, callLine, -1);
+            this(packageName, subprogramName, schema, depth, callerPackage, callerObject, callLine, -1, null, null, null);
         }
 
         BfsItem(String packageName, String subprogramName, String schema, int depth,
                 String callerPackage, String callerObject, int callLine, int argCount) {
+            this(packageName, subprogramName, schema, depth, callerPackage, callerObject, callLine, argCount, null, null, null);
+        }
+
+        BfsItem(String packageName, String subprogramName, String schema, int depth,
+                String callerPackage, String callerObject, int callLine, int argCount, List<String> argTypes) {
+            this(packageName, subprogramName, schema, depth, callerPackage, callerObject, callLine, argCount, argTypes, null, null);
+        }
+
+        BfsItem(String packageName, String subprogramName, String schema, int depth,
+                String callerPackage, String callerObject, int callLine, int argCount, List<String> argTypes,
+                String overloadDisc, String overloadId) {
             this.packageName = packageName;
             this.subprogramName = subprogramName;
             this.schema = schema;
@@ -2883,6 +3173,9 @@ public class DependencyCrawler {
             this.callerObject = callerObject;
             this.callLine = callLine;
             this.argCount = argCount;
+            this.argTypes = argTypes;
+            this.overloadDisc = overloadDisc;
+            this.overloadId = overloadId;
         }
     }
 }

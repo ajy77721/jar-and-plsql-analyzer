@@ -238,7 +238,7 @@ public class SchemaResolver {
             log.info("[SchemaResolver] Q1 running: {}.{}", seed.owner, seed.objectName);
 
             int rowCount = 0;
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
                 ps.setString(1, seed.owner);
                 ps.setString(2, seed.objectName);
                 connManager.incrementDbCalls();
@@ -297,20 +297,35 @@ public class SchemaResolver {
                 + " objects in " + (System.currentTimeMillis() - t) + "ms");
 
         // ── Step 3: Q3 — Reverse deps (who calls our seeds) ──
+        // ONE batched query for all seeds (chunked) instead of one query per seed: the old loop
+        // fired a separate ALL_DEPENDENCIES lookup for every seed object, which dominated the
+        // resolver on packages with many seeds.
         t = System.currentTimeMillis();
+        int reverseRows = 0;
+        List<SeedInfo> q3Seeds = new ArrayList<>();
         for (SeedInfo seed : seeds) {
             String refType = seed.objectType.contains("PACKAGE") ? "PACKAGE" : seed.objectType;
-
-            String sql = "SELECT owner AS caller_schema, name AS caller_name, type AS caller_type "
+            q3Seeds.add(new SeedInfo(seed.objectName, seed.owner, refType));
+        }
+        for (int batch = 0; batch < q3Seeds.size(); batch += 100) {
+            List<SeedInfo> chunk = q3Seeds.subList(batch, Math.min(batch + 100, q3Seeds.size()));
+            StringBuilder tuples = new StringBuilder();
+            for (int i = 0; i < chunk.size(); i++) {
+                if (i > 0) tuples.append(",");
+                tuples.append("(?,?,?)");
+            }
+            String sql = "SELECT referenced_owner, referenced_name, referenced_type, "
+                    + "owner AS caller_schema, name AS caller_name, type AS caller_type "
                     + "FROM ALL_DEPENDENCIES "
-                    + "WHERE referenced_owner = ? AND referenced_name = ? AND referenced_type = ? "
-                    + "ORDER BY owner, type, name";
-
-            int count = 0;
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, seed.owner);
-                ps.setString(2, seed.objectName);
-                ps.setString(3, refType);
+                    + "WHERE (referenced_owner, referenced_name, referenced_type) IN (" + tuples + ") "
+                    + "ORDER BY referenced_owner, referenced_name, owner, type, name";
+            try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
+                int p = 1;
+                for (SeedInfo seed : chunk) {
+                    ps.setString(p++, seed.owner);
+                    ps.setString(p++, seed.objectName);
+                    ps.setString(p++, seed.objectType);
+                }
                 connManager.incrementDbCalls();
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
@@ -331,16 +346,21 @@ public class SchemaResolver {
                         row.put("callerSchema", upperSchema);
                         row.put("callerName", upper);
                         row.put("callerType", normType);
-                        row.put("referencedObject", seed.objectName);
-                        row.put("referencedSchema", seed.owner);
+                        row.put("referencedObject", rs.getString("referenced_name") == null
+                                ? null : rs.getString("referenced_name").toUpperCase());
+                        row.put("referencedSchema", rs.getString("referenced_owner") == null
+                                ? null : rs.getString("referenced_owner").toUpperCase());
                         reverseDepResults.add(row);
-                        count++;
+                        reverseRows++;
                     }
                 }
+                connManager.noteQuerySuccess();
+            } catch (SQLException e) {
+                connManager.noteQueryFailure();
+                log.warn("[SchemaResolver] Q3 batched reverse-dep lookup failed: " + e.getMessage());
             }
-            log.info("[SchemaResolver] Q3 reverse deps for " + seed.objectName + ": " + count);
         }
-        log.info("[SchemaResolver] Step 3 (reverse deps): "
+        log.info("[SchemaResolver] Step 3 (reverse deps): " + reverseRows + " rows in "
                 + (System.currentTimeMillis() - t) + "ms");
 
         // ── Step 4: Gap-fill unresolved names (batched ALL_OBJECTS) ──
@@ -391,7 +411,7 @@ public class SchemaResolver {
 
             Map<String, SeedInfo> bestMatch = new LinkedHashMap<>();
             connManager.incrementDbCalls();
-            try (Statement stmt = conn.createStatement();
+            try (Statement stmt = connManager.createStatement(conn, sql);
                  ResultSet rs = stmt.executeQuery(sql)) {
                 while (rs.next()) {
                     String owner   = rs.getString("OWNER").toUpperCase();
@@ -444,7 +464,7 @@ public class SchemaResolver {
                     + "  'TRIGGER','TYPE','SYNONYM')";
 
             connManager.incrementDbCalls();
-            try (Statement stmt = conn.createStatement();
+            try (Statement stmt = connManager.createStatement(conn, sql);
                  ResultSet rs = stmt.executeQuery(sql)) {
                 while (rs.next()) {
                     String owner = rs.getString("OWNER").toUpperCase();
@@ -484,7 +504,7 @@ public class SchemaResolver {
                     + "ORDER BY d.OWNER, d.NAME";
 
             connManager.incrementDbCalls();
-            try (Statement stmt = conn.createStatement();
+            try (Statement stmt = connManager.createStatement(conn, sql);
                  ResultSet rs = stmt.executeQuery(sql)) {
                 while (rs.next()) {
                     String owner   = rs.getString("OWNER").toUpperCase();
@@ -503,6 +523,29 @@ public class SchemaResolver {
 
     public List<String> getConfiguredSchemas() {
         return configuredSchemas;
+    }
+
+    /**
+     * Record an owner/type for a name that was resolved by a BATCHED catalog query elsewhere
+     * (e.g. DependencyCrawler's level metadata), so the resolver never needs a per-name
+     * {@code tryResolveFromDb} round-trip to learn it. Additive and idempotent: an existing
+     * schema mapping is never overwritten, and the type uses rank precedence so a VIEW/MV is
+     * never downgraded to TABLE.
+     */
+    public void registerBatchResolution(String objectName, String owner, String objectType) {
+        if (objectName == null || objectName.isBlank()) return;
+        String name = objectName.toUpperCase().trim();
+        if (name.contains(".")) name = name.split("\\.", 2)[1];
+        if (owner != null && !owner.isBlank()) {
+            objectToSchema.putIfAbsent(name, owner.toUpperCase());
+        }
+        if (objectType != null && !objectType.isBlank()) {
+            String norm = objectType.toUpperCase().replace(" ", "_");
+            putType(name, norm);
+            if (owner != null && !owner.isBlank()) {
+                typeQualifiedToSchema.putIfAbsent(norm + "." + name, owner.toUpperCase());
+            }
+        }
     }
 
     // Cache of (OWNER|OBJECT) → present? for cross-schema standalone-object probes.
@@ -534,7 +577,7 @@ public class SchemaResolver {
                     + "WHERE OWNER = ? AND OBJECT_NAME = ? "
                     + "AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION') AND ROWNUM = 1";
             connManager.incrementDbCalls();
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
                 ps.setString(1, o);
                 ps.setString(2, n);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -556,6 +599,7 @@ public class SchemaResolver {
         } catch (SQLException e) {
             connManager.closeAndDiscard(conn);
             conn = null;
+            connManager.noteQueryFailure();
             log.warn("[SchemaResolver] Foreign-owner probe failed for {}.{}: {}", o, n, e.getMessage());
         } finally {
             if (conn != null) connManager.closeAndDiscard(conn);
@@ -670,7 +714,7 @@ public class SchemaResolver {
                 if (sql == null) return;   // dialect has no usable catalog — nothing to resolve
 
                 connManager.incrementDbCalls();
-                try (Statement stmt = conn.createStatement();
+                try (Statement stmt = connManager.createStatement(conn, sql);
                      ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
                         String owner = rs.getString("OWNER").toUpperCase();
@@ -694,6 +738,7 @@ public class SchemaResolver {
         } catch (SQLException e) {
             connManager.closeAndDiscard(conn);
             conn = null;
+            connManager.noteQueryFailure();
             log.info("[SchemaResolver] Batch table lookup failed: " + e.getMessage());
         } finally {
             if (conn != null) connManager.closeAndDiscard(conn);
@@ -841,7 +886,7 @@ public class SchemaResolver {
         try {
             conn = connManager.getAnyConnection();
             connManager.incrementDbCalls();
-            try (java.sql.Statement st = conn.createStatement();
+            try (java.sql.Statement st = connManager.createStatement(conn, sql);
                  java.sql.ResultSet rs = st.executeQuery(sql)) {
                 while (rs.next()) {
                     String n = rs.getString("n");
@@ -854,6 +899,7 @@ public class SchemaResolver {
         } catch (java.sql.SQLException e) {
             connManager.closeAndDiscard(conn);
             conn = null;
+            connManager.noteQueryFailure();
             log.info("[SchemaResolver] batchResolveObjectTypes failed (non-fatal): " + e.getMessage());
         } finally {
             if (conn != null) connManager.closeAndDiscard(conn);
@@ -1010,7 +1056,7 @@ public class SchemaResolver {
                     + "AND ROWNUM = 1";
             connManager.incrementDbCalls();
             long t0 = System.currentTimeMillis();
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
                 ps.setString(1, upper);
                 try (ResultSet rs = ps.executeQuery()) {
                     long elapsed = System.currentTimeMillis() - t0;
@@ -1034,6 +1080,7 @@ public class SchemaResolver {
         } catch (SQLException e) {
             connManager.closeAndDiscard(conn);
             conn = null;
+            connManager.noteQueryFailure();
             log.warn("[SchemaResolver] On-demand lookup failed for {}: {}", upper, e.getMessage());
         } finally {
             if (conn != null) connManager.closeAndDiscard(conn);

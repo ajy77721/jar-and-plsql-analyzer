@@ -28,6 +28,25 @@ public interface SourceFetchStrategy {
     java.util.List<ObjectRef> listObjects(Connection conn, String schema) throws SQLException;
 
     /**
+     * Fetch routine source by its catalog OID (PostgreSQL {@code pg_proc.oid}). This is how a
+     * specific OVERLOAD is addressed unambiguously — the name-based {@link #fetchSource} can only
+     * return one arbitrary overload. Dialects without a per-overload object id return null.
+     */
+    default String fetchSourceByOid(Connection conn, String oid) throws SQLException {
+        return null;
+    }
+
+    /**
+     * Fetch routine source by its catalog-unique specific name (DB2 {@code SYSCAT.ROUTINES.
+     * SPECIFICNAME}), which distinguishes overloads that share a ROUTINENAME. Dialects without a
+     * specific name return null.
+     */
+    default String fetchSourceBySpecificName(Connection conn, String specificName, String schema)
+            throws SQLException {
+        return null;
+    }
+
+    /**
      * True when the fetched {@code source} looks truncated (cut off mid-body) for THIS dialect's
      * own fetch mechanism, meaning the parser's errors should be suppressed rather than reported.
      * Each dialect decides this on its own — there is deliberately no shared/cross-dialect logic:
@@ -41,11 +60,25 @@ public interface SourceFetchStrategy {
         public final String name;
         public final String type;
         public final String schema;
+        /** PostgreSQL {@code pg_proc.oid} (as a string), else null. Addresses one exact overload. */
+        public final String oid;
+        /** PostgreSQL {@code pg_get_function_identity_arguments(oid)} — the overload's signature. */
+        public final String identityArgs;
+        /** DB2 {@code SYSCAT.ROUTINES.SPECIFICNAME} — unique per overload, else null. */
+        public final String specificName;
 
         public ObjectRef(String name, String type, String schema) {
-            this.name   = name;
-            this.type   = type;
-            this.schema = schema;
+            this(name, type, schema, null, null, null);
+        }
+
+        public ObjectRef(String name, String type, String schema,
+                         String oid, String identityArgs, String specificName) {
+            this.name         = name;
+            this.type         = type;
+            this.schema       = schema;
+            this.oid          = oid;
+            this.identityArgs = identityArgs;
+            this.specificName = specificName;
         }
 
         @Override public String toString() {

@@ -62,7 +62,15 @@ public class FlowNode {
      * every non-package node.
      */
     private List<VariableInfo> packageVariables = new ArrayList<>();
-    private int overloadParamCount = -1;   // >=0 only for overloaded package members
+    private int overloadParamCount = -1;   // legacy arity fallback; >=0 only for overloaded package members
+    /**
+     * Signature-based overload discriminator (W1): the sanitized parameter-TYPE list, optionally
+     * kind-prefixed ({@code FUNCTION_}/{@code PROCEDURE_}) when the same name is overloaded across
+     * both kinds. Appended to the short id after {@code __} so same-arity-different-type overloads
+     * resolve to DISTINCT nodes (the legacy {@link #overloadParamCount} arity suffix is kept as the
+     * fallback when types are unknown). Null for non-overloaded nodes → their ids stay byte-identical.
+     */
+    private String overloadSignature;
     private boolean autonomousTransaction; // PRAGMA AUTONOMOUS_TRANSACTION (Oracle)
     /**
      * Populated ONLY when this node is a package-as-entry-point aggregate (a bare package name
@@ -77,6 +85,20 @@ public class FlowNode {
 
     public int getOverloadParamCount() { return overloadParamCount; }
     public void setOverloadParamCount(int overloadParamCount) { this.overloadParamCount = overloadParamCount; }
+    public String getOverloadSignature() { return overloadSignature; }
+    public void setOverloadSignature(String overloadSignature) { this.overloadSignature = overloadSignature; }
+
+    /**
+     * The overload discriminator appended to the node id WITHOUT the leading {@code __}, or null
+     * when this node is not a genuine overload. Signature-based when known, else the legacy arity
+     * count. Kept as the single source of truth for both {@link #buildShortId()} and
+     * {@code ChunkedFlowWriter}'s edge-reconciliation so the two can never drift.
+     */
+    public String getOverloadDiscriminator() {
+        if (overloadSignature != null && !overloadSignature.isEmpty()) return overloadSignature;
+        if (overloadParamCount >= 0) return String.valueOf(overloadParamCount);
+        return null;
+    }
 
     public String getNodeId() { return nodeId; }
     public void setNodeId(String nodeId) { this.nodeId = nodeId; }
@@ -158,11 +180,124 @@ public class FlowNode {
         if (schema != null && !schema.isEmpty()) sb.append(schema);
         if (packageName != null && !packageName.isEmpty()) sb.append("$").append(packageName);
         if (objectName != null && !objectName.isEmpty()) sb.append("$").append(objectName);
-        // Overloaded package members (same name, different arity) get a param-count
-        // discriminator so they resolve to DISTINCT nodes instead of overwriting each
-        // other. Only set for genuine overloads → non-overloaded ids stay byte-identical.
-        if (overloadParamCount >= 0) sb.append("__").append(overloadParamCount);
+        // Overloaded package members get a discriminator so they resolve to DISTINCT nodes
+        // instead of overwriting each other: the parameter-TYPE signature when known
+        // (e.g. __NUM_VARCHAR2, or __FUNCTION_NUM for a FUNCTION/PROCEDURE same-name pair),
+        // else the legacy param-count (__2). Only set for genuine overloads → non-overloaded
+        // ids stay byte-identical.
+        String overloadDisc = getOverloadDiscriminator();
+        if (overloadDisc != null) sb.append("__").append(overloadDisc);
         return sb.toString().toUpperCase().replaceAll("[^A-Z0-9_$]", "_");
+    }
+
+    // ── Overload signature helpers (W1) ──────────────────────────────────────────────────────
+    // Pure, DB-free statics so the resolution rules are unit-testable without a crawler/parse.
+
+    /** Sanitize a declared parameter type to an id-safe token (NUMBER(10,2) → NUMBER_10_2). */
+    public static String sanitizeType(String type) {
+        if (type == null || type.isBlank()) return null;
+        String s = type.toUpperCase().replaceAll("[^A-Z0-9]", "_").replaceAll("_+", "_");
+        s = s.replaceAll("^_+", "").replaceAll("_+$", "");
+        return s.isEmpty() ? null : s;
+    }
+
+    /** True when the list is non-empty and every entry is a known (non-null, non-blank) type. */
+    public static boolean allTypesKnown(List<String> types) {
+        if (types == null || types.isEmpty()) return false;
+        for (String t : types) {
+            if (t == null || t.isBlank()) return false;
+        }
+        return true;
+    }
+
+    /** Join a list of raw type expressions into a signature token, or null when none is known. */
+    public static String signatureOfTypes(List<String> types) {
+        if (types == null || types.isEmpty()) return "NONE";
+        StringBuilder sb = new StringBuilder();
+        boolean any = false;
+        for (String t : types) {
+            String s = sanitizeType(t);
+            if (s == null) s = "UNKNOWN"; else any = true;
+            if (sb.length() > 0) sb.append("_");
+            sb.append(s);
+        }
+        return any ? sb.toString() : null;
+    }
+
+    /** The parameter-type signature of a subprogram, or null when NO parameter type is known. */
+    public static String typeSignature(List<ParameterInfo> params) {
+        if (params == null || params.isEmpty()) return "NONE";
+        List<String> types = new ArrayList<>(params.size());
+        for (ParameterInfo p : params) types.add(p == null ? null : p.getDataType());
+        return signatureOfTypes(types);
+    }
+
+    /** FUNCTION / PROCEDURE / null, normalized from a subprogram's declared type. */
+    public static String kindOf(SubprogramInfo sub) {
+        if (sub == null || sub.getType() == null) return null;
+        String u = sub.getType().toUpperCase();
+        if (u.contains("FUNCTION")) return "FUNCTION";
+        if (u.contains("PROCEDURE")) return "PROCEDURE";
+        return null;
+    }
+
+    /** True when a same-named overload set contains BOTH a function and a procedure. */
+    public static boolean mixedKinds(List<SubprogramInfo> subs) {
+        boolean fn = false, pr = false;
+        for (SubprogramInfo s : subs) {
+            String k = kindOf(s);
+            if ("FUNCTION".equals(k)) fn = true;
+            else if ("PROCEDURE".equals(k)) pr = true;
+        }
+        return fn && pr;
+    }
+
+    /** The discriminator for one overload: kind-prefixed type signature, else kind-prefixed arity. */
+    public static String discriminatorFor(SubprogramInfo sub, boolean kindMixed) {
+        String sig = typeSignature(sub.getParameters());
+        String kind = kindMixed ? kindOf(sub) : null;
+        String base = sig != null ? sig : String.valueOf(sub.getParameters() == null ? 0 : sub.getParameters().size());
+        return kind != null ? kind + "_" + base : base;
+    }
+
+    /**
+     * Resolve the overload discriminator for a call/node, mirroring the crawler's own selection
+     * order. Chain: exact signature (when the grammar supplied argument types) → arity → first
+     * match. The latter two are "fallbacks" and are counted into the supplied counters (null-safe),
+     * mirroring the visitor's {@code AtomicLong} fallback-counter pattern.
+     *
+     * @return the discriminator, or null when the name is not genuinely overloaded (or the arity is
+     *         unknown AND no argument types were given — the legacy no-split behaviour).
+     */
+    public static String resolveOverloadDiscriminator(List<SubprogramInfo> overloads, int argCount,
+            List<String> argTypes, java.util.concurrent.atomic.AtomicLong arityFallbacks,
+            java.util.concurrent.atomic.AtomicLong firstMatchFallbacks) {
+        if (overloads == null || overloads.size() <= 1) return null;
+        boolean mixed = mixedKinds(overloads);
+
+        // 1. exact signature — only when every argument type is known.
+        String want = allTypesKnown(argTypes) ? signatureOfTypes(argTypes) : null;
+        if (want != null) {
+            for (SubprogramInfo s : overloads) {
+                if (want.equals(typeSignature(s.getParameters()))) return discriminatorFor(s, mixed);
+            }
+        }
+
+        // Legacy behaviour: an unknown arity (and no types) never splits — keeps ids byte-identical.
+        if (argCount < 0) return null;
+
+        // 2. arity.
+        if (arityFallbacks != null) arityFallbacks.incrementAndGet();
+        List<SubprogramInfo> byArity = new ArrayList<>();
+        for (SubprogramInfo s : overloads) {
+            if (s.getParameters() != null && s.getParameters().size() == argCount) byArity.add(s);
+        }
+        if (byArity.size() == 1) return discriminatorFor(byArity.get(0), mixed);
+
+        // 3. first match (same arity is ambiguous, or no overload matches this arity).
+        if (firstMatchFallbacks != null) firstMatchFallbacks.incrementAndGet();
+        SubprogramInfo pick = byArity.isEmpty() ? overloads.get(0) : byArity.get(0);
+        return discriminatorFor(pick, mixed);
     }
 
     public String buildFullId() {

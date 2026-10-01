@@ -1,6 +1,7 @@
 package com.plsql.parser.model;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import java.util.List;
 
 @JsonInclude(JsonInclude.Include.NON_EMPTY)
 public class CallInfo {
@@ -10,6 +11,13 @@ public class CallInfo {
     private String schema;
     private int line;
     private int arguments;
+    /**
+     * Coarse type hint per call argument (e.g. NUMBER for a numeric literal, VARCHAR2 for a
+     * string literal; null where the expression type is not statically known), used to match the
+     * call against a declared overload SIGNATURE. Additive and empty for every existing call →
+     * callers that never populate it serialise byte-identically (NON_EMPTY drops it).
+     */
+    private List<String> argTypes;
     /**
      * Which subprogram within a package this call originated from, set ONLY when this item was
      * produced by {@code DependencyCrawler}'s package-as-entry-point aggregation (a bare package
@@ -31,6 +39,8 @@ public class CallInfo {
     public void setLine(int line) { this.line = line; }
     public int getArguments() { return arguments; }
     public void setArguments(int arguments) { this.arguments = arguments; }
+    public List<String> getArgTypes() { return argTypes; }
+    public void setArgTypes(List<String> argTypes) { this.argTypes = argTypes; }
     public String getSubprogramName() { return subprogramName; }
     public void setSubprogramName(String subprogramName) { this.subprogramName = subprogramName; }
 }

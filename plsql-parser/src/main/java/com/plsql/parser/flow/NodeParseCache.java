@@ -58,14 +58,37 @@ public class NodeParseCache {
         }
     }
 
-    /** Persist a FlowNode to cache. */
-    public void put(String visitKey, String sourceText, FlowNode node) {
+    /**
+     * Return a cached FlowNode by its exact artifact leaf — the fetch-free restore path used by
+     * the analysis idempotency registry, which recorded the leaf when the node was written and
+     * therefore does not need the source text (and therefore no DB fetch) to find it again.
+     * Returns null when the leaf is blank, absent, or corrupt.
+     */
+    public FlowNode getByLeaf(String leaf) {
+        if (leaf == null || leaf.isBlank()) return null;
+        ArtifactKey file = cacheDir.resolve(leaf);
+        if (!store.exists(file)) return null;
+        try (InputStream in = store.read(file)) {
+            FlowNode node = mapper.readValue(in, FlowNode.class);
+            log.info("[NodeCache] HIT (registry) ({})", leaf);
+            return node;
+        } catch (IOException e) {
+            log.warn("[NodeCache] Corrupt registry-restored entry {}: {}", leaf, e.getMessage());
+            store.delete(file);
+            return null;
+        }
+    }
+
+    /** Persist a FlowNode to cache. Returns the artifact key written, or null on failure. */
+    public ArtifactKey put(String visitKey, String sourceText, FlowNode node) {
         ArtifactKey file = cacheFile(visitKey, sourceText);
         try (OutputStream out = store.write(file)) {
             mapper.writeValue(out, node);
             log.info("[NodeCache] STORED {} ({})", visitKey, file.leaf());
+            return file;
         } catch (IOException e) {
             log.warn("[NodeCache] Failed to cache {}: {}", visitKey, e.getMessage());
+            return null;
         }
     }
 

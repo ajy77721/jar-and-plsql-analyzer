@@ -54,10 +54,22 @@ public class TriggerDiscoverer {
 
     private final DbConnectionManager connManager;
     private final SchemaResolver schemaResolver;
+    /**
+     * Optional: routes trigger bodies through the persistent source cache (fetch-free on a
+     * re-crawl of an unchanged trigger). Null in unit-test / standalone-trigger paths, where the
+     * batched pull still runs but nothing is cached.
+     */
+    private final SourceDownloader downloader;
 
     public TriggerDiscoverer(DbConnectionManager connManager, SchemaResolver schemaResolver) {
+        this(connManager, schemaResolver, null);
+    }
+
+    public TriggerDiscoverer(DbConnectionManager connManager, SchemaResolver schemaResolver,
+                             SourceDownloader downloader) {
         this.connManager = connManager;
         this.schemaResolver = schemaResolver;
+        this.downloader = downloader;
     }
 
     public List<Map<String, Object>> discover(Map<String, SchemaTableInfo> tableInfoMap) {
@@ -163,12 +175,22 @@ public class TriggerDiscoverer {
                 System.err.println("[TriggerDiscoverer] Connection user: " + conn.getMetaData().getUserName());
             }
 
-            // Phase 2: For each trigger, fetch full source from ALL_SOURCE / DBMS_METADATA (fallback to TRIGGER_BODY)
+            // Phase 2: batched trigger-source pull THROUGH the source-cache chain. The old path
+            // fired one ALL_SOURCE (then DBMS_METADATA) query PER trigger — the N+1 that bypassed
+            // the cross-run source cache entirely. Now: cache hits first, then ONE batched
+            // ALL_SOURCE query for every miss, then a per-trigger DBMS_METADATA fallback only for
+            // the rare body still absent (wrapped/legacy), then the ALL_TRIGGERS TRIGGER_BODY.
+            Map<String, String> sourceByKey = fetchTriggerSourcesBatched(conn, metaRows);
             int withBody = 0;
             for (Map<String, String> meta : metaRows) {
                 String trigOwner = meta.get("OWNER");
                 String trigName = meta.get("TRIGGER_NAME");
-                String sourceBody = fetchTriggerSource(conn, trigOwner, trigName);
+                String key = triggerKey(trigOwner, trigName);
+                String sourceBody = sourceByKey.get(key);
+                if (sourceBody == null || sourceBody.isBlank()) {
+                    // Rare fallback: not in the cache and not returned by the batched pull.
+                    sourceBody = fetchTriggerSourceDbmsMetadata(conn, trigOwner, trigName);
+                }
                 if (sourceBody == null || sourceBody.isBlank()) {
                     sourceBody = meta.get("TRIGGER_BODY");
                 }
@@ -497,28 +519,95 @@ public class TriggerDiscoverer {
         return triggers;
     }
 
-    private String fetchTriggerSource(Connection conn, String owner, String triggerName) {
-        // Try 1: ALL_SOURCE
-        try {
-            String sql = "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = 'TRIGGER' ORDER BY LINE";
-            connManager.incrementDbCalls();
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, owner);
-                ps.setString(2, triggerName);
-                try (ResultSet rs = ps.executeQuery()) {
-                    StringBuilder sb = new StringBuilder();
-                    while (rs.next()) {
-                        sb.append(rs.getString("TEXT"));
-                    }
-                    if (sb.length() > 0) return sb.toString();
+    private static String triggerKey(String owner, String name) {
+        return (owner == null ? "" : owner.toUpperCase()) + "|"
+                + (name == null ? "" : name.toUpperCase());
+    }
+
+    /**
+     * Fetch trigger bodies for the whole discovered set with as few queries as possible:
+     * <ol>
+     *   <li>serve each {@code owner.trigger} from the persistent source cache when present,</li>
+     *   <li>pull every remaining body in ONE batched ALL_SOURCE query per chunk of 100 pairs
+     *       ({@code (OWNER, NAME) IN ((?,?),(?,?))}), and</li>
+     *   <li>write the freshly pulled bodies back to the source cache.</li>
+     * </ol>
+     * Returns a map keyed by {@link #triggerKey}. Never throws — a failed chunk leaves its
+     * triggers for the per-trigger DBMS_METADATA fallback / TRIGGER_BODY.
+     */
+    private Map<String, String> fetchTriggerSourcesBatched(Connection conn,
+                                                           List<Map<String, String>> metaRows) {
+        Map<String, String> out = new LinkedHashMap<>();
+        List<String[]> misses = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Map<String, String> meta : metaRows) {
+            String owner = meta.get("OWNER");
+            String name = meta.get("TRIGGER_NAME");
+            if (name == null || owner == null) continue;
+            String key = triggerKey(owner, name);
+            if (!seen.add(key)) continue;
+            if (downloader != null) {
+                String cached = downloader.getCachedTriggerSource(owner, name);
+                if (cached != null && !cached.isBlank()) {
+                    out.put(key, cached);
+                    continue;
                 }
             }
-        } catch (SQLException e) {
-            System.err.println("[TriggerDiscoverer] ALL_SOURCE failed for "
-                    + owner + "." + triggerName + ": " + e.getMessage());
+            misses.add(new String[]{owner, name});
         }
+        if (misses.isEmpty()) return out;
 
-        // Try 2: DBMS_METADATA.GET_DDL
+        for (int i = 0; i < misses.size(); i += 100) {
+            List<String[]> chunk = misses.subList(i, Math.min(i + 100, misses.size()));
+            StringBuilder in = new StringBuilder();
+            for (int j = 0; j < chunk.size(); j++) {
+                if (j > 0) in.append(",");
+                in.append("(?,?)");
+            }
+            String sql = "SELECT OWNER, NAME, LINE, TEXT FROM ALL_SOURCE "
+                    + "WHERE TYPE = 'TRIGGER' AND (OWNER, NAME) IN (" + in + ") "
+                    + "ORDER BY OWNER, NAME, LINE";
+            Map<String, StringBuilder> bodies = new LinkedHashMap<>();
+            try {
+                connManager.incrementDbCalls();
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    int p = 1;
+                    for (String[] pair : chunk) {
+                        ps.setString(p++, pair[0]);
+                        ps.setString(p++, pair[1]);
+                    }
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String key = triggerKey(rs.getString("OWNER"), rs.getString("NAME"));
+                            bodies.computeIfAbsent(key, k -> new StringBuilder())
+                                    .append(rs.getString("TEXT"));
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                System.err.println("[TriggerDiscoverer] batched ALL_SOURCE trigger pull failed: "
+                        + e.getMessage());
+            }
+            for (String[] pair : chunk) {
+                String key = triggerKey(pair[0], pair[1]);
+                StringBuilder sb = bodies.get(key);
+                if (sb == null || sb.length() == 0) continue;
+                String src = sb.toString();
+                out.put(key, src);
+                if (downloader != null) downloader.storeTriggerSource(pair[0], pair[1], src);
+            }
+        }
+        System.err.println("[TriggerDiscoverer] Phase 2: batched source pull for "
+                + misses.size() + " trigger(s), " + out.size() + " served from cache/DB");
+        return out;
+    }
+
+    /**
+     * Last-resort per-trigger DBMS_METADATA fallback for a body the batched ALL_SOURCE pull did
+     * not return (wrapped source, or a trigger whose ALL_SOURCE rows are absent). Rare by design —
+     * the batched pull above is the normal path.
+     */
+    private String fetchTriggerSourceDbmsMetadata(Connection conn, String owner, String triggerName) {
         try {
             String sql = "SELECT DBMS_METADATA.GET_DDL('TRIGGER', ?, ?) FROM DUAL";
             connManager.incrementDbCalls();
@@ -528,7 +617,10 @@ public class TriggerDiscoverer {
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
                         String ddl = rs.getString(1);
-                        if (ddl != null && !ddl.isBlank()) return ddl;
+                        if (ddl != null && !ddl.isBlank()) {
+                            if (downloader != null) downloader.storeTriggerSource(owner, triggerName, ddl);
+                            return ddl;
+                        }
                     }
                 }
             }
@@ -536,7 +628,6 @@ public class TriggerDiscoverer {
             System.err.println("[TriggerDiscoverer] DBMS_METADATA.GET_DDL failed for "
                     + owner + "." + triggerName + ": " + e.getMessage());
         }
-
         return null;
     }
 
