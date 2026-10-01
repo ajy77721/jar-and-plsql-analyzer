@@ -33,6 +33,47 @@ PA.estateViews = {
         PA.estateViews.data = [];
     },
 
+    /**
+     * Cross-estate link target: switch to the Estate → Views screen, filter to this view and open
+     * its detail row. Used by the chain/base-table/used-by links on the other estate screens.
+     */
+    showView: function(name) {
+        if (!name) return;
+        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('views');
+        var el = document.getElementById('vwSearch');
+        if (el) el.value = name;
+        var src = PA.estateViews._src;
+        if (src && PA.tf) {
+            src.setParam('q', name);
+            PA.tf._restart('vw');
+        }
+        PA.estateViews._focus('vw', name, 'name');
+    },
+
+    /** Poll for the named row in a server-paged table, then toggle its detail open and scroll to it. */
+    _focus: function(tfId, name, field) {
+        var tries = 0;
+        var want = String(name).toUpperCase();
+        var iv = setInterval(function() {   // poll-exempt: local DOM poll for a just-navigated row, no network request
+            var st = PA.tf && PA.tf.state ? PA.tf.state(tfId) : null;
+            var rows = st && st.filtered;
+            if (rows && rows.length) {
+                for (var i = 0; i < rows.length; i++) {
+                    if (String(rows[i][field] || '').toUpperCase() === want) {
+                        clearInterval(iv);
+                        var idx = st.page * st.pageSize + i;
+                        PA.tf.toggleDetail(tfId, idx);
+                        var rowEl = document.getElementById(tfId + '-detail-' + idx);
+                        if (rowEl && rowEl.scrollIntoView) rowEl.scrollIntoView({ block: 'center' });
+                        return;
+                    }
+                }
+            }
+            if (++tries > 40) clearInterval(iv);
+        }, 100);
+    },
+
     _initTypePills: function() {
         var container = document.getElementById('vwTypePills');
         if (!container) return;
@@ -220,6 +261,8 @@ PA.estateViews = {
         if (d.schema) html += '<span class="est-meta-item">schema <b>' + esc(d.schema) + '</b></span>';
         html += '<span class="est-meta-item"><b>' + (d.columnCount || 0) + '</b> columns</span>';
         html += '<span class="est-meta-item"><b>' + (d.baseTableCount || 0) + '</b> base tables</span>';
+        if (d.joinCount) html += '<span class="est-meta-item"><b>' + d.joinCount + '</b> joins</span>';
+        if (d.indexCount) html += '<span class="est-meta-item"><b>' + d.indexCount + '</b> indexes</span>';
         html += '<span class="est-meta-item"><b>' + (d.usedByCount || 0) + '</b> used by</span>';
         if (isMv) {
             if (d.mvRefreshMode) html += '<span class="est-badge warn">REFRESH ' + esc(d.mvRefreshMode) + '</span>';
@@ -256,15 +299,69 @@ PA.estateViews = {
         html += PA.estateViews._baseTablesHtml(d.baseTables, esc);
         html += '</div>';
 
+        // Joins inside the view definition (catalog/grammar-captured).
+        if (d.joins && d.joins.length) {
+            html += '<div class="est-section"><div class="est-section-title">Joins (' + d.joins.length + ')</div>';
+            html += PA.estateViews._joinsHtml(d.joins, esc);
+            html += '</div>';
+        }
+
+        // Indexes on the view itself (e.g. an MV's snapshot index).
+        if (d.indexes && d.indexes.length) {
+            html += '<div class="est-section"><div class="est-section-title">Indexes on this view (' + d.indexes.length + ')</div>';
+            html += PA.estateViews._indexesHtml(d.indexes, esc);
+            html += '</div>';
+        }
+
+        // Indexes on the view's base tables.
+        if (d.baseTableIndexes && d.baseTableIndexes.length) {
+            html += '<div class="est-section"><div class="est-section-title">Indexes on base tables (' + d.baseTableIndexes.length + ')</div>';
+            html += PA.estateViews._baseTableIndexesHtml(d.baseTableIndexes, esc);
+            html += '</div>';
+        }
+
+        // Constraints on the view's own columns.
+        if (d.constraints && d.constraints.length) {
+            html += '<div class="est-section"><div class="est-section-title">Constraints (' + d.constraints.length + ')</div>';
+            html += PA.estateViews._constraintsHtml(d.constraints, esc);
+            html += '</div>';
+        }
+
+        // Cross-estate: base tables in the chain that carry triggers.
+        if (d.triggerBoundTables && d.triggerBoundTables.length) {
+            html += '<div class="est-section"><div class="est-section-title">Triggers on base tables</div>';
+            html += PA.estateViews._triggerBoundHtml(d.triggerBoundTables, esc);
+            html += '</div>';
+        }
+
         // Chain visualiser
         if (d.chain) {
             html += '<div class="est-section">' + PA.estateViews._chainHtml(d.chain, esc) + '</div>';
         }
 
-        // Used by
+        // Used by — procedures, other views and triggers.
         html += '<div class="est-section"><div class="est-section-title">Used By (' + (d.usedByCount || 0) + ')</div>';
         html += PA.estateViews._usedByHtml(d.usedBy, esc);
         html += '</div>';
+
+        // Reverse estate edges: other views reading this view, and triggers whose body touches it.
+        if (d.usedByViews && d.usedByViews.length) {
+            html += '<div class="est-section"><div class="est-section-title">Used by other views (' + d.usedByViews.length + ')</div>';
+            html += PA.estateViews._usedByViewsHtml(d.usedByViews, esc);
+            html += '</div>';
+        }
+        if (d.usedByTriggers && d.usedByTriggers.length) {
+            html += '<div class="est-section"><div class="est-section-title">Referenced by triggers (' + d.usedByTriggers.length + ')</div>';
+            html += PA.estateViews._usedByTriggersHtml(d.usedByTriggers, esc);
+            html += '</div>';
+        }
+
+        // Dynamic SQL statements naming this view.
+        if (d.dynamicSqlRefs && d.dynamicSqlRefs.length) {
+            html += '<div class="est-section"><div class="est-section-title">Dynamic SQL references (' + d.dynamicSqlRefs.length + ')</div>';
+            html += PA.estateViews._dynamicSqlHtml(d.dynamicSqlRefs, esc);
+            html += '</div>';
+        }
 
         return html;
     },
@@ -277,9 +374,146 @@ PA.estateViews = {
             var op = (b.operation || 'SELECT').toUpperCase();
             html += '<span class="est-chip">'
                 + '<span class="est-op-badge ' + op.toLowerCase() + '">' + esc(op) + '</span>'
-                + esc(b.name || '')
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
+                + PA.escJs(b.name || '') + '\',\'' + PA.escJs(b.schema || '') + '\')">' + esc(b.name || '') + '</span>'
                 + (b.schema ? '<span class="est-chip-sub">' + esc(b.schema) + '</span>' : '')
                 + '</span>';
+        }
+        html += '</div>';
+        return html;
+    },
+
+    /** Joins inside the view definition: type, both tables, the ON condition, and the source line. */
+    _joinsHtml: function(joins, esc) {
+        var html = '<table class="est-cols"><thead><tr><th>Type</th><th>Left</th><th>Joined</th>'
+            + '<th>Condition</th><th>Line</th></tr></thead><tbody>';
+        for (var i = 0; i < joins.length; i++) {
+            var j = joins[i];
+            html += '<tr>'
+                + '<td>' + esc(j.joinType || 'JOIN') + '</td>'
+                + '<td class="est-col-name">' + esc((j.leftTableAlias ? j.leftTableAlias + '.' : '') + (j.leftTable || '')) + '</td>'
+                + '<td class="est-col-name">' + esc((j.joinedTableAlias ? j.joinedTableAlias + '.' : '') + (j.joinedTable || '')) + '</td>'
+                + '<td class="est-col-type">' + esc(j.condition || '') + '</td>'
+                + '<td>' + (j.line ? 'L' + j.line : '') + '</td>'
+                + '</tr>';
+        }
+        html += '</tbody></table>';
+        return html;
+    },
+
+    /** One row per index: name, unique flag, and its columns. */
+    _indexesHtml: function(indexes, esc) {
+        var html = '<table class="est-cols"><thead><tr><th>Index</th><th>Unique</th><th>Columns</th></tr></thead><tbody>';
+        for (var i = 0; i < indexes.length; i++) {
+            var ix = indexes[i];
+            var cols = (ix.columns || []).join(', ');
+            html += '<tr>'
+                + '<td class="est-col-name">' + esc(ix.name || '') + '</td>'
+                + '<td>' + (ix.unique ? 'YES' : 'NO') + '</td>'
+                + '<td class="est-col-type">' + esc(cols) + '</td>'
+                + '</tr>';
+        }
+        html += '</tbody></table>';
+        return html;
+    },
+
+    /** Indexes grouped under their base table, each base table a clickable table link. */
+    _baseTableIndexesHtml: function(rows, esc) {
+        var html = '<table class="est-cols"><thead><tr><th>Base Table</th><th>Index</th><th>Unique</th><th>Columns</th></tr></thead><tbody>';
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            html += '<tr>'
+                + '<td><span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
+                + PA.escJs(r.table || '') + '\',\'' + PA.escJs(r.tableSchema || '') + '\')">' + esc(r.table || '') + '</span></td>'
+                + '<td class="est-col-name">' + esc(r.name || '') + '</td>'
+                + '<td>' + (r.unique ? 'YES' : 'NO') + '</td>'
+                + '<td class="est-col-type">' + esc((r.columns || []).join(', ')) + '</td>'
+                + '</tr>';
+        }
+        html += '</tbody></table>';
+        return html;
+    },
+
+    _constraintsHtml: function(constraints, esc) {
+        var html = '<table class="est-cols"><thead><tr><th>Name</th><th>Type</th><th>Condition</th></tr></thead><tbody>';
+        for (var i = 0; i < constraints.length; i++) {
+            var c = constraints[i];
+            html += '<tr>'
+                + '<td class="est-col-name">' + esc(c.name || '') + '</td>'
+                + '<td>' + esc(c.type || '') + '</td>'
+                + '<td class="est-col-type">' + esc(c.condition || '') + '</td>'
+                + '</tr>';
+        }
+        html += '</tbody></table>';
+        return html;
+    },
+
+    /** Base tables that carry triggers — each trigger a clickable link into the triggers screen. */
+    _triggerBoundHtml: function(tables, esc) {
+        var html = '';
+        for (var i = 0; i < tables.length; i++) {
+            var t = tables[i];
+            html += '<div class="est-var-group"><div class="est-var-name">'
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
+                + PA.escJs(t.table || '') + '\',\'' + PA.escJs(t.schema || '') + '\')">' + esc(t.table || '') + '</span></div>';
+            html += '<div class="est-chips">';
+            var trs = t.triggers || [];
+            for (var j = 0; j < trs.length; j++) {
+                var tr = trs[j];
+                html += '<span class="est-chip">'
+                    + '<span class="est-op-badge ' + String(tr.event || '').toLowerCase().split(' ')[0] + '">' + esc(tr.timing || '') + ' ' + esc(tr.event || '') + '</span>'
+                    + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.estateTriggers.showTrigger(\''
+                    + PA.escJs(tr.name || '') + '\')">' + esc(tr.name || '') + '</span>'
+                    + (tr.status ? '<span class="est-chip-sub">' + esc(tr.status) + '</span>' : '')
+                    + '</span>';
+            }
+            html += '</div></div>';
+        }
+        return html;
+    },
+
+    _usedByViewsHtml: function(views, esc) {
+        var html = '<div class="est-usedby">';
+        for (var i = 0; i < views.length; i++) {
+            var v = views[i];
+            html += '<div class="est-usedby-item">'
+                + '<span class="est-op-badge ' + String(v.operation || 'SELECT').toLowerCase() + '">' + esc(v.operation || 'SELECT') + '</span>'
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.estateViews.showView(\''
+                + PA.escJs(v.name || '') + '\')">' + esc(v.name || '') + '</span>'
+                + (v.schema ? '<span class="est-usedby-line">' + esc(v.schema) + '</span>' : '')
+                + '</div>';
+        }
+        html += '</div>';
+        return html;
+    },
+
+    _usedByTriggersHtml: function(triggers, esc) {
+        var html = '<div class="est-usedby">';
+        for (var i = 0; i < triggers.length; i++) {
+            var t = triggers[i];
+            html += '<div class="est-usedby-item">'
+                + '<span class="est-op-badge ' + String(t.operation || 'SELECT').toLowerCase() + '">' + esc(t.operation || 'SELECT') + '</span>'
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.estateTriggers.showTrigger(\''
+                + PA.escJs(t.name || '') + '\')">' + esc(t.name || '') + '</span>'
+                + '<span class="est-usedby-line">' + esc((t.timing || '') + ' ' + (t.event || '')) + '</span>'
+                + '</div>';
+        }
+        html += '</div>';
+        return html;
+    },
+
+    /** Dynamic SQL statements naming the view — each procedure a clickable link. */
+    _dynamicSqlHtml: function(refs, esc) {
+        var html = '<div class="est-usedby">';
+        for (var i = 0; i < refs.length; i++) {
+            var r = refs[i];
+            html += '<div class="est-usedby-item">'
+                + '<span class="est-op-badge select">' + esc(r.type || 'DYNAMIC') + '</span>'
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
+                + PA.escJs(r.procedureId || '') + '\')">' + esc(r.procedureName || r.procedureId || '') + '</span>'
+                + (r.lineNumber ? '<span class="est-usedby-line">L' + r.lineNumber + '</span>' : '')
+                + '<span class="est-chip-sub" style="font-family:var(--font-mono)">' + esc(r.sqlExpression || '') + '</span>'
+                + '</div>';
         }
         html += '</div>';
         return html;
@@ -291,6 +525,7 @@ PA.estateViews = {
         for (var i = 0; i < usedBy.length; i++) {
             var u = usedBy[i];
             html += '<div class="est-usedby-item">';
+            if (u.nodeType) html += '<span class="est-badge">' + esc(u.nodeType) + '</span>';
             html += '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\'' + PA.escJs(u.nodeId || '') + '\')">' + esc(u.nodeName || u.nodeId || '') + '</span>';
             html += PA.estateViews._opsHtml(u.operations, esc);
             if (u.nodeDepth != null) html += '<span class="est-usedby-line">depth ' + u.nodeDepth + '</span>';
@@ -360,19 +595,24 @@ PA.estateViews = {
                 for (var j = 0; j < names.length; j++) {
                     var nm = names[j] || '';
                     var nd = nodeBy[nm.toUpperCase()];
-                    var cls, sub;
+                    var cls, sub, onclick;
                     if (nd) {
                         var kind = (nd.kind || nd.objectType || 'VIEW').toUpperCase();
                         cls = kind === 'MATERIALIZED_VIEW' ? 'est-node-mv' : (kind === 'VIEW' ? 'est-node-view' : 'est-node-table');
                         sub = nd.schema || '';
+                        onclick = (kind === 'VIEW' || kind === 'MATERIALIZED_VIEW')
+                            ? ' onclick="event.stopPropagation();PA.estateViews.showView(\'' + PA.escJs(nm) + '\')"'
+                            : ' onclick="event.stopPropagation();PA.tableDetail.open(\'' + PA.escJs(nm) + '\',\'' + PA.escJs(nd.schema || '') + '\')"';
                     } else if (baseSet[nm.toUpperCase()]) {
                         cls = 'est-node-table';
                         sub = 'base table';
+                        onclick = ' onclick="event.stopPropagation();PA.tableDetail.open(\'' + PA.escJs(nm) + '\',\'\')"';
                     } else {
                         cls = 'est-node-table';
                         sub = '';
+                        onclick = '';
                     }
-                    html += '<span class="est-node ' + cls + '">' + esc(nm)
+                    html += '<span class="est-node ' + cls + '"' + onclick + '>' + esc(nm)
                         + (sub ? '<span class="est-node-sub">' + esc(sub) + '</span>' : '')
                         + '</span>';
                 }

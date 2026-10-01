@@ -434,7 +434,14 @@ final class ParserFacetSpecs {
                     FacetSort.number("BASETABLES_ASC", "baseTableCount", false),
                     FacetSort.number("BASETABLES_DESC", "baseTableCount", true),
                     FacetSort.number("USEDBY_ASC", "usedByCount", false),
-                    FacetSort.number("USEDBY_DESC", "usedByCount", true)),
+                    FacetSort.number("USEDBY_DESC", "usedByCount", true),
+                    // Enrichment counts (EstateFacetReader.viewRow): joins inside the definition and
+                    // indexes on the view itself. The detail panels surface the full lists; the sorts
+                    // let a caller order the list by them.
+                    FacetSort.number("JOINS_ASC", "joinCount", false),
+                    FacetSort.number("JOINS_DESC", "joinCount", true),
+                    FacetSort.number("INDEXES_ASC", "indexCount", false),
+                    FacetSort.number("INDEXES_DESC", "indexCount", true)),
             "NAME_ASC",
             50,
             row -> row.path("schema").asText("").toUpperCase(Locale.ROOT) + "."
@@ -462,7 +469,8 @@ final class ParserFacetSpecs {
             row -> row.path("schema").asText("").toUpperCase(Locale.ROOT) + "."
                     + row.path("name").asText("").toUpperCase(Locale.ROOT),
             row -> lower(row.path("name").asText("") + " " + row.path("table").asText("") + " "
-                    + row.path("body").asText("")),
+                    + row.path("triggerType").asText("") + " " + row.path("status").asText("") + " "
+                    + row.path("timing").asText("") + " " + row.path("body").asText("")),
             row -> List.of(row.path("event").asText("")),
             row -> List.of(),
             Map.of("1", FacetSpec.scalarColumn("timing", "")));

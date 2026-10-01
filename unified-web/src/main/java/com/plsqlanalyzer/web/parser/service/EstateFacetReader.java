@@ -53,6 +53,27 @@ import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.textOrNu
  * report none. Where a field was not persisted (e.g. an MV whose refresh metadata predates this
  * crawl, or a reference-only global with no declaration) it is returned as JSON null /
  * {@code declared:false} rather than guessed.
+ *
+ * <h2>Detail enrichment and cross-estate links</h2>
+ *
+ * <p>Beyond the base row, each detail payload carries the estate's own cross-references, all read
+ * from artifacts the crawl already wrote (never a re-parse):
+ *
+ * <ul>
+ *   <li><b>Views</b> — the joins inside the definition ({@code viewJoins}), the view's own indexes
+ *       and its base tables' indexes ({@code dbIndexes}), constraints ({@code dbConstraints}),
+ *       used-by rows classified by the referencing node's object type, the reverse view-on-view and
+ *       trigger→view edges ({@code usedByViews}/{@code usedByTriggers}), the trigger-bound base
+ *       tables in the chain ({@code triggerBoundTables}), and a capped sample of dynamic SQL that
+ *       names the view.</li>
+ *   <li><b>Triggers</b> — catalog-only {@code dbTriggers[]} rows are merged in (capturing SQL Server
+ *       INSTEAD OF and Oracle COMPOUND triggers the source parser never saw, with
+ *       {@code insteadOf}/{@code compound}/{@code dbDiscovered} flags and an honest empty body),
+ *       and the {@code willFire} inverse map lists the procedures whose DML on the trigger's table
+ *       matches the trigger's event, with the matching operation and line.</li>
+ *   <li><b>Globals</b> — per-variable read/write counts, and a per-procedure footprint
+ *       ({@code byProcedure}) of which variables each procedure reads and writes.</li>
+ * </ul>
  */
 class EstateFacetReader {
 
@@ -147,15 +168,19 @@ class EstateFacetReader {
         ArrayNode out = m.createArrayNode();
         JsonNode tables = tablesIndex(name);
         if (tables != null) {
+            // nodeId -> objectType over the analysis index, so a usedBy row can be classified as a
+            // procedure / function / view / trigger rather than shown as an opaque node id. Computed
+            // once per getViews() call (which is itself memoized) so it is invalidated with the rest.
+            Map<String, String> nodeTypes = nodeTypeMap(name);
             for (JsonNode t : tables.path("tables")) {
-                if (isView(textOrNull(t, "objectType"))) out.add(viewRow(m, t));
+                if (isView(textOrNull(t, "objectType"))) out.add(viewRow(m, t, nodeTypes, tables));
             }
         }
         r.synthesizedCache.put(ck, out);
         return out;
     }
 
-    private ObjectNode viewRow(ObjectMapper m, JsonNode t) {
+    private ObjectNode viewRow(ObjectMapper m, JsonNode t, Map<String, String> nodeTypes, JsonNode tables) {
         ObjectNode row = m.createObjectNode();
         String vname = textOrNull(t, "name");
         String schema = textOrNull(t, "schema");
@@ -166,15 +191,58 @@ class EstateFacetReader {
         row.put("isMaterialized", "MATERIALIZED_VIEW".equalsIgnoreCase(ot));
 
         ArrayNode columns = row.putArray("columns");
+        int ordinal = 0;
         for (JsonNode c : t.path("dbColumns")) {
             ObjectNode col = m.createObjectNode();
             col.put("name", textOrNull(c, "columnName") != null ? textOrNull(c, "columnName") : "");
             col.put("dataType", textOrNull(c, "dataType") != null ? textOrNull(c, "dataType") : "");
             col.put("nullable", c.path("nullable").asBoolean(true));
+            // Additive: the 1-based position and the catalog's own declared length/column id, when
+            // the crawl captured them.
+            col.put("ordinal", ++ordinal);
+            if (c.hasNonNull("columnId")) col.put("columnId", c.path("columnId").asInt());
+            if (c.hasNonNull("dataLength")) col.put("dataLength", c.path("dataLength").asInt());
             columns.add(col);
         }
         row.put("columnCount", columns.size());
         row.put("definition", textOrNull(t, "viewDefinition") != null ? textOrNull(t, "viewDefinition") : "");
+
+        // Joins INSIDE the view definition — the catalog/grammar's own join edges. Present only when
+        // the visitor captured them (MySQL/DB2/Oracle views); absent means "not captured", not "no
+        // joins", so the list is emitted as an (empty) array and the UI says so honestly.
+        ArrayNode joins = row.putArray("joins");
+        for (JsonNode j : t.path("viewJoins")) {
+            ObjectNode jo = m.createObjectNode();
+            jo.put("joinType", textOrNull(j, "joinType") != null ? textOrNull(j, "joinType") : "JOIN");
+            jo.put("leftTable", textOrNull(j, "leftTable") != null ? textOrNull(j, "leftTable") : "");
+            jo.put("leftTableAlias", textOrNull(j, "leftTableAlias") != null ? textOrNull(j, "leftTableAlias") : "");
+            jo.put("joinedTable", textOrNull(j, "joinedTable") != null ? textOrNull(j, "joinedTable") : "");
+            jo.put("joinedTableAlias", textOrNull(j, "joinedTableAlias") != null ? textOrNull(j, "joinedTableAlias") : "");
+            jo.put("condition", textOrNull(j, "condition") != null ? textOrNull(j, "condition") : "");
+            jo.put("line", j.path("line").asInt(0));
+            joins.add(jo);
+        }
+        row.put("joinCount", joins.size());
+
+        // Constraints on the view's own columns, straight off the entry's dbConstraints.
+        ArrayNode constraints = row.putArray("constraints");
+        for (JsonNode c : t.path("dbConstraints")) {
+            String cn = textOrNull(c, "constraintName");
+            String ct = textOrNull(c, "constraintType");
+            String cc = textOrNull(c, "searchCondition");
+            if (cn == null && ct == null && cc == null) continue;
+            ObjectNode co = m.createObjectNode();
+            co.put("name", cn != null ? cn : "");
+            co.put("type", ct != null ? ct : "");
+            co.put("condition", cc != null ? cc : "");
+            constraints.add(co);
+        }
+        row.put("constraintCount", constraints.size());
+
+        // Indexes on the view itself (an MV's snapshot index), grouped one row per index.
+        ArrayNode indexes = groupIndexes(m, t.path("dbIndexes"));
+        row.set("indexes", indexes);
+        row.put("indexCount", indexes.size());
 
         ArrayNode base = row.putArray("baseTables");
         Set<String> seen = new HashSet<>();
@@ -197,7 +265,7 @@ class EstateFacetReader {
         row.put("baseTableCount", base.size());
 
         ArrayNode usedBy = row.putArray("usedBy");
-        for (JsonNode u : t.path("usedBy")) usedBy.add(usedByRow(m, u));
+        for (JsonNode u : t.path("usedBy")) usedBy.add(usedByRow(m, u, nodeTypes, tables));
         row.put("usedByCount", usedBy.size());
 
         // MV refresh metadata — persisted on the per-view entry by the crawl's Oracle ALL_MVIEWS
@@ -223,6 +291,72 @@ class EstateFacetReader {
         return o;
     }
 
+    /** As {@link #usedByRow(ObjectMapper, JsonNode)} but also stamps the referencing node's
+     *  object type, so a used-by list can distinguish a procedure from another view or a trigger. */
+    private static ObjectNode usedByRow(ObjectMapper m, JsonNode u, Map<String, String> nodeTypes, JsonNode tables) {
+        ObjectNode o = usedByRow(m, u);
+        o.put("nodeType", classifyNode(textOrNull(u, "nodeId"), textOrNull(u, "nodeName"), nodeTypes, tables));
+        return o;
+    }
+
+    /**
+     * The object type of a referencing node: the analysis index's own {@code objectType} for the
+     * node id, else the tables index's type for the node's name, else {@code UNKNOWN}. Never guessed
+     * to a specific type — an unrecognised reference stays {@code UNKNOWN}.
+     */
+    private static String classifyNode(String nodeId, String nodeName,
+                                       Map<String, String> nodeTypes, JsonNode tables) {
+        String ot = nodeId == null ? null : nodeTypes.get(nodeId);
+        if (ot == null && nodeName != null && tables != null) {
+            JsonNode te = entryFor(tables, nodeName);
+            if (te != null) ot = textOrNull(te, "objectType");
+        }
+        return ot != null && !ot.isBlank() ? ot.toUpperCase(Locale.ROOT) : "UNKNOWN";
+    }
+
+    /** {@code nodeId -> objectType} over the analysis index. Empty (never null) when absent. */
+    private Map<String, String> nodeTypeMap(String name) {
+        Map<String, String> out = new HashMap<>();
+        try {
+            JsonNode idx = r.getIndex(name);
+            for (JsonNode n : idx.path("nodes")) {
+                String id = textOrNull(n, "nodeId");
+                String ot = textOrNull(n, "objectType");
+                if (id != null && ot != null) out.put(id, ot.toUpperCase(Locale.ROOT));
+            }
+        } catch (Exception e) {
+            // A missing/unreadable index means every reference classifies as UNKNOWN — honest.
+        }
+        return out;
+    }
+
+    /**
+     * Groups a catalog {@code dbIndexes[]} list (one row per index column) into one row per index:
+     * {@code {name, unique, columns[]}}. Order-preserving; never null.
+     */
+    private static ArrayNode groupIndexes(ObjectMapper m, JsonNode dbIndexes) {
+        ArrayNode out = m.createArrayNode();
+        if (dbIndexes == null || !dbIndexes.isArray()) return out;
+        Map<String, ObjectNode> byName = new LinkedHashMap<>();
+        for (JsonNode ix : dbIndexes) {
+            String nm = textOrNull(ix, "indexName");
+            if (nm == null) nm = textOrNull(ix, "name");
+            if (nm == null || nm.isBlank()) continue;
+            final String fname = nm;
+            ObjectNode o = byName.computeIfAbsent(nm.toUpperCase(Locale.ROOT), k -> {
+                ObjectNode n = m.createObjectNode();
+                n.put("name", fname);
+                n.put("unique", "UNIQUE".equalsIgnoreCase(textOrNull(ix, "uniqueness")));
+                n.putArray("columns");
+                return n;
+            });
+            String col = textOrNull(ix, "columnName");
+            if (col != null && !col.isBlank()) ((ArrayNode) o.get("columns")).add(col);
+        }
+        byName.values().forEach(out::add);
+        return out;
+    }
+
     private ObjectNode findViewRow(ObjectMapper m, String name, String view) throws IOException {
         for (JsonNode row : getViews(name)) {
             if (norm(textOrNull(row, "name")).equals(norm(view))) return (ObjectNode) row;
@@ -237,6 +371,169 @@ class EstateFacetReader {
         ObjectNode out = row.deepCopy();
         out.set("chain", viewChain(name, view));
         out.set("usedBy", row.path("usedBy").deepCopy());
+        JsonNode tables = tablesIndex(name);
+        // Indexes on the view's BASE tables (captured by the crawl's dbIndexes enrichment), so the
+        // detail answers "what is indexed under this view" without opening each base table.
+        out.set("baseTableIndexes", baseTableIndexes(r.mapper, row, tables));
+        // The reverse estate edges: other views that read this view, and triggers bound to tables
+        // whose body touches this view. Both are derived from the same artifacts the chain and the
+        // triggers facet already use — no re-parse.
+        out.set("usedByViews", usedByViews(name, row));
+        out.set("usedByTriggers", usedByTriggers(name, row));
+        // Cross-estate: base tables in the chain that carry triggers, with a clickable trigger list.
+        out.set("triggerBoundTables", triggerBoundTables(name, row, tables));
+        // Dynamic SQL statements that name this view, sampled (capped) — the "is this view reached
+        // through EXECUTE IMMEDIATE / DBMS_SQL" question, answered from the dynamic-SQL facet.
+        out.set("dynamicSqlRefs", dynamicSqlRefs(name, row));
+        return out;
+    }
+
+    /** One flat row per index on a base table: {@code {table, tableSchema, name, unique, columns[]}}. */
+    private ArrayNode baseTableIndexes(ObjectMapper m, ObjectNode row, JsonNode tables) {
+        ArrayNode out = m.createArrayNode();
+        if (tables == null) return out;
+        for (JsonNode b : row.path("baseTables")) {
+            String bn = textOrNull(b, "name");
+            if (bn == null) continue;
+            JsonNode te = entryFor(tables, bn);
+            if (te == null) continue;
+            for (JsonNode ix : groupIndexes(m, te.path("dbIndexes"))) {
+                ObjectNode o = (ObjectNode) ix;
+                o.put("table", textOrNull(te, "name") != null ? textOrNull(te, "name") : bn);
+                o.put("tableSchema", textOrNull(te, "schema") != null ? textOrNull(te, "schema") : "");
+                out.add(o);
+            }
+        }
+        return out;
+    }
+
+    /** Other views that read this view (the inverse of the view-on-view chain). */
+    private ArrayNode usedByViews(String name, ObjectNode row) throws IOException {
+        ArrayNode out = r.mapper.createArrayNode();
+        String self = norm(row.path("name").asText(""));
+        if (self.isEmpty()) return out;
+        for (JsonNode v : getViews(name)) {
+            if (norm(v.path("name").asText("")).equals(self)) continue;
+            for (JsonNode b : v.path("baseTables")) {
+                if (!norm(textOrNull(b, "name")).equals(self)) continue;
+                ObjectNode o = r.mapper.createObjectNode();
+                o.put("name", v.path("name").asText(""));
+                o.put("schema", v.path("schema").asText(""));
+                o.put("objectType", v.path("objectType").asText("VIEW"));
+                o.put("operation", textOrNull(b, "operation") != null ? textOrNull(b, "operation") : "SELECT");
+                out.add(o);
+                break;
+            }
+        }
+        return out;
+    }
+
+    /** Triggers whose body touches this view — the trigger→view edge, from the triggers facet. */
+    private ArrayNode usedByTriggers(String name, ObjectNode row) throws IOException {
+        ArrayNode out = r.mapper.createArrayNode();
+        String self = norm(row.path("name").asText(""));
+        if (self.isEmpty()) return out;
+        for (JsonNode t : getTriggers(name)) {
+            for (JsonNode touch : t.path("touches")) {
+                if (!norm(textOrNull(touch, "name")).equals(self)) continue;
+                ObjectNode o = r.mapper.createObjectNode();
+                o.put("name", t.path("name").asText(""));
+                o.put("schema", t.path("schema").asText(""));
+                o.put("table", t.path("table").asText(""));
+                o.put("timing", t.path("timing").asText(""));
+                o.put("event", t.path("event").asText(""));
+                o.put("operation", textOrNull(touch, "operation") != null ? textOrNull(touch, "operation") : "SELECT");
+                out.add(o);
+                break;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The base tables this view depends on that carry at least one trigger, each with a summary of
+     * those triggers. This is the "the chain reaches a trigger-bound table" cross-link: it lets the
+     * view detail point at the trigger that fires when the base table is written.
+     */
+    private ArrayNode triggerBoundTables(String name, ObjectNode row, JsonNode tables) throws IOException {
+        ArrayNode out = r.mapper.createArrayNode();
+        if (tables == null) return out;
+        Set<String> names = new LinkedHashSet<>();
+        for (JsonNode b : row.path("baseTables")) {
+            String bn = textOrNull(b, "name");
+            if (bn != null && !bn.isBlank()) names.add(norm(bn));
+        }
+        for (JsonNode b : viewChain(name, row.path("name").asText("")).path("baseTables")) {
+            if (b.isTextual() && !b.asText().isBlank()) names.add(norm(b.asText()));
+        }
+        for (String bn : names) {
+            JsonNode te = entryFor(tables, bn);
+            if (te == null) continue;
+            ArrayNode trs = triggerSummaries(r.mapper, te);
+            if (trs.size() == 0) continue;
+            ObjectNode o = r.mapper.createObjectNode();
+            o.put("table", textOrNull(te, "name") != null ? textOrNull(te, "name") : bn);
+            o.put("schema", textOrNull(te, "schema") != null ? textOrNull(te, "schema") : "");
+            o.set("triggers", trs);
+            out.add(o);
+        }
+        return out;
+    }
+
+    /** {@code {name, timing, event, triggerType, status}} for each trigger attached to a table entry
+     *  (source-parsed {@code triggers[]} plus catalog {@code dbTriggers[]}), de-duplicated by name. */
+    private static ArrayNode triggerSummaries(ObjectMapper m, JsonNode tableEntry) {
+        ArrayNode out = m.createArrayNode();
+        Set<String> seen = new HashSet<>();
+        for (JsonNode trg : tableEntry.path("triggers")) {
+            String tn = textOrNull(trg, "name");
+            if (tn == null || !seen.add(tn.toUpperCase(Locale.ROOT))) continue;
+            out.add(triggerSummary(m, tn, textOrNull(trg, "timing"), textOrNull(trg, "event"),
+                    textOrNull(trg, "triggerType"), textOrNull(trg, "status")));
+        }
+        for (JsonNode trg : tableEntry.path("dbTriggers")) {
+            String tn = textOrNull(trg, "triggerName");
+            if (tn == null || !seen.add(tn.toUpperCase(Locale.ROOT))) continue;
+            out.add(triggerSummary(m, tn, timingOf(textOrNull(trg, "triggerType")),
+                    textOrNull(trg, "triggeringEvent"), textOrNull(trg, "triggerType"),
+                    textOrNull(trg, "status")));
+        }
+        return out;
+    }
+
+    private static ObjectNode triggerSummary(ObjectMapper m, String name, String timing, String event,
+                                             String triggerType, String status) {
+        ObjectNode o = m.createObjectNode();
+        o.put("name", name != null ? name : "");
+        o.put("timing", timing != null ? timing : "");
+        o.put("event", event != null ? event : "");
+        o.put("triggerType", triggerType != null ? triggerType : "");
+        o.put("status", status != null ? status : "");
+        return o;
+    }
+
+    /** A capped sample of dynamic-SQL statements whose expression names this view. */
+    private ArrayNode dynamicSqlRefs(String name, ObjectNode row) {
+        ArrayNode out = r.mapper.createArrayNode();
+        String vn = row.path("name").asText("");
+        if (vn.isBlank()) return out;
+        String needle = vn.toUpperCase(Locale.ROOT);
+        try {
+            for (JsonNode d : r.getDynamicSql(name)) {
+                String expr = d.path("sqlExpression").asText("");
+                if (expr.isEmpty() || !expr.toUpperCase(Locale.ROOT).contains(needle)) continue;
+                ObjectNode o = r.mapper.createObjectNode();
+                o.put("procedureId", d.path("procedureId").asText(""));
+                o.put("procedureName", d.path("procedureName").asText(""));
+                o.put("lineNumber", d.path("lineNumber").asInt(0));
+                o.put("type", d.path("type").asText(""));
+                o.put("sqlExpression", expr);
+                out.add(o);
+                if (out.size() >= 20) break;
+            }
+        } catch (Exception e) {
+            // No dynamic-SQL facet → an empty (honest) list.
+        }
         return out;
     }
 
@@ -440,6 +737,39 @@ class EstateFacetReader {
                 else putIfAbsent(row, "body", bodyFromSource(name, n));
             }
             if (row.path("touches").isEmpty()) setTouches(row, m, n.path("tables"));
+            // The trigger body's own callees, when the crawl captured them on the node detail —
+            // the cross-estate edge from a trigger body into the procedures (and their globals) it
+            // calls. Absent means "not captured", so the field is simply not set.
+            if (n.path("calls").isArray() && n.path("calls").size() > 0) {
+                row.set("bodyCalls", n.path("calls").deepCopy());
+            }
+        }
+
+        // 3. Catalog-discovered triggers (dbTriggers[]) — the DB-discovery enrichment attaches these
+        //    to the table entry. They carry triggerType / triggeringEvent / status and are the ONLY
+        //    source for triggers the source parser never saw: SQL Server INSTEAD OF triggers (often
+        //    on a view), Oracle COMPOUND triggers, and DB2's catalog rows. No body is available on
+        //    this path — the trigger body stays the honest empty string.
+        if (tables != null) {
+            for (JsonNode t : tables.path("tables")) {
+                String tableName = textOrNull(t, "name");
+                String tableSchema = textOrNull(t, "schema");
+                for (JsonNode dt : t.path("dbTriggers")) {
+                    String tn = textOrNull(dt, "triggerName");
+                    if (tn == null || tn.isBlank()) continue;
+                    String owner = textOrNull(dt, "owner");
+                    String k = key(owner != null && !owner.isBlank() ? owner : tableSchema, tn);
+                    ObjectNode row = byKey.computeIfAbsent(k, kk -> newTriggerRow(m, tn, owner));
+                    if (row.path("table").asText("").isEmpty() && tableName != null) row.put("table", tableName);
+                    if (row.path("tableSchema").asText("").isEmpty() && tableSchema != null) row.put("tableSchema", tableSchema);
+                    putIfAbsent(row, "triggerType", textOrNull(dt, "triggerType"));
+                    putIfAbsent(row, "event", textOrNull(dt, "triggeringEvent"));
+                    putIfAbsent(row, "timing", timingOf(textOrNull(dt, "triggerType")));
+                    putIfAbsent(row, "status", textOrNull(dt, "status"));
+                    putIfAbsent(row, "source", "DATABASE");
+                    row.put("dbDiscovered", true);
+                }
+            }
         }
 
         ArrayNode out = m.createArrayNode();
@@ -557,6 +887,42 @@ class EstateFacetReader {
         return "";
     }
 
+    /** The timing part of a catalog trigger type: BEFORE / AFTER / INSTEAD OF, else empty. */
+    private static String timingOf(String triggerType) {
+        if (triggerType == null) return "";
+        String t = triggerType.toUpperCase(Locale.ROOT);
+        if (t.contains("INSTEAD OF")) return "INSTEAD OF";
+        if (t.contains("BEFORE")) return "BEFORE";
+        if (t.contains("AFTER")) return "AFTER";
+        return "";
+    }
+
+    /** Splits an event string ({@code "INSERT,UPDATE"}, {@code "INSERT OR UPDATE"}) into its parts. */
+    private ArrayNode splitEvents(String event) {
+        ArrayNode out = r.mapper.createArrayNode();
+        if (event == null || event.isBlank()) return out;
+        for (String part : event.toUpperCase(Locale.ROOT).split("\\s*(?:,|\\bOR\\b)\\s*")) {
+            String p = part.trim();
+            if (!p.isEmpty()) out.add(p);
+        }
+        return out;
+    }
+
+    private static Set<String> eventSet(String event) {
+        Set<String> out = new LinkedHashSet<>();
+        if (event == null || event.isBlank()) return out;
+        for (String part : event.toUpperCase(Locale.ROOT).split("\\s*(?:,|\\bOR\\b)\\s*")) {
+            String p = part.trim();
+            if (!p.isEmpty()) out.add(p);
+        }
+        return out;
+    }
+
+    private static boolean isDml(String op) {
+        return "INSERT".equals(op) || "UPDATE".equals(op) || "DELETE".equals(op)
+                || "MERGE".equals(op) || "TRUNCATE".equals(op);
+    }
+
     private void finalizeTrigger(ObjectMapper m, ObjectNode row) {
         // A level persisted by the crawl (source-parsed trigger: the grammar's FOR EACH ROW) is
         // authoritative; only derive it from triggerType/body when the crawl did not supply one.
@@ -567,6 +933,17 @@ class EstateFacetReader {
         row.put("level", level);
         row.put("touchesCount", row.path("touches").size());
         row.put("bodyAvailable", !row.path("body").asText("").isBlank());
+        // Per-dialect honesty flags derived from what was persisted (never guessed): an INSTEAD OF
+        // trigger (SQL Server / Oracle / Postgres) and an Oracle COMPOUND trigger are surfaced as
+        // their own flags so the UI can label them rather than showing a blank timing.
+        String tt = row.path("triggerType").asText("").toUpperCase(Locale.ROOT);
+        row.put("insteadOf", tt.contains("INSTEAD OF")
+                || "INSTEAD OF".equalsIgnoreCase(row.path("timing").asText("")));
+        row.put("compound", tt.contains("COMPOUND"));
+        row.put("eventList", splitEvents(row.path("event").asText("")));
+        // True when this row exists only because of the catalog's dbTriggers[] list (no body, no
+        // node). Set on the merge path; defaulted here so every row carries the field.
+        row.put("dbDiscovered", row.path("dbDiscovered").asBoolean(false));
     }
 
     private ObjectNode findTriggerRow(ObjectMapper m, String name, String trigger) throws IOException {
@@ -581,7 +958,16 @@ class EstateFacetReader {
         if (row == null) return null;
         ObjectNode out = row.deepCopy();
         out.set("chain", triggerChain(name, trigger));
-        out.set("firedBy", firedBy(name, row.path("table").asText("")));
+        ArrayNode fired = firedBy(name, row.path("table").asText(""), row.path("event").asText(""));
+        out.set("firedBy", fired);
+        // The inverse map, event-matched: of the procedures that write the trigger's table, the ones
+        // whose operation actually matches the trigger's event (INSERT trigger → procedures that
+        // INSERT). An insert into T fires trigger X, so every procedure that inserts into T is listed
+        // here with the matching operation and line.
+        ArrayNode willFire = willFire(fired);
+        out.set("willFire", willFire);
+        out.put("firedByCount", fired.size());
+        out.put("willFireCount", willFire.size());
         return out;
     }
 
@@ -593,31 +979,67 @@ class EstateFacetReader {
         out.put("trigger", row.path("name").asText(""));
         out.put("schema", row.path("schema").asText(""));
         out.put("table", row.path("table").asText(""));
-        JsonNode fired = firedBy(name, row.path("table").asText(""));
+        ArrayNode fired = firedBy(name, row.path("table").asText(""), row.path("event").asText(""));
         out.set("firedBy", fired);
+        ArrayNode willFire = willFire(fired);
+        out.set("willFire", willFire);
         out.put("count", fired.size());
+        out.put("willFireCount", willFire.size());
         return out;
     }
 
-    /** The procedures whose DML on the trigger's table can fire it — the table's own {@code usedBy}
-     *  filtered to DML operations. */
-    private ArrayNode firedBy(String name, String table) throws IOException {
+    /**
+     * The procedures whose DML on the trigger's table can fire it — the table's own {@code usedBy}
+     * filtered to DML operations, each stamped with the operations that match the trigger's event
+     * ({@code matchingOperations}) and whether any does ({@code firesOnEvent}). When the trigger's
+     * event is unknown every DML entry counts as a match, so the list degrades honestly rather than
+     * emptying.
+     */
+    private ArrayNode firedBy(String name, String table, String event) throws IOException {
         ArrayNode out = r.mapper.createArrayNode();
         if (table == null || table.isBlank()) return out;
         JsonNode tables = tablesIndex(name);
         if (tables == null) return out;
         JsonNode entry = entryFor(tables, table);
         if (entry == null) return out;
+        Set<String> events = eventSet(event);
         for (JsonNode u : entry.path("usedBy")) {
             JsonNode ops = u.path("operations");
+            ObjectNode matching = r.mapper.createObjectNode();
+            boolean anyDml = false;
+            boolean anyMatch = false;
             if (ops.isObject()) {
-                boolean dml = false;
-                for (String op : new String[]{"INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE"}) {
-                    if (ops.has(op)) { dml = true; break; }
+                Iterator<Map.Entry<String, JsonNode>> it = ops.fields();
+                while (it.hasNext()) {
+                    Map.Entry<String, JsonNode> e = it.next();
+                    String op = e.getKey().toUpperCase(Locale.ROOT);
+                    if (!isDml(op)) continue;
+                    anyDml = true;
+                    if (events.isEmpty() || events.contains(op)) {
+                        matching.set(op, e.getValue().deepCopy());
+                        anyMatch = true;
+                    }
                 }
-                if (!dml) continue;
+            } else {
+                // No operations map to test against — keep the entry (the pre-existing behaviour)
+                // and treat it as an unknown match rather than dropping a real writer.
+                anyDml = true;
+                anyMatch = true;
             }
-            out.add(usedByRow(r.mapper, u));
+            if (!anyDml) continue;
+            ObjectNode row = usedByRow(r.mapper, u);
+            row.set("matchingOperations", matching);
+            row.put("firesOnEvent", anyMatch);
+            out.add(row);
+        }
+        return out;
+    }
+
+    /** The subset of {@code firedBy} whose operation matches the trigger's event. */
+    private static ArrayNode willFire(ArrayNode firedBy) {
+        ArrayNode out = firedBy.arrayNode();
+        for (JsonNode u : firedBy) {
+            if (u.path("firesOnEvent").asBoolean(false)) out.add(u.deepCopy());
         }
         return out;
     }
@@ -718,9 +1140,12 @@ class EstateFacetReader {
             entry.put("trigger", row.path("name").asText(""));
             entry.put("schema", row.path("schema").asText(""));
             entry.put("table", row.path("table").asText(""));
-            ArrayNode fired = firedBy(name, row.path("table").asText(""));
+            ArrayNode fired = firedBy(name, row.path("table").asText(""), row.path("event").asText(""));
             entry.set("firedBy", fired);
+            ArrayNode willFire = willFire(fired);
+            entry.set("willFire", willFire);
             entry.put("count", fired.size());
+            entry.put("willFireCount", willFire.size());
             out.set(norm(textOrNull(row, "name")), entry);
         }
         return out;
@@ -776,6 +1201,9 @@ class EstateFacetReader {
         }
 
         Map<String, ObjectNode> byPackage = new LinkedHashMap<>();
+        // Per-package, per-variable read/write tallies, so each variable row can carry its own
+        // counts (the package totals alone cannot say which variable is hot).
+        Map<String, Map<String, int[]>> varCounts = new LinkedHashMap<>();
         for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
             if (refs == null || !refs.isArray()) continue;
@@ -787,9 +1215,16 @@ class EstateFacetReader {
                 ObjectNode row = byPackage.computeIfAbsent(pkey, k -> newPackageRow(m, k));
                 addVariable(row, norm(var), declarationFor(declarations, pkey, var));
                 row.put("usageCount", row.get("usageCount").asInt() + 1);
+                int[] counts = varCounts.computeIfAbsent(pkey, k -> new LinkedHashMap<>())
+                        .computeIfAbsent(norm(var), k -> new int[2]);
                 String access = textOrNull(ref, "accessType");
-                if ("WRITE".equalsIgnoreCase(access)) row.put("writeCount", row.get("writeCount").asInt() + 1);
-                else if ("READ".equalsIgnoreCase(access)) row.put("readCount", row.get("readCount").asInt() + 1);
+                if ("WRITE".equalsIgnoreCase(access)) {
+                    row.put("writeCount", row.get("writeCount").asInt() + 1);
+                    counts[1]++;
+                } else if ("READ".equalsIgnoreCase(access)) {
+                    row.put("readCount", row.get("readCount").asInt() + 1);
+                    counts[0]++;
+                }
             }
         }
 
@@ -801,7 +1236,16 @@ class EstateFacetReader {
         }
 
         ArrayNode out = m.createArrayNode();
-        for (ObjectNode row : byPackage.values()) row.put("variableCount", row.path("variables").size());
+        for (Map.Entry<String, ObjectNode> e : byPackage.entrySet()) {
+            ObjectNode row = e.getValue();
+            Map<String, int[]> counts = varCounts.get(e.getKey());
+            for (JsonNode v : row.path("variables")) {
+                int[] c = counts == null ? null : counts.get(norm(v.path("name").asText("")));
+                ((ObjectNode) v).put("readCount", c == null ? 0 : c[0]);
+                ((ObjectNode) v).put("writeCount", c == null ? 0 : c[1]);
+            }
+            row.put("variableCount", row.path("variables").size());
+        }
         byPackage.values().forEach(out::add);
         r.synthesizedCache.put(ck, out);
         return out;
@@ -858,6 +1302,54 @@ class EstateFacetReader {
         if (row == null) return null;
         ObjectNode out = row.deepCopy();
         out.set("usedBy", globalUsedBy(name, null, norm(pkg)));
+        // The reverse view: one entry per procedure that reads/writes this package, with the
+        // variables and lines it touches — the per-procedure globals footprint for this package.
+        ArrayNode byProc = globalsByProcedure(name, norm(pkg));
+        out.set("byProcedure", byProc);
+        out.put("procedureCount", byProc.size());
+        return out;
+    }
+
+    /**
+     * Each procedure's footprint on one package's globals: {@code {procedureId, procedureName,
+     * sourceFile, reads[], writes[], readCount, writeCount}}, one entry per node that references the
+     * package. Read straight from the node details' {@code externalPackageVarRefDetails}.
+     */
+    private ArrayNode globalsByProcedure(String name, String pkg) throws IOException {
+        ArrayNode out = r.mapper.createArrayNode();
+        if (pkg == null || pkg.isEmpty()) return out;
+        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+            JsonNode refs = node.get("externalPackageVarRefDetails");
+            if (refs == null || !refs.isArray()) continue;
+            String nodeId = textOrNull(node, "nodeId");
+            String nodeName = textOrNull(node, "name");
+            String sourceFile = textOrNull(node, "sourceFile");
+            ObjectNode p = null;
+            for (JsonNode ref : refs) {
+                if (!norm(textOrNull(ref, "packageName")).equals(pkg)) continue;
+                if (p == null) {
+                    p = r.mapper.createObjectNode();
+                    p.put("procedureId", nodeId != null ? nodeId : "");
+                    p.put("procedureName", nodeName != null ? nodeName : "");
+                    p.put("sourceFile", sourceFile != null ? sourceFile : "");
+                    p.putArray("reads");
+                    p.putArray("writes");
+                    p.put("readCount", 0);
+                    p.put("writeCount", 0);
+                }
+                ObjectNode u = r.mapper.createObjectNode();
+                u.put("variable", norm(textOrNull(ref, "variableName")));
+                u.put("lineNumber", ref.path("line").asInt(0));
+                if ("WRITE".equalsIgnoreCase(textOrNull(ref, "accessType"))) {
+                    ((ArrayNode) p.get("writes")).add(u);
+                    p.put("writeCount", p.path("writeCount").asInt() + 1);
+                } else {
+                    ((ArrayNode) p.get("reads")).add(u);
+                    p.put("readCount", p.path("readCount").asInt() + 1);
+                }
+            }
+            if (p != null) out.add(p);
+        }
         return out;
     }
 

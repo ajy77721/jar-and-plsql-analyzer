@@ -70,8 +70,15 @@ public class AnalysisViewStore {
      * {@code counts.callsOut} splits overloads. Sidecars written at version 1 carry the old
      * shapes, so {@link #read} refuses them and the warm-up sweep rebuilds the set — an analysis
      * analysed before this change upgrades itself on next access rather than serving stale rows.
+     *
+     * <p>Version 3: the estate-facet payloads are enriched — view rows carry joins, indexes,
+     * constraints, classified used-by (with usedByViews/usedByTriggers) and trigger-bound base
+     * tables; trigger rows carry dbTriggers-sourced INSTEAD OF/COMPOUND entries and the event-matched
+     * {@code willFire} inverse map; global rows carry per-variable and per-procedure counts. A
+     * version-2 sidecar holds the pre-enrichment shape, so it is refused and recomputed rather than
+     * served without the new fields.
      */
-    public static final int FORMAT_VERSION = 2;
+    public static final int FORMAT_VERSION = 3;
 
     /** The sidecar folder inside an analysis directory. */
     public static final String VIEWS_DIR = "views";

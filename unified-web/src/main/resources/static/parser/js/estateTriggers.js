@@ -30,6 +30,47 @@ PA.estateTriggers = {
         PA.estateTriggers.data = [];
     },
 
+    /**
+     * Cross-estate link target: switch to the Estate → Triggers screen, filter to this trigger and
+     * open its detail row. Used by view base-table trigger links and trigger-chain nodes.
+     */
+    showTrigger: function(name) {
+        if (!name) return;
+        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('triggers');
+        var el = document.getElementById('tgSearch');
+        if (el) el.value = name;
+        var src = PA.estateTriggers._src;
+        if (src && PA.tf) {
+            src.setParam('q', name);
+            PA.tf._restart('tg');
+        }
+        PA.estateTriggers._focus('tg', name, 'name');
+    },
+
+    /** Poll for the named row in a server-paged table, then toggle its detail open and scroll to it. */
+    _focus: function(tfId, name, field) {
+        var tries = 0;
+        var want = String(name).toUpperCase();
+        var iv = setInterval(function() {   // poll-exempt: local DOM poll for a just-navigated row, no network request
+            var st = PA.tf && PA.tf.state ? PA.tf.state(tfId) : null;
+            var rows = st && st.filtered;
+            if (rows && rows.length) {
+                for (var i = 0; i < rows.length; i++) {
+                    if (String(rows[i][field] || '').toUpperCase() === want) {
+                        clearInterval(iv);
+                        var idx = st.page * st.pageSize + i;
+                        PA.tf.toggleDetail(tfId, idx);
+                        var rowEl = document.getElementById(tfId + '-detail-' + idx);
+                        if (rowEl && rowEl.scrollIntoView) rowEl.scrollIntoView({ block: 'center' });
+                        return;
+                    }
+                }
+            }
+            if (++tries > 40) clearInterval(iv);
+        }, 100);
+    },
+
     _initEventPills: function() {
         var container = document.getElementById('tgEventPills');
         if (!container) return;
@@ -153,7 +194,10 @@ PA.estateTriggers = {
             : '<span style="color:var(--text-muted)">-</span>';
 
         var html = '<tr class="to-row" onclick="PA.tf.toggleDetail(\'tg\',' + idx + ')">';
-        html += '<td><span style="font-weight:600;color:var(--badge-orange)">' + esc(t.name || '') + '</span></td>';
+        html += '<td><span style="font-weight:600;color:var(--badge-orange)">' + esc(t.name || '') + '</span>'
+            + (t.insteadOf ? '<span class="est-badge warn" style="margin-left:4px">INSTEAD OF</span>' : '')
+            + (t.compound ? '<span class="est-badge warn" style="margin-left:4px">COMPOUND</span>' : '')
+            + '</td>';
         html += '<td><span class="est-chip-sub" style="font-family:var(--font-mono)">' + esc(t.table || '-') + '</span></td>';
         html += '<td>' + timingBadge + '</td>';
         html += '<td>' + eventBadge + '</td>';
@@ -203,6 +247,9 @@ PA.estateTriggers = {
         if (t.level) html += '<span class="est-badge">' + esc(t.level) + '</span>';
         if (t.triggerType) html += '<span class="est-meta-item">' + esc(t.triggerType) + '</span>';
         if (t.status) html += '<span class="est-badge ' + (String(t.status).toUpperCase() === 'ENABLED' ? 'ok' : 'warn') + '">' + esc(t.status) + '</span>';
+        if (t.insteadOf) html += '<span class="est-badge warn">INSTEAD OF</span>';
+        if (t.compound) html += '<span class="est-badge warn">COMPOUND</span>';
+        if (t.dbDiscovered) html += '<span class="est-badge">CATALOG ONLY</span>';
         if (t.source) html += '<span class="est-badge">' + esc(t.source) + '</span>';
         if (t.table) {
             html += '<span class="est-meta-item">on <b style="color:var(--teal);cursor:pointer" '
@@ -210,6 +257,15 @@ PA.estateTriggers = {
                 + esc((t.tableSchema ? t.tableSchema + '.' : '') + t.table) + '</b></span>';
         }
         html += '</div>';
+
+        // The event list (a trigger can fire on INSERT OR UPDATE, or INSERT,UPDATE,DELETE).
+        if (t.eventList && t.eventList.length > 1) {
+            html += '<div class="est-meta">';
+            for (var ei = 0; ei < t.eventList.length; ei++) {
+                html += '<span class="est-op-badge ' + String(t.eventList[ei]).toLowerCase() + '">' + esc(t.eventList[ei]) + '</span>';
+            }
+            html += '</div>';
+        }
 
         if (t.whenClause) {
             html += '<div class="est-section"><div class="est-section-title">WHEN Clause</div>';
@@ -221,9 +277,17 @@ PA.estateTriggers = {
             html += '<pre class="est-sql est-body">' + esc(t.body) + '</pre>';
         } else {
             html += '<div class="est-empty">Body not captured — the trigger definition was not readable from the catalog'
-                + (t.source === 'DATABASE' ? ' (check the connection user\'s privileges).' : '.') + '</div>';
+                + (t.dbDiscovered ? ' (this trigger was discovered from the catalog only; a body is not available on that path).'
+                    : (t.source === 'DATABASE' ? ' (check the connection user\'s privileges).' : '.')) + '</div>';
         }
         html += '</div>';
+
+        // The procedures the trigger body calls (when the crawl captured them on the trigger node).
+        if (t.bodyCalls && t.bodyCalls.length) {
+            html += '<div class="est-section"><div class="est-section-title">Calls from the body (' + t.bodyCalls.length + ')</div>';
+            html += PA.estateTriggers._callsHtml(t.bodyCalls, esc);
+            html += '</div>';
+        }
 
         html += '<div class="est-section"><div class="est-section-title">Touches (' + (t.touchesCount || 0) + ')</div>';
         html += PA.estateTriggers._touchesHtml(t.touches, esc);
@@ -233,10 +297,38 @@ PA.estateTriggers = {
             html += '<div class="est-section">' + PA.estateTriggers._chainHtml(t.chain, esc) + '</div>';
         }
 
-        html += '<div class="est-section"><div class="est-section-title">Fired By (' + ((t.firedBy || []).length) + ')</div>';
-        html += PA.estateTriggers._firedByHtml(t.firedBy, esc);
+        // The inverse map — procedures whose operation on the trigger's table MATCHES the event.
+        html += '<div class="est-section"><div class="est-section-title">Will fire this trigger ('
+            + ((t.willFire || []).length) + ')</div>';
+        html += PA.estateTriggers._firedByHtml(t.willFire, esc,
+            'No procedure in this analysis performs the trigger\'s event on its table.');
         html += '</div>';
 
+        // Every procedure that writes the trigger's table (any DML), for completeness.
+        html += '<div class="est-section"><div class="est-section-title">Writes the table — any DML ('
+            + ((t.firedBy || []).length) + ')</div>';
+        html += PA.estateTriggers._firedByHtml(t.firedBy, esc,
+            'No procedure in this analysis writes to the trigger\'s table.');
+        html += '</div>';
+
+        return html;
+    },
+
+    /** Procedures the trigger body calls — each a clickable link into the procedure explorer. */
+    _callsHtml: function(calls, esc) {
+        var html = '<div class="est-usedby">';
+        for (var i = 0; i < calls.length; i++) {
+            var c = calls[i];
+            var name = c.objectName || c.target || c.name || '';
+            html += '<div class="est-usedby-item">'
+                + (c.type ? '<span class="est-badge">' + esc(c.type) + '</span>' : '')
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
+                + PA.escJs(name) + '\')">' + esc(name) + '</span>'
+                + (c.lines && c.lines.length ? '<span class="est-usedby-line">L' + c.lines[0] + '</span>' : '')
+                + (c.count ? '<span class="est-usedby-line">' + c.count + 'x</span>' : '')
+                + '</div>';
+        }
+        html += '</div>';
         return html;
     },
 
@@ -249,7 +341,8 @@ PA.estateTriggers = {
             var cls = op === 'INSERT' ? 'insert' : op === 'UPDATE' ? 'update' : op === 'DELETE' ? 'delete' : 'select';
             html += '<span class="est-chip">'
                 + '<span class="est-op-badge ' + cls + '">' + esc(op) + '</span>'
-                + esc(b.name || '')
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
+                + PA.escJs(b.name || '') + '\',\'' + PA.escJs(b.schema || '') + '\')">' + esc(b.name || '') + '</span>'
                 + (b.schema ? '<span class="est-chip-sub">' + esc(b.schema) + '</span>' : '')
                 + (b.objectType && b.objectType !== 'TABLE' ? '<span class="est-chip-sub">' + esc(b.objectType.replace('_', ' ')) + '</span>' : '')
                 + '</span>';
@@ -258,14 +351,18 @@ PA.estateTriggers = {
         return html;
     },
 
-    _firedByHtml: function(firedBy, esc) {
-        if (!firedBy || !firedBy.length) return '<div class="est-empty">No procedure in this analysis writes to the trigger\'s table.</div>';
+    _firedByHtml: function(firedBy, esc, emptyMsg) {
+        if (!firedBy || !firedBy.length) {
+            return '<div class="est-empty">' + (emptyMsg || 'No procedure in this analysis writes to the trigger\'s table.') + '</div>';
+        }
         var html = '<div class="est-usedby">';
         for (var i = 0; i < firedBy.length; i++) {
             var u = firedBy[i];
             html += '<div class="est-usedby-item">';
             html += '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\'' + PA.escJs(u.nodeId || '') + '\')">' + esc(u.nodeName || u.nodeId || '') + '</span>';
-            html += PA.estateTriggers._opsHtml(u.operations, esc);
+            // When the row carries the event-matched subset, show it; else fall back to all ops.
+            var ops = (u.matchingOperations && Object.keys(u.matchingOperations).length) ? u.matchingOperations : u.operations;
+            html += PA.estateTriggers._opsHtml(ops, esc);
             if (u.nodeDepth != null) html += '<span class="est-usedby-line">depth ' + u.nodeDepth + '</span>';
             html += '</div>';
         }
@@ -333,7 +430,9 @@ PA.estateTriggers = {
                     var nm = names[j] || '';
                     var nd = nodeBy[nm.toUpperCase()];
                     var sub = nd ? ((nd.table ? nd.table + ' ' : '') + (nd.event || '')).trim() : '';
-                    html += '<span class="est-node est-node-trigger">' + esc(nm)
+                    var onclick = ' onclick="event.stopPropagation();PA.estateTriggers.showTrigger(\''
+                        + PA.escJs(nm) + '\')"';
+                    html += '<span class="est-node est-node-trigger"' + onclick + '>' + esc(nm)
                         + (sub ? '<span class="est-node-sub">' + esc(sub) + '</span>' : '')
                         + '</span>';
                 }

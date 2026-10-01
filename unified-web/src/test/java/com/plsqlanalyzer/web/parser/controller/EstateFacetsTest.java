@@ -300,6 +300,146 @@ class EstateFacetsTest {
         assertNull(staticReader.getViewDetail(NAME, "NOPE"));
     }
 
+    /* ───────────────────── detail enrichment / cross-links ───────────────────── */
+
+    /**
+     * A fixture exercising every enrichment: a view with joins/indexes/constraints, a base table
+     * with an index and a trigger, a view-on-view edge, a dynamic-SQL reference to a view, a table
+     * with a catalog-only INSTEAD OF trigger, and a package global with read/write refs.
+     */
+    private void writeEnrichedFixture() throws IOException {
+        put("api/index.json", """
+                {"entryPoint":"DEMO","nodes":[
+                 {"nodeId":"S$P1","name":"P1","objectType":"PROCEDURE"},
+                 {"nodeId":"S$P2","name":"P2","objectType":"PROCEDURE"},
+                 {"nodeId":"S$TRG1","name":"TRG1","objectType":"TRIGGER"}]}""");
+        put("api/tables/index.json", """
+                {"tables":[
+                 {"name":"BASE_A","schema":"S","objectType":"TABLE",
+                  "dbIndexes":[{"indexName":"IX_BASE_A","uniqueness":"UNIQUE","columnName":"ID","position":1}],
+                  "triggers":[{"name":"TRG_BASE_A","schema":"S","event":"INSERT","timing":"AFTER"}],
+                  "usedBy":[{"nodeId":"S$P1","nodeName":"P1","nodeDepth":0,"operations":{"INSERT":[4]}}]},
+                 {"name":"VIEW_B","schema":"S","objectType":"VIEW",
+                  "dbColumns":[{"columnName":"X","dataType":"NUMBER","nullable":true,"columnId":1,"dataLength":22}],
+                  "dbConstraints":[{"constraintName":"CK_X","constraintType":"C","searchCondition":"X>0"}],
+                  "dbIndexes":[{"indexName":"IX_VIEW_B","uniqueness":"UNIQUE","columnName":"X","position":1}],
+                  "viewDefinition":"SELECT x FROM base_a",
+                  "viewTableOperations":[{"tableName":"BASE_A","operation":"SELECT"}],
+                  "viewJoins":[{"joinType":"JOIN","leftTable":"BASE_A","leftTableAlias":"a",
+                                "joinedTable":"OTHER","joinedTableAlias":"o","condition":"a.id=o.id","line":2}],
+                  "usedBy":[{"nodeId":"S$P2","nodeName":"P2","nodeDepth":0,"operations":{"SELECT":[2]}}]},
+                 {"name":"VIEW_A","schema":"S","objectType":"VIEW","dbColumns":[],
+                  "viewDefinition":"SELECT y FROM view_b",
+                  "viewTableOperations":[{"tableName":"VIEW_B","operation":"SELECT"}],"usedBy":[]},
+                 {"name":"T1","schema":"S","objectType":"TABLE",
+                  "triggers":[{"nodeId":"S$TRG1","name":"TRG1","schema":"S","event":"INSERT","timing":"AFTER"}],
+                  "dbTriggers":[{"triggerName":"TRG1_INSTEAD","owner":"S","triggerType":"INSTEAD OF",
+                                 "triggeringEvent":"DELETE","status":"ENABLED"}],
+                  "usedBy":[{"nodeId":"S$P1","nodeName":"P1","nodeDepth":0,"operations":{"INSERT":[4]}},
+                            {"nodeId":"S$P2","nodeName":"P2","nodeDepth":0,"operations":{"UPDATE":[9]}}]}
+                ]}""");
+        put("api/nodes/S$TRG1.json", """
+                {"nodeId":"S$TRG1","name":"TRG1","schema":"S","objectType":"TRIGGER","triggerTable":"T1",
+                 "triggerEvent":"INSERT","triggerTiming":"AFTER",
+                 "calls":[{"target":"P_HELPER","objectName":"P_HELPER","type":"EXTERNAL","schema":"S","lines":[3],"count":1}],
+                 "tables":[{"name":"BASE_A","schema":"S","objectType":"TABLE","operations":{"INSERT":[3]}},
+                           {"name":"VIEW_B","schema":"S","objectType":"VIEW","operations":{"SELECT":[5]}}]}""");
+        put("api/nodes/S$P1.json", """
+                {"nodeId":"S$P1","name":"P1","objectType":"PROCEDURE","sourceFile":"P1.prc",
+                 "dynamicSql":[{"type":"EXECUTE_IMMEDIATE","line":7,"sqlExpression":"SELECT * FROM VIEW_B WHERE x=1"}],
+                 "externalPackageVarRefDetails":[
+                   {"packageName":"PKG_A","variableName":"G_X","line":10,"accessType":"READ"},
+                   {"packageName":"PKG_A","variableName":"G_X","line":12,"accessType":"WRITE"}]}""");
+    }
+
+    @Test
+    void viewDetailCarriesJoinsIndexesConstraintsAndCrossLinks() throws Exception {
+        writeEnrichedFixture();
+        JsonNode d = staticReader.getViewDetail(NAME, "VIEW_B");
+        // Joins inside the definition.
+        assertEquals(1, d.path("joins").size());
+        assertEquals("JOIN", d.path("joins").get(0).path("joinType").asText());
+        assertEquals("OTHER", d.path("joins").get(0).path("joinedTable").asText());
+        assertEquals(1, d.path("joinCount").asInt());
+        // Indexes on the view and on its base tables.
+        assertEquals(1, d.path("indexes").size());
+        assertEquals("IX_VIEW_B", d.path("indexes").get(0).path("name").asText());
+        assertTrue(d.path("indexes").get(0).path("unique").asBoolean());
+        assertEquals(1, d.path("baseTableIndexes").size());
+        assertEquals("IX_BASE_A", d.path("baseTableIndexes").get(0).path("name").asText());
+        assertEquals("BASE_A", d.path("baseTableIndexes").get(0).path("table").asText());
+        // Constraints.
+        assertEquals(1, d.path("constraints").size());
+        assertEquals("CK_X", d.path("constraints").get(0).path("name").asText());
+        // Columns keep their declared ordinal/length.
+        assertEquals(1, d.path("columns").get(0).path("ordinal").asInt());
+        assertEquals(22, d.path("columns").get(0).path("dataLength").asInt());
+        // Reverse estate edges.
+        assertEquals(1, d.path("usedByViews").size(), "VIEW_A reads VIEW_B");
+        assertEquals("VIEW_A", d.path("usedByViews").get(0).path("name").asText());
+        assertEquals(1, d.path("usedByTriggers").size(), "TRG1 touches VIEW_B");
+        assertEquals("TRG1", d.path("usedByTriggers").get(0).path("name").asText());
+        // The base table in the chain carries a trigger.
+        assertEquals(1, d.path("triggerBoundTables").size());
+        assertEquals("BASE_A", d.path("triggerBoundTables").get(0).path("table").asText());
+        assertEquals("TRG_BASE_A",
+                d.path("triggerBoundTables").get(0).path("triggers").get(0).path("name").asText());
+        // Dynamic SQL naming the view.
+        assertEquals(1, d.path("dynamicSqlRefs").size());
+        assertEquals("S$P1", d.path("dynamicSqlRefs").get(0).path("procedureId").asText());
+    }
+
+    @Test
+    void viewUsedByIsClassifiedByNodeType() throws Exception {
+        writeEnrichedFixture();
+        JsonNode u = staticReader.getViewDetail(NAME, "VIEW_B").path("usedBy").get(0);
+        assertEquals("S$P2", u.path("nodeId").asText());
+        assertEquals("PROCEDURE", u.path("nodeType").asText());
+    }
+
+    @Test
+    void triggerDbDiscoveryIsMergedAndInverseMapIsEventMatched() throws Exception {
+        writeEnrichedFixture();
+        // The catalog-only INSTEAD OF trigger exists as a row, flagged honestly.
+        JsonNode inst = row(staticReader.getTriggers(NAME), "name", "TRG1_INSTEAD");
+        assertEquals("T1", inst.path("table").asText());
+        assertEquals("DELETE", inst.path("event").asText());
+        assertEquals("INSTEAD OF", inst.path("timing").asText());
+        assertTrue(inst.path("insteadOf").asBoolean());
+        assertTrue(inst.path("dbDiscovered").asBoolean());
+        assertFalse(inst.path("bodyAvailable").asBoolean(), "no body on the catalog path");
+
+        JsonNode d = staticReader.getTriggerDetail(NAME, "TRG1");
+        // Both writers of T1 are listed, but only the INSERT one will fire an INSERT trigger.
+        assertEquals(2, d.path("firedByCount").asInt());
+        assertEquals(1, d.path("willFireCount").asInt());
+        JsonNode willFire = d.path("willFire").get(0);
+        assertEquals("S$P1", willFire.path("nodeId").asText());
+        assertTrue(willFire.path("firesOnEvent").asBoolean());
+        assertTrue(willFire.path("matchingOperations").has("INSERT"));
+        // The body's callee is surfaced for a clickable cross-link.
+        assertEquals(1, d.path("bodyCalls").size());
+        assertEquals("P_HELPER", d.path("bodyCalls").get(0).path("objectName").asText());
+    }
+
+    @Test
+    void globalsCarryPerVariableAndPerProcedureCounts() throws Exception {
+        writeEnrichedFixture();
+        JsonNode gx = row(staticReader.getGlobals(NAME), "package", "PKG_A").path("variables").get(0);
+        assertEquals("G_X", gx.path("name").asText());
+        assertEquals(1, gx.path("readCount").asInt());
+        assertEquals(1, gx.path("writeCount").asInt());
+
+        JsonNode detail = staticReader.getGlobalDetail(NAME, "PKG_A");
+        assertEquals(1, detail.path("procedureCount").asInt());
+        JsonNode proc = detail.path("byProcedure").get(0);
+        assertEquals("S$P1", proc.path("procedureId").asText());
+        assertEquals(1, proc.path("readCount").asInt());
+        assertEquals(1, proc.path("writeCount").asInt());
+        assertEquals("G_X", proc.path("reads").get(0).path("variable").asText());
+        assertEquals("G_X", proc.path("writes").get(0).path("variable").asText());
+    }
+
     /* ─────────────────────── endpoint byte-equivalence ─────────────────────── */
 
     private byte[] bytes(ResponseEntity<?> response) throws IOException {

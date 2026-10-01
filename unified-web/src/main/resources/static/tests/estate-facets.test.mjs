@@ -141,6 +141,104 @@ export async function test_jar_db_calls_reads_the_availability_header() {
     'the unavailable state must say a re-analysis is needed');
 }
 
+export async function test_view_detail_renders_enrichment_sections_and_cross_links() {
+  const PA = await loadParser('parser/js/estateViews.js');
+  const d = {
+    name: 'V', schema: 'S', objectType: 'VIEW', isMaterialized: false,
+    definition: 'SELECT 1', columns: [], baseTables: [{ name: 'BASE_A', schema: 'S', operation: 'SELECT' }],
+    columnCount: 0, baseTableCount: 1, usedByCount: 0, chain: null,
+    joins: [{ joinType: 'JOIN', leftTable: 'BASE_A', leftTableAlias: 'a', joinedTable: 'OTHER', joinedTableAlias: 'o', condition: 'a.id=o.id', line: 2 }],
+    joinCount: 1,
+    indexes: [{ name: 'IX_V', unique: true, columns: ['X'] }],
+    indexCount: 1,
+    baseTableIndexes: [{ table: 'BASE_A', tableSchema: 'S', name: 'IX_BASE_A', unique: false, columns: ['ID'] }],
+    constraints: [{ name: 'CK_X', type: 'C', condition: 'X>0' }],
+    triggerBoundTables: [{ table: 'BASE_A', schema: 'S', triggers: [{ name: 'TRG_BASE_A', timing: 'AFTER', event: 'INSERT', status: 'ENABLED' }] }],
+    usedByViews: [{ name: 'V2', schema: 'S', objectType: 'VIEW', operation: 'SELECT' }],
+    usedByTriggers: [{ name: 'TRG1', schema: 'S', table: 'T', timing: 'AFTER', event: 'INSERT', operation: 'SELECT' }],
+    dynamicSqlRefs: [{ procedureId: 'S$P1', procedureName: 'P1', lineNumber: 7, type: 'EXECUTE_IMMEDIATE', sqlExpression: "SELECT * FROM V" }]
+  };
+  const html = PA.estateViews._detailHtml(d, esc);
+  includes(html, 'Joins (1)', 'joins section missing');
+  includes(html, 'a.id=o.id', 'join condition missing');
+  includes(html, 'IX_BASE_A', 'base-table index missing');
+  includes(html, 'CK_X', 'constraint missing');
+  includes(html, 'Triggers on base tables', 'trigger-bound section missing');
+  includes(html, 'Used by other views', 'reverse view edge missing');
+  includes(html, 'Referenced by triggers', 'reverse trigger edge missing');
+  includes(html, 'Dynamic SQL references', 'dynamic SQL section missing');
+  // Cross-estate links use the established router calls.
+  includes(html, "PA.estateTriggers.showTrigger('TRG_BASE_A')", 'trigger link missing');
+  includes(html, "PA.estateViews.showView('V2')", 'view link missing');
+  includes(html, "PA.tableDetail.open('BASE_A','S')", 'base-table link missing');
+  includes(html, "PA.showProcedure('S$P1')", 'dynamic-SQL procedure link missing');
+}
+
+export async function test_view_chain_nodes_are_clickable() {
+  const PA = await loadParser('parser/js/estateViews.js');
+  const chain = {
+    view: 'A', kind: 'VIEW', levels: [['A'], ['B'], ['T']],
+    nodes: [{ name: 'A', schema: 'S', objectType: 'VIEW', kind: 'VIEW' },
+            { name: 'B', schema: 'S', objectType: 'VIEW', kind: 'VIEW' }],
+    edges: [], baseTables: ['T'], cyclic: false, truncated: false
+  };
+  const html = PA.estateViews._chainHtml(chain, esc);
+  includes(html, "PA.estateViews.showView('A')", 'a chain view node is not a clickable view link');
+  includes(html, "PA.tableDetail.open('T'", 'a chain base-table node is not a clickable table link');
+}
+
+export async function test_trigger_detail_renders_inverse_map_flags_and_body_calls() {
+  const PA = await loadParser('parser/js/estateTriggers.js');
+  const html = PA.estateTriggers._detailHtml({
+    name: 'TRG1', table: 'T1', tableSchema: 'S', event: 'INSERT', timing: 'AFTER',
+    eventList: ['INSERT'], insteadOf: false, dbDiscovered: false,
+    touches: [], touchesCount: 0, chain: null,
+    bodyCalls: [{ objectName: 'P_HELPER', type: 'EXTERNAL', lines: [3], count: 1 }],
+    willFire: [{ nodeId: 'S$P1', nodeName: 'P1', matchingOperations: { INSERT: [4] }, firesOnEvent: true }],
+    firedBy: [{ nodeId: 'S$P1', nodeName: 'P1', operations: { INSERT: [4] }, firesOnEvent: true },
+              { nodeId: 'S$P2', nodeName: 'P2', operations: { UPDATE: [9] }, firesOnEvent: false }]
+  }, esc);
+  includes(html, 'Will fire this trigger (1)', 'the event-matched inverse map is missing');
+  includes(html, 'Writes the table — any DML (2)', 'the any-DML list is missing');
+  includes(html, 'Calls from the body (1)', 'trigger body calls are missing');
+  includes(html, "PA.showProcedure('P_HELPER')", 'the body call is not a clickable procedure');
+
+  const insteadHtml = PA.estateTriggers._detailHtml({
+    name: 'TRG_I', table: 'V', event: 'DELETE', timing: 'INSTEAD OF',
+    insteadOf: true, compound: false, dbDiscovered: true,
+    touches: [], touchesCount: 0, chain: null, firedBy: [], willFire: []
+  }, esc);
+  includes(insteadHtml, 'INSTEAD OF', 'the INSTEAD OF flag is not surfaced');
+  includes(insteadHtml, 'CATALOG ONLY', 'a catalog-only trigger is not labelled');
+}
+
+export async function test_globals_detail_renders_per_procedure_footprint() {
+  const PA = await loadParser('parser/js/estateGlobals.js');
+  const html = PA.estateGlobals._detailHtml({
+    package: 'PKG_A', variableCount: 1, readCount: 1, writeCount: 1,
+    variables: [{ name: 'G_X', dataType: 'NUMBER', defaultValue: '0', constant: false, declared: true, readCount: 1, writeCount: 1 }],
+    usedBy: [],
+    byProcedure: [{ procedureId: 'S$P1', procedureName: 'P1', sourceFile: 'f.sql',
+                    reads: [{ variable: 'G_X', lineNumber: 10 }], writes: [{ variable: 'G_X', lineNumber: 12 }],
+                    readCount: 1, writeCount: 1 }]
+  }, esc);
+  includes(html, 'Per-procedure footprint (1)', 'the per-procedure footprint is missing');
+  includes(html, "PA.showProcedure('S$P1')", 'the procedure footprint is not a clickable link');
+  includes(html, 'G_X', 'the variable is missing from the footprint');
+}
+
+export async function test_estate_modules_expose_cross_link_router() {
+  const views = await read('parser/js/estateViews.js');
+  includes(views, 'showView: function', 'estateViews must expose a showView cross-link target');
+  includes(views, "PA.estateTab.switchSub('views')", 'showView must switch to the views sub-tab');
+  const triggers = await read('parser/js/estateTriggers.js');
+  includes(triggers, 'showTrigger: function', 'estateTriggers must expose a showTrigger cross-link target');
+  includes(triggers, "PA.estateTab.switchSub('triggers')", 'showTrigger must switch to the triggers sub-tab');
+  const globals = await read('parser/js/estateGlobals.js');
+  includes(globals, 'showPackage: function', 'estateGlobals must expose a showPackage cross-link target');
+  includes(globals, "PA.estateTab.switchSub('globals')", 'showPackage must switch to the globals sub-tab');
+}
+
 export async function test_estate_screens_are_wired_into_navigation() {
   const html = await read('parser/index.html');
   includes(html, "PA.switchRightTab('estate')", 'the Estate tab button is not wired');

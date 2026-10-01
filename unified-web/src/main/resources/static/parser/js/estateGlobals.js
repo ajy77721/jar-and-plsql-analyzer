@@ -27,6 +27,47 @@ PA.estateGlobals = {
         PA.estateGlobals.data = [];
     },
 
+    /**
+     * Cross-estate link target: switch to the Estate → Globals screen, filter to this package and
+     * open its detail row. Used by the per-procedure footprint and by any package link.
+     */
+    showPackage: function(pkg) {
+        if (!pkg) return;
+        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('globals');
+        var el = document.getElementById('glSearch');
+        if (el) el.value = pkg;
+        var src = PA.estateGlobals._src;
+        if (src && PA.tf) {
+            src.setParam('q', pkg);
+            PA.tf._restart('gl');
+        }
+        PA.estateGlobals._focus('gl', pkg, 'package');
+    },
+
+    /** Poll for the named row in a server-paged table, then toggle its detail open and scroll to it. */
+    _focus: function(tfId, name, field) {
+        var tries = 0;
+        var want = String(name).toUpperCase();
+        var iv = setInterval(function() {   // poll-exempt: local DOM poll for a just-navigated row, no network request
+            var st = PA.tf && PA.tf.state ? PA.tf.state(tfId) : null;
+            var rows = st && st.filtered;
+            if (rows && rows.length) {
+                for (var i = 0; i < rows.length; i++) {
+                    if (String(rows[i][field] || '').toUpperCase() === want) {
+                        clearInterval(iv);
+                        var idx = st.page * st.pageSize + i;
+                        PA.tf.toggleDetail(tfId, idx);
+                        var rowEl = document.getElementById(tfId + '-detail-' + idx);
+                        if (rowEl && rowEl.scrollIntoView) rowEl.scrollIntoView({ block: 'center' });
+                        return;
+                    }
+                }
+            }
+            if (++tries > 40) clearInterval(iv);
+        }, 100);
+    },
+
     _initTable: function() {
         var container = document.getElementById('glContainer');
         if (!container) return;
@@ -155,7 +196,7 @@ PA.estateGlobals = {
         var vars = d.variables || [];
         html += '<div class="est-section"><div class="est-section-title">Variables (' + vars.length + ')</div>';
         if (vars.length) {
-            html += '<table class="est-cols"><thead><tr><th>Name</th><th>Data Type</th><th>Default</th><th>Const</th></tr></thead><tbody>';
+            html += '<table class="est-cols"><thead><tr><th>Name</th><th>Data Type</th><th>Default</th><th>Const</th><th>Reads</th><th>Writes</th></tr></thead><tbody>';
             for (var i = 0; i < vars.length; i++) {
                 var v = vars[i];
                 var declared = v.declared !== false;
@@ -164,9 +205,11 @@ PA.estateGlobals = {
                     + '<td class="est-col-type">' + (v.dataType ? esc(v.dataType) : '<span style="color:var(--text-muted)">not recorded</span>') + '</td>'
                     + '<td class="est-col-type">' + (v.defaultValue != null ? esc(v.defaultValue) : '<span style="color:var(--text-muted)">-</span>') + '</td>'
                     + '<td>' + (v.constant ? 'YES' : 'NO') + '</td>'
+                    + '<td>' + (v.readCount || 0) + '</td>'
+                    + '<td>' + (v.writeCount || 0) + '</td>'
                     + '</tr>';
                 if (!declared) {
-                    html += '<tr><td colspan="4" style="font-size:10px;color:var(--text-muted);padding-top:0">'
+                    html += '<tr><td colspan="6" style="font-size:10px;color:var(--text-muted);padding-top:0">'
                         + 'Reference-only — no declaration captured (analysis predates declaration persistence).</td></tr>';
                 }
             }
@@ -180,6 +223,47 @@ PA.estateGlobals = {
         html += PA.estateGlobals._usedByHtml(d, esc);
         html += '</div>';
 
+        // The reverse view: each procedure's footprint on this package's globals.
+        if (d.byProcedure && d.byProcedure.length) {
+            html += '<div class="est-section"><div class="est-section-title">Per-procedure footprint (' + d.byProcedure.length + ')</div>';
+            html += PA.estateGlobals._byProcedureHtml(d.byProcedure, esc);
+            html += '</div>';
+        }
+
+        return html;
+    },
+
+    /**
+     * One block per procedure: a clickable procedure link plus the variables it reads and writes,
+     * each with its line — the per-procedure globals summary, the reverse of the readers/writers list.
+     */
+    _byProcedureHtml: function(byProc, esc) {
+        var html = '';
+        for (var i = 0; i < byProc.length; i++) {
+            var p = byProc[i];
+            html += '<div class="est-var-group"><div class="est-var-name">'
+                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
+                + PA.escJs(p.procedureId || '') + '\')">' + esc(p.procedureName || p.procedureId || '') + '</span>'
+                + ' <span style="color:var(--text-muted);font-weight:400">' + (p.readCount || 0) + 'r / ' + (p.writeCount || 0) + 'w</span></div>';
+            html += '<div class="est-usedby">';
+            html += PA.estateGlobals._accessListHtml('READ', p.reads, esc);
+            html += PA.estateGlobals._accessListHtml('WRITE', p.writes, esc);
+            html += '</div></div>';
+        }
+        return html;
+    },
+
+    _accessListHtml: function(kind, list, esc) {
+        var html = '';
+        list = list || [];
+        for (var i = 0; i < list.length; i++) {
+            var e = list[i];
+            html += '<div class="est-usedby-item">'
+                + '<span class="est-op-badge ' + (kind === 'WRITE' ? 'write' : 'read') + '">' + kind + '</span>'
+                + '<span class="est-col-name">' + esc(e.variable || '') + '</span>'
+                + (e.lineNumber ? '<span class="est-usedby-line">L' + e.lineNumber + '</span>' : '')
+                + '</div>';
+        }
         return html;
     },
 
