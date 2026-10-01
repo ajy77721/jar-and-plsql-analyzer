@@ -440,6 +440,58 @@ class EstateFacetsTest {
         assertEquals("G_X", proc.path("writes").get(0).path("variable").asText());
     }
 
+    /**
+     * The globals-facet noise regression, end to end. The persisted artifacts still carry the
+     * record-variable / FOR-loop-record / table-alias rows the old qualifier heuristic emitted
+     * ({@code V_REC.PRODUCT_ID}, {@code R.SKU}, {@code D.PRODUCT_ID}, {@code P.SKU}) alongside the
+     * real global ({@code ERP_PKG_PLANNER.G_LAST_CONTEXT}). The facet must show ONLY the real
+     * global — {@code declared:true} with its type — and its two usage rows (the bare write inside
+     * its own package and the cross-package read), with none of the record/alias qualifiers.
+     */
+    @Test
+    void globalsFacetDropsRecordAndAliasNoiseKeepingOnlyRealGlobals() throws Exception {
+        put("api/index.json", """
+                {"entryPoint":"DEMO","nodes":[
+                 {"nodeId":"S$PKG","name":"ERP_PKG_PLANNER","objectType":"PACKAGE_BODY"},
+                 {"nodeId":"S$P_SET","name":"SET_CONTEXT","objectType":"PROCEDURE"},
+                 {"nodeId":"S$P_USE","name":"FINALIZE","objectType":"PROCEDURE"}]}""");
+        put("api/tables/index.json", "{\"tables\":[]}");
+        // The declaring package node (grammar-captured global declaration).
+        put("api/nodes/S$PKG.json", """
+                {"nodeId":"S$PKG","name":"ERP_PKG_PLANNER","packageName":"ERP_PKG_PLANNER",
+                 "objectName":"ERP_PKG_PLANNER","objectType":"PACKAGE_BODY",
+                 "packageGlobalDeclarations":[
+                   {"name":"G_LAST_CONTEXT","dataType":"VARCHAR2(60)","defaultValue":null,"constant":false}]}""");
+        // The bare write inside the owning package, plus record/loop-record noise on the same node.
+        put("api/nodes/S$P_SET.json", """
+                {"nodeId":"S$P_SET","name":"SET_CONTEXT","objectType":"PROCEDURE",
+                 "externalPackageVarRefDetails":[
+                   {"packageName":"ERP_PKG_PLANNER","variableName":"G_LAST_CONTEXT","line":5,"accessType":"WRITE"},
+                   {"packageName":"V_REC","variableName":"PRODUCT_ID","line":6,"accessType":"WRITE"},
+                   {"packageName":"R","variableName":"SKU","line":7,"accessType":"READ"}]}""");
+        // The cross-package read, plus table-alias noise.
+        put("api/nodes/S$P_USE.json", """
+                {"nodeId":"S$P_USE","name":"FINALIZE","objectType":"PROCEDURE",
+                 "externalPackageVarRefDetails":[
+                   {"packageName":"ERP_PKG_PLANNER","variableName":"G_LAST_CONTEXT","line":12,"accessType":"READ"},
+                   {"packageName":"D","variableName":"PRODUCT_ID","line":13,"accessType":"READ"},
+                   {"packageName":"P","variableName":"SKU","line":14,"accessType":"READ"}]}""");
+
+        JsonNode globals = staticReader.getGlobals(NAME);
+        assertEquals(1, globals.size(),
+                "only the real package survives; record/alias qualifiers are dropped: " + globals);
+        JsonNode pkg = globals.get(0);
+        assertEquals("ERP_PKG_PLANNER", pkg.path("package").asText());
+        assertEquals(1, pkg.path("variableCount").asInt());
+        JsonNode g = pkg.path("variables").get(0);
+        assertEquals("G_LAST_CONTEXT", g.path("name").asText());
+        assertTrue(g.path("declared").asBoolean(), "declaration present → declared:true");
+        assertEquals("VARCHAR2(60)", g.path("dataType").asText());
+        assertEquals(1, g.path("readCount").asInt());
+        assertEquals(1, g.path("writeCount").asInt());
+        assertEquals(2, pkg.path("usageCount").asInt(), "one bare write + one cross-package read");
+    }
+
     /* ─────────────────────── endpoint byte-equivalence ─────────────────────── */
 
     private byte[] bytes(ResponseEntity<?> response) throws IOException {

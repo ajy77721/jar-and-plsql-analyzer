@@ -95,6 +95,12 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     // Track CTE (WITH clause) names and inline view aliases to avoid false-positive table refs
     private final Set<String> queryAliases = new HashSet<>();
 
+    // FOR-loop record names currently in scope (cursor FOR loops: `FOR r IN (...) LOOP`). A dotted
+    // reference qualified by one of these (r.field) is a record-field access, never a package-global
+    // read; the package-global capture drops it. A stack because loops nest and the same record name
+    // can be reused by sibling loops.
+    private final Deque<Set<String>> loopRecordStack = new ArrayDeque<>();
+
     // Track loop nesting depth for complexity analysis
     private int loopNestingDepth = 0;
 
@@ -287,6 +293,23 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     /** True if {@code name} is a variable declared in the current subprogram/package/object scope. */
     private boolean isDeclaredVariableInScope(String name) {
         if (name == null || name.isEmpty()) return false;
+        if (isLocalVariableOrParamInScope(name)) return true;
+        ParsedObject po = currentObject();
+        if (po != null) {
+            if (nameInVarList(name, po.getPackageVariables())) return true;
+            if (nameInVarList(name, po.getGlobalVariables())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * True if {@code name} is a LOCAL variable or a formal parameter of the subprogram currently
+     * being visited — i.e. it shadows any same-named package global at this point in the code.
+     * Distinct from {@link #isDeclaredVariableInScope}, which also counts package/global variables
+     * (a bare reference to one of those IS a package-global usage, not a shadowing local).
+     */
+    private boolean isLocalVariableOrParamInScope(String name) {
+        if (name == null || name.isEmpty()) return false;
         SubprogramInfo sub = currentSubprogram();
         if (sub != null && nameInVarList(name, sub.getLocalVariables())) return true;
         // A collection/varray-typed formal parameter indexed as p_arr(1) is syntactically identical
@@ -296,11 +319,6 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         // procedure named after the parameter. Confirmed as a real false positive before this check
         // existed (§201).
         if (sub != null && nameInParamList(name, sub.getParameters())) return true;
-        ParsedObject po = currentObject();
-        if (po != null) {
-            if (nameInVarList(name, po.getPackageVariables())) return true;
-            if (nameInVarList(name, po.getGlobalVariables())) return true;
-        }
         return false;
     }
 
@@ -506,6 +524,92 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 po.getExternalPackageVarRefDetails().add(info);
             }
         }
+    }
+
+    /**
+     * A package-level variable referenced WITHOUT a qualifier, from inside its OWNING package
+     * (e.g. {@code g_last_context := p_ctx;} in {@code erp_pkg_planner.set_context}). The owning
+     * package is the qualifier the source omitted, so the reference is recorded as
+     * {@code <owningPkg>.<name>} — the same shape a cross-package reference uses, which is what the
+     * estate globals facet keys on.
+     *
+     * <p>Fires only when {@code name} is a DECLARED package-level variable of the package currently
+     * being parsed and is not shadowed by a local variable/parameter of the enclosing subprogram.
+     * Bare locals, parameters, loop indices and record variables therefore never become refs.
+     */
+    private void captureBarePackageGlobalRef(String name, PlSqlParser.General_elementContext ctx) {
+        if (name == null || name.isEmpty()) return;
+        if (currentPackageName == null) return;                       // not inside a package at all
+        String upper = name.toUpperCase();
+        if (!pkgGlobalVarNames.contains(upper)) return;               // not a declared package global
+        if (isLocalVariableOrParamInScope(name)) return;              // shadowed by a local/param
+        if (!isLikelyPackageVarRef(ctx)) return;                      // not a value-usage context
+        addExternalPackageVarRef(currentPackageName + "." + name);
+        addExternalPackageVarRefDetail(currentPackageName, name, getStartLine(ctx),
+                classifyPackageVarAccess(ctx));
+    }
+
+    /**
+     * True when {@code qualifier} provably is NOT a package name in this context, so a dotted
+     * reference {@code qualifier.field} is a record-field or alias-column access rather than a
+     * package-global read. Grammar-first: the disqualifiers are the scope/alias facts the visitor
+     * already tracks (declared variables and parameters, cursor names, FOR-loop records, FROM/JOIN
+     * table aliases and CTE names), never a text heuristic.
+     */
+    private boolean isNonPackageQualifier(String qualifier, PlSqlParser.General_elementContext ctx) {
+        if (qualifier == null || qualifier.isEmpty()) return true;
+        String q = qualifier.toUpperCase();
+        if (isKnownKeyword(qualifier)) return true;
+        // A declared local/parameter/package/global variable (record variables included).
+        if (isDeclaredVariableInScope(qualifier)) return true;
+        // A cursor declared in the current subprogram/object.
+        if (isDeclaredCursorInScope(qualifier)) return true;
+        // A FOR-loop record: FOR r IN (...) LOOP → r.field is a field access.
+        for (Set<String> frame : loopRecordStack) {
+            if (frame.contains(q)) return true;
+        }
+        // A table / inline-view / CTE alias bound anywhere in this parse (the query-block pre-scan
+        // registers every FROM alias before the select list is visited, so this covers select-list,
+        // WHERE and GROUP BY references too).
+        if (queryAliases.contains(q)) return true;
+        // A type declared in this object (a record/collection type name is not a package).
+        if (declaredTypeNames.contains(q)) return true;
+        // A table alias bound in the enclosing statement's FROM/JOIN — the ON-condition case, where
+        // the qualifier sits inside the join_clause and no query-block pre-scan has run for it.
+        PlSqlParser.From_clauseContext fc = enclosingFromClause(ctx);
+        if (fc != null && buildAliasMap(fc).containsKey(q)) return true;
+        return false;
+    }
+
+    /**
+     * True when a two-part reference {@code qualifier.var} resolves to a package-global variable.
+     * The qualifier has already been proven not to be a variable/record/alias
+     * (see {@link #isNonPackageQualifier}). Resolution is grammar-first, in priority order:
+     *
+     * <ol>
+     *   <li>the qualifier is a package parsed earlier in this unit AND {@code var} is one of its
+     *       declared globals (the cross-package-in-one-file case);</li>
+     *   <li>the qualifier is the package currently being parsed AND {@code var} is one of its own
+     *       declared globals (the {@code erp_pkg_planner.g_last_context} self-reference case);</li>
+     *   <li>the cross-FILE fallback: {@code var} carries the package-global naming convention
+     *       ({@code g_} prefix) and the qualifier looks like a package (the conventional {@code PKG}
+     *       token). The referenced package's declaration is not visible at this layer in a per-file
+     *       parse, so the naming convention is the only signal available — and it is exactly what
+     *       separates the real globals ({@code g_last_context}) from the record fields / alias
+     *       columns that share the {@code X.Y} shape.</li>
+     * </ol>
+     */
+    private boolean qualifierResolvesToPackage(String qualifier, String varName) {
+        if (qualifier == null || varName == null) return false;
+        String q = qualifier.toUpperCase();
+        String v = varName.toUpperCase();
+        Set<String> knownGlobals = globalVarNamesRegistry.get(q);
+        if (knownGlobals != null && knownGlobals.contains(v)) return true;
+        if (currentPackageName != null && q.equals(currentPackageName.toUpperCase())
+                && pkgGlobalVarNames.contains(v)) {
+            return true;
+        }
+        return v.startsWith("G_") && q.contains("PKG");
     }
 
     /**
@@ -3814,6 +3918,19 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                         && ctx.cursor_loop_param().select_statement() != null)
                         ? ctx.cursor_loop_param() : null;
 
+        // A cursor FOR loop's record (FOR r IN (...) LOOP) is a record variable scoped to the loop
+        // body: r.field is a field access, not a package-global read. Track it while the body is
+        // visited so the package-global capture can drop it.
+        boolean pushedLoopRecord = ctx.FOR() != null
+                && ctx.cursor_loop_param() != null
+                && ctx.cursor_loop_param().record_name() != null;
+        if (pushedLoopRecord) {
+            Set<String> frame = new HashSet<>();
+            String rec = cleanId(ctx.cursor_loop_param().record_name().getText());
+            if (rec != null) frame.add(rec.toUpperCase());
+            loopRecordStack.push(frame);
+        }
+
         Void result;
         if (clpForSkip != null) {
             // Visit all loop children except the inline cursor select_statement
@@ -3843,6 +3960,10 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         if (ctx.cursor_loop_param() != null && ctx.cursor_loop_param().select_statement() != null) {
             String queryText = getOriginalText(ctx.cursor_loop_param().select_statement(), 10000);
             extractFunctionCallsFromSqlText(queryText, getStartLine(ctx));
+        }
+
+        if (pushedLoopRecord) {
+            loopRecordStack.pop();
         }
 
         loopNestingDepth--;
@@ -4375,34 +4496,22 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 if ("NEXTVAL".equals(lastPart) || "CURRVAL".equals(lastPart)) {
                     addSequenceReference(partNames, lastPart, getStartLine(ctx));
                 } else {
-                    // Could be an external package variable reference: PKG_NAME.VAR_NAME
-                    // Only if the first part is not the current package
+                    // Could be an external package variable reference: PKG_NAME.VAR_NAME.
+                    // Grammar-first: the qualifier must resolve to a real PACKAGE. A qualifier
+                    // that is a declared variable/record, a FOR-loop record, a cursor, or a
+                    // FROM/JOIN table alias is NOT a package — DROP it (those produced the
+                    // 100%-false-positive record/alias rows in the globals facet). And the pair
+                    // must match a DECLARED global (known-package registry or the owning package's
+                    // own globals), or carry the package-global naming convention for the
+                    // cross-file case.
                     String firstPart = partNames.get(0);
                     String varPart = partNames.get(partNames.size() - 1);
-
-                    // Gap fix: a STANDALONE procedure/function (currentPackageName == null)
-                    // can also reference another package's global variable. Since we don't
-                    // have an enclosing package to exclude by name in that case, only allow
-                    // the standalone path when the qualifier is a KNOWN package (its globals
-                    // were seen earlier in this same single-pass parse, via
-                    // globalVarNamesRegistry) AND the variable name is one of its declared
-                    // globals. This is a real single-pass-parse constraint: it only works
-                    // when the referenced package's declaration appears earlier in the same
-                    // source file/parse unit as the standalone procedure - cross-file package
-                    // global knowledge is not available at this layer.
-                    boolean standaloneKnownPkgVar = currentPackageName == null
-                        && firstPart != null
-                        && globalVarNamesRegistry.containsKey(firstPart.toUpperCase())
-                        && globalVarNamesRegistry.get(firstPart.toUpperCase()).contains(varPart.toUpperCase());
-
-                    boolean packageToPackageCase = currentPackageName != null
-                        && !firstPart.equals(currentPackageName);
 
                     // Check if this is inside an assignment_statement or expression context
                     // to avoid false positives from grammar ambiguity
                     if (firstPart != null
-                        && (packageToPackageCase || standaloneKnownPkgVar)
-                        && !isKnownKeyword(firstPart)
+                        && !isNonPackageQualifier(firstPart, ctx)
+                        && qualifierResolvesToPackage(firstPart, varPart)
                         && isLikelyPackageVarRef(ctx)) {
 
                         String ref = String.join(".", partNames);
@@ -4410,13 +4519,20 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                         addExternalPackageVarRefDetail(firstPart, varPart, getStartLine(ctx),
                             classifyPackageVarAccess(ctx));
 
-                        // Add to dependencies
+                        // Add to dependencies (a package referencing its OWN global is not a
+                        // dependency edge — don't create a package self-loop).
                         ParsedObject po = currentObject();
-                        if (po != null) {
+                        if (po != null && (currentPackageName == null
+                                || !firstPart.equalsIgnoreCase(currentPackageName))) {
                             po.getDependencies().getPackages().add(firstPart);
                         }
                     }
                 }
+            } else if (!hasArgs && partNames.size() == 1) {
+                // A bare (unqualified) package-global reference from inside its OWNING package:
+                // `g_last_context := p_ctx;`. The package qualifier is implicit; record it as
+                // <owningPkg>.<name> so it joins the same usage stream as a cross-package ref.
+                captureBarePackageGlobalRef(partNames.get(0), ctx);
             }
         }
 

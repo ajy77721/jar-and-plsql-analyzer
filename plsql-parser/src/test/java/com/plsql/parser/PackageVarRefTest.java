@@ -129,6 +129,78 @@ public class PackageVarRefTest extends ParserTestBase {
     }
 
     /**
+     * The globals-facet noise regression. Record variables, cursor FOR-loop records and table
+     * aliases all share the {@code X.Y} shape with a genuine package-global reference, and the
+     * old qualifier heuristic recorded all of them. The grammar-first gate must DROP every one of
+     * them (they resolve to a variable/record/alias, not a package) while keeping the REAL global.
+     */
+    @Test
+    void recordVariablesLoopRecordsAndTableAliasesAreNotPackageGlobalRefs() {
+        String sql =
+            "CREATE OR REPLACE PACKAGE pkg_globals AS\n" +
+            "  g_real NUMBER := 0;\n" +
+            "END pkg_globals;\n" +
+            "/\n" +
+            "CREATE OR REPLACE PACKAGE BODY pkg_globals AS\n" +
+            "  PROCEDURE set_real(p IN NUMBER) IS\n" +
+            "  BEGIN\n" +
+            "    g_real := p;\n" +
+            "  END set_real;\n" +
+            "END pkg_globals;\n" +
+            "/\n" +
+            "CREATE OR REPLACE PROCEDURE use_real IS\n" +
+            "  TYPE t_rec IS RECORD (x NUMBER);\n" +
+            "  v_rec t_rec;\n" +
+            "  v_sku erp_product.sku%TYPE;\n" +
+            "  v_qty NUMBER;\n" +
+            "BEGIN\n" +
+            "  FOR r IN (SELECT d.x FROM erp_demand d) LOOP\n" +
+            "    v_rec.x := r.x;\n" +
+            "  END LOOP;\n" +
+            "  SELECT d.qty, p.sku INTO v_qty, v_sku\n" +
+            "    FROM erp_demand d JOIN erp_product p ON p.product_id = d.product_id;\n" +
+            "  DBMS_OUTPUT.PUT_LINE(pkg_globals.g_real);\n" +
+            "END use_real;\n" +
+            "/\n";
+
+        ParseResult result = parse(sql);
+        assertNoParsErrors(result, "globals-facet-noise");
+
+        // The real global: a bare WRITE inside its owning package, and a cross-package READ.
+        SubprogramInfo setReal = findSubInBody(result, "set_real");
+        assertNotNull(setReal);
+        List<PackageVarRefInfo> writes = setReal.getExternalPackageVarRefDetails();
+        assertEquals(1, writes.size(), "only the real global's bare write, got: " + writes);
+        assertEquals("PKG_GLOBALS", writes.get(0).getPackageName());
+        assertEquals("G_REAL", writes.get(0).getVariableName());
+        assertEquals(PackageVarRefInfo.AccessType.WRITE, writes.get(0).getAccessType());
+
+        ParsedObject useReal = findStandaloneObject(result, "use_real");
+        assertNotNull(useReal);
+        List<PackageVarRefInfo> reads = useReal.getExternalPackageVarRefDetails();
+        assertEquals(1, reads.size(), "only the real global's cross-package read, got: " + reads);
+        assertEquals("PKG_GLOBALS", reads.get(0).getPackageName());
+        assertEquals("G_REAL", reads.get(0).getVariableName());
+        assertEquals(PackageVarRefInfo.AccessType.READ, reads.get(0).getAccessType());
+
+        // And nothing anywhere names the record/loop-record/alias qualifiers.
+        for (ParsedObject obj : result.getObjects()) {
+            for (PackageVarRefInfo d : obj.getExternalPackageVarRefDetails()) {
+                String pkg = d.getPackageName() == null ? "" : d.getPackageName().toUpperCase();
+                assertFalse(pkg.equals("V_REC") || pkg.equals("R") || pkg.equals("D") || pkg.equals("P"),
+                    "record/loop-record/alias qualifier leaked into the globals facet: " + d.getRef());
+            }
+            for (SubprogramInfo sub : obj.getSubprograms()) {
+                for (PackageVarRefInfo d : sub.getExternalPackageVarRefDetails()) {
+                    String pkg = d.getPackageName() == null ? "" : d.getPackageName().toUpperCase();
+                    assertFalse(pkg.equals("V_REC") || pkg.equals("R") || pkg.equals("D") || pkg.equals("P"),
+                        "record/loop-record/alias qualifier leaked into the globals facet: " + d.getRef());
+                }
+            }
+        }
+    }
+
+    /**
      * Step 2 structured-data test: a package's subprogram both WRITES and READS
      * another package's global variable on different lines; confirm the
      * structured PackageVarRefInfo list carries correct line numbers and

@@ -1185,6 +1185,14 @@ class EstateFacetReader {
 
         List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
 
+        // Estate-level guard behind the visitor's grammar-first gate: a record variable, a cursor
+        // FOR-loop record and a table alias all share the X.Y shape with a genuine package-global
+        // reference, so a ref is only admitted when its qualifier is a real package in this estate
+        // (a PACKAGE_BODY/PACKAGE_SPEC node or a node carrying declarations), carries the
+        // conventional package-name token, or its variable is a declared global somewhere. Artifacts
+        // written before the visitor gate therefore cannot leak the record/alias noise either.
+        PackageGlobalScope scope = packageGlobalScope(nodeFiles);
+
         // Declaration lists persisted per package (PACKAGE_BODY/PACKAGE_SPEC node details): the
         // declaring package plus name/dataType/defaultValue/constant — the exact shape each
         // variable row uses. Keyed package → variable → declaration so a ref can pick up its own
@@ -1216,6 +1224,7 @@ class EstateFacetReader {
                 String var = textOrNull(ref, "variableName");
                 if (pkg == null || pkg.isBlank() || var == null || var.isBlank()) continue;
                 String pkey = norm(pkg);
+                if (!scope.admits(pkey, norm(var))) continue;
                 ObjectNode row = byPackage.computeIfAbsent(pkey, k -> newPackageRow(m, k));
                 addVariable(row, norm(var), declarationFor(declarations, pkey, var));
                 row.put("usageCount", row.get("usageCount").asInt() + 1);
@@ -1253,6 +1262,54 @@ class EstateFacetReader {
         byPackage.values().forEach(out::add);
         r.synthesizedCache.put(ck, out);
         return out;
+    }
+
+    /**
+     * The estate's package-global scope: which package names are real packages (a
+     * {@code PACKAGE_BODY}/{@code PACKAGE_SPEC} node, or a node carrying persisted global
+     * declarations) and which variable names are declared globals anywhere. A ref whose qualifier
+     * is neither a known package nor the conventional {@code PKG} name pattern, and whose variable
+     * is not a declared global, is a record-variable / FOR-loop-record / table-alias row and is
+     * rejected — the estate-level half of the globals-facet noise fix.
+     */
+    private static final class PackageGlobalScope {
+        private final Set<String> packages = new HashSet<>();
+        private final Set<String> variables = new HashSet<>();
+
+        boolean admits(String pkg, String var) {
+            if (pkg == null || pkg.isEmpty() || var == null || var.isEmpty()) return false;
+            if (packages.contains(pkg)) return true;
+            // The conventional package-name token, so a reference-only global from an analysis that
+            // predates declaration persistence (no package node crawled) still surfaces.
+            if (pkg.contains("PKG")) return true;
+            // A declared global of any package: covers a cross-package ref whose own package node
+            // was not part of this analysis.
+            return variables.contains(var);
+        }
+    }
+
+    private static PackageGlobalScope packageGlobalScope(List<JsonNode> nodeFiles) {
+        PackageGlobalScope scope = new PackageGlobalScope();
+        for (JsonNode node : nodeFiles) {
+            JsonNode decls = node.get("packageGlobalDeclarations");
+            boolean hasDecls = decls != null && decls.isArray() && !decls.isEmpty();
+            String ot = textOrNull(node, "objectType");
+            boolean pkgNode = ot != null
+                    && (ot.equalsIgnoreCase("PACKAGE_BODY") || ot.equalsIgnoreCase("PACKAGE_SPEC"));
+            if (pkgNode || hasDecls) {
+                String pkg = textOrNull(node, "packageName");
+                if (pkg == null || pkg.isBlank()) pkg = textOrNull(node, "objectName");
+                if (pkg == null || pkg.isBlank()) pkg = textOrNull(node, "name");
+                if (pkg != null && !pkg.isBlank()) scope.packages.add(norm(pkg));
+            }
+            if (hasDecls) {
+                for (JsonNode d : decls) {
+                    String vn = textOrNull(d, "name");
+                    if (vn != null && !vn.isBlank()) scope.variables.add(norm(vn));
+                }
+            }
+        }
+        return scope;
     }
 
     private static ObjectNode newPackageRow(ObjectMapper m, String pkey) {
@@ -1322,7 +1379,9 @@ class EstateFacetReader {
     private ArrayNode globalsByProcedure(String name, String pkg) throws IOException {
         ArrayNode out = r.mapper.createArrayNode();
         if (pkg == null || pkg.isEmpty()) return out;
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        PackageGlobalScope scope = packageGlobalScope(nodeFiles);
+        for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
             if (refs == null || !refs.isArray()) continue;
             String nodeId = textOrNull(node, "nodeId");
@@ -1330,7 +1389,9 @@ class EstateFacetReader {
             String sourceFile = textOrNull(node, "sourceFile");
             ObjectNode p = null;
             for (JsonNode ref : refs) {
-                if (!norm(textOrNull(ref, "packageName")).equals(pkg)) continue;
+                String refPkg = norm(textOrNull(ref, "packageName"));
+                if (!refPkg.equals(pkg)) continue;
+                if (!scope.admits(refPkg, norm(textOrNull(ref, "variableName")))) continue;
                 if (p == null) {
                     p = r.mapper.createObjectNode();
                     p.put("procedureId", nodeId != null ? nodeId : "");
@@ -1371,7 +1432,9 @@ class EstateFacetReader {
     JsonNode getGlobalsUsedByMap(String name) throws IOException {
         ObjectMapper m = r.mapper;
         Map<String, ArrayNode> byVar = new LinkedHashMap<>();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        PackageGlobalScope scope = packageGlobalScope(nodeFiles);
+        for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
             if (refs == null || !refs.isArray()) continue;
             String nodeId = textOrNull(node, "nodeId");
@@ -1380,9 +1443,11 @@ class EstateFacetReader {
             for (JsonNode ref : refs) {
                 String v = norm(textOrNull(ref, "variableName"));
                 if (v.isEmpty()) continue;
+                String refPkg = norm(textOrNull(ref, "packageName"));
+                if (!scope.admits(refPkg, v)) continue;
                 ArrayNode list = byVar.computeIfAbsent(v, k -> m.createArrayNode());
                 ObjectNode u = m.createObjectNode();
-                u.put("package", norm(textOrNull(ref, "packageName")));
+                u.put("package", refPkg);
                 u.put("variable", v);
                 u.put("procedureId", nodeId != null ? nodeId : "");
                 u.put("procedureName", nodeName != null ? nodeName : "");
@@ -1410,7 +1475,9 @@ class EstateFacetReader {
     private ArrayNode globalUsedBy(String name, String variable, String pkg) throws IOException {
         ObjectMapper m = r.mapper;
         ArrayNode out = m.createArrayNode();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        PackageGlobalScope scope = packageGlobalScope(nodeFiles);
+        for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
             if (refs == null || !refs.isArray()) continue;
             String nodeId = textOrNull(node, "nodeId");
@@ -1423,6 +1490,7 @@ class EstateFacetReader {
                         ? v.equals(norm(variable))
                         : p.equals(pkg);
                 if (!match) continue;
+                if (!scope.admits(p, v)) continue;
                 ObjectNode u = m.createObjectNode();
                 u.put("package", p);
                 u.put("variable", v);
