@@ -62,10 +62,14 @@
 | 38 | Overload discriminator upgrade follow-ups (from the overload table): same-arity-different-type Oracle overloads (in 22), FUNCTION/PROCEDURE same-name pairs, named/default-arg-aware call resolution, per-package overload counts in the index | overload audit | with 22 |
 | 39 | Token UX: warn users that iam-imported credentials expire ~1h (the CLI-import wall hit in testing) | test session | small |
 | 40 | Staging final deploy → USER REVIEW → prod tag v1.1.0 | — | THE LAST GATE |
+| 43 | **MODES: the complete inventory** — enumerate EVERY storage mode (local / s3 / mongo-GridFS / hybrid + the per-feature overrides app.storage.parser.mode / jar mode) with ALL properties, data flow, and layer behavior per mode; document in docs/modes.md + README | user ask | 🔄 inventory agent in flight |
+| 44 | **MODES: full-local = ZERO verification** — `app.auth.required` (auto: local/mongo=false, s3/hybrid=true, explicit override wins) — no SSO/S3/profile in pure local | user ask | 🔄 in flight |
+| 45 | **MODES: the INGEST mode documented + supported everywhere** — the analysis-mongo-ingest pipeline (entities → Mongo collections): its trigger, collection naming, properties (enable/uri/batch), and which storage modes it works with; fix any mode combination that should work but doesn't (e.g. local analysis + mongo ingest) | user ask | 🔄 inventory agent |
+| 46 | **MODES: verification** — after 43-45 land: a live test per mode (local: no-auth works; s3: per-user; mongo: GridFS; hybrid: the split; ingest: collections populated) — each mode's behavior matches its documentation | user ask | after 43-45 |
 | 41 | ✅ VERIFIED: JAR endpoint-level overloads — two controller methods with the same URL but different params = 2 distinct endpoints (ordinal-prefixed folders), call trees resolve the EXACT overload by bytecode descriptor, overrides fan out with dispatch markers (DIRECT/DYNAMIC_DISPATCH/AMBIGUOUS_IMPL/LIST_INJECT/DEFAULT_METHOD) | user question | DONE |
 | 42 | Classifier-outage handling: when the safety classifier is down — no immediate retries; use Read/non-blocked tools; wait ≥5 min between attempts; hand the user the command when urgent; batch work for one recovery | user mandate | STANDING RULE |
 
 ---
 
 ## Execution order
-**21-23 land → 24-29 (fan-out in priority order) + 31-33 (small fixes) → 30 (the big deferred pieces) → 34 (user's login) → 35-38 (the re-verification round) → 39 → 40 (user review → prod).**
+**21-23 land → 24-29 + 31-33 → 30 → 34 → 35-38 → 39 → 40.** ALSO: 43-46 (the modes) run parallel with 24+ — the inventory agent → the doc + the auth fix → the per-mode verification (46) before 40.**
