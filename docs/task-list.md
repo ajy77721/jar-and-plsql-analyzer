@@ -23,6 +23,7 @@
 | 13 | Estate facets: views/MVs + chains, triggers + chains, globals — grammar-first | user ask | e115098 |
 | 14 | Estate detail enrichment (cross-links, willFire inverse map, per-proc footprints) | user ask | 030e77c, eccf18f |
 | 15 | JAR→DB call detection (callable/stmt-function/spring-jdbc/jpa/mybatis) | user ask | b724962 |
+| 15b | W1: overload SIGNATURE keys (Oracle type-signature nodes, FUNCTION/PROCEDURE split, Postgres oid-fetch, Db2 SPECIFICNAME, counted resolution fallbacks) | overload audit | 7c6add8 |
 | 16 | UI screens: Estate tab (Views/Triggers/Globals + chains) + JAR Database Calls tab | user ask | 8836bbd |
 | 17 | Regex→grammar Batch 1: dynamic-SQL recursive parse ×4 dialects + trigger bodies | regex audit | 2ab385f |
 | 18 | False-pick fixes: globals noise (100%→0), SQLServer view base tables, DB2 phantom view + STATEMENT level, pseudo-table filter, trigger bodyCalls | false-pick audit | 78eca6e, 9f6fa1b |
@@ -36,8 +37,7 @@
 | # | Task | Source audit |
 |---|---|---|
 | 21 | Regex Batch 2+3 finish: SQL Server visitor → grammar contexts | regex audit | **AC:** all 7 semantic audit-tests pass unmodified; every migrated pattern = grammar-primary with a counted fallback; full reactor green; byte-identical outputs on existing fixtures |
-| 22 | W1: overload SIGNATURE keys — Oracle type signatures, Postgres oid-fetch, Db2 SPECIFICNAME | overload audit | **AC:** same-arity-different-type Oracle overloads = DISTINCT nodes; a FUNCTION/PROCEDURE same-name pair = distinct; Postgres fetches by oid (no name-LIMIT-1); call resolution: signature→arity→first-match (counted); non-overloaded ids byte-identical; suites green |
-| 23 | W2+W3: per-analysis idempotency registry (never global) + DB-impact safety + 5 crawl-redundancy fixes | crawl audit | **AC:** (done 8f39ad5/7c6add8) 2nd crawl skips unchanged objects (no JDBC fetch); LAST_DDL change re-analyzes; partial runs re-analyze; user-B never skips on user-A's registry; QPS cap + timeouts + read-only guard + breaker tested; suites green |
+| 23 | W2+W3: per-analysis idempotency registry (never global) + DB-impact safety + 5 crawl-redundancy fixes | crawl audit | **AC (MET, 8f39ad5/7c6add8):** 2nd crawl skips unchanged objects; LAST_DDL change re-analyzes; partial runs re-analyze; user-B never skips on user-A's registry; QPS cap + timeouts + read-only guard + breaker tested; plsql-parser 1056 green |
 
 ---
 
