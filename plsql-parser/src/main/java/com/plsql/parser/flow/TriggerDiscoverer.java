@@ -17,7 +17,14 @@ import java.util.regex.Pattern;
 public class TriggerDiscoverer {
 
     private static final Set<String> DML_OPS = Set.of("INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE");
-    private static final Set<String> SKIP_TABLES = Set.of("DUAL", "SET", "INTO", "VALUES", "WHERE", "TABLE");
+    private static final Set<String> SKIP_TABLES = Set.of("DUAL", "SET", "INTO", "VALUES", "WHERE", "TABLE",
+            // SQL Server's trigger transition pseudo-tables. INSERTED / DELETED are the trigger's
+            // in-memory delta tables (the affected rows), not schema objects — a body that selects
+            // from them (`SELECT … FROM deleted`) was recorded here as a real SELECT on a table
+            // literally named DELETED, which the estate trigger facet then showed as a "touched"
+            // table. Filtered at this source (the funnel both the grammar and regex body scans pass
+            // through) rather than only downstream.
+            "INSERTED", "DELETED");
     private static final Pattern DML_PATTERN = Pattern.compile(
             "(?i)\\b(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO|SELECT\\s+[^;]*?FROM)\\s+([A-Z_][A-Z0-9_\\.]*)",
             Pattern.MULTILINE);
@@ -237,6 +244,7 @@ public class TriggerDiscoverer {
                             trig.put("definition", body.trim());
                             trig.put("tableOps", extractDmlFromBody(body, knownTypes));
                             trig.put("sequences", extractSequencesFromBody(body));
+                            trig.put("calls", extractCallsFromBody(body));
                         }
                         trig.put("source", "DATABASE");
                         triggers.add(trig);
@@ -298,6 +306,7 @@ public class TriggerDiscoverer {
                             trig.put("definition", body.trim());
                             trig.put("tableOps", extractDmlFromBody(body, knownTypes));
                             trig.put("sequences", extractSequencesFromBody(body));
+                            trig.put("calls", extractCallsFromBody(body));
                         } else {
                             trig.put("definition", null);
                         }
@@ -465,6 +474,7 @@ public class TriggerDiscoverer {
                             trig.put("definition", body.trim());
                             trig.put("tableOps", extractDmlFromBody(body, knownTypes));
                             trig.put("sequences", extractSequencesFromBody(body));
+                            trig.put("calls", extractCallsFromBody(body));
                         } else {
                             trig.put("definition", null);
                         }
@@ -612,6 +622,7 @@ public class TriggerDiscoverer {
             trig.put("definition", body.trim());
             trig.put("tableOps", extractDmlFromBody(body, knownTypes));
             trig.put("sequences", extractSequencesFromBody(body));
+            trig.put("calls", extractCallsFromBody(body));
         }
         trig.put("source", "DATABASE");
         return trig;
@@ -727,6 +738,87 @@ public class TriggerDiscoverer {
             }
         }
         return seqs;
+    }
+
+    /**
+     * The outbound routine calls made by a trigger body — the cross-estate edge from a trigger
+     * into the procedures/functions it invokes (and, transitively, the globals they touch).
+     *
+     * <p>Grammar-first: the body is a real routine body, so it is parsed by the SAME dialect parser
+     * the rest of the crawl uses and its {@link CallInfo}s are read off the result. There is no
+     * text-scan recovery path here on purpose — a regex over a trigger body cannot distinguish a
+     * call from a keyword, and a wrong edge is worse than an absent one. A body that does not parse
+     * (or a dialect whose parser reports errors on it) yields an empty list, honestly.
+     *
+     * <p>The returned maps have the same shape as a node detail's {@code calls[]}
+     * ({@code target / packageName / objectName / type / schema / lines / count}), so the crawler
+     * can turn them straight into {@link CallInfo}s for the trigger node and the estate facet's
+     * {@code bodyCalls} picks them up with no re-parse at read time.
+     */
+    public List<Map<String, Object>> extractCallsFromBody(String body) {
+        return extractCallsFromBody(body, connManager == null ? null
+                : com.plsqlanalyzer.config.DbType.fromString(connManager.getDbType()));
+    }
+
+    /** As {@link #extractCallsFromBody(String)} but with the dialect supplied explicitly, so the
+     *  extraction can be exercised without a live connection. */
+    List<Map<String, Object>> extractCallsFromBody(String body, com.plsqlanalyzer.config.DbType dialect) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (body == null || body.isBlank()) return out;
+        List<ParsedObject> parsed = parseBodyWithDialectGrammar(body, dialect);
+        if (parsed == null) return out;
+        Set<String> seen = new HashSet<>();
+        for (CallInfo ci : collectCalls(parsed)) {
+            String name = ci.getName();
+            if (name == null || name.isBlank()) continue;
+            String type = ci.getType() != null ? ci.getType() : "EXTERNAL";
+            // Built-ins (DBMS_OUTPUT.PUT_LINE, SQL Server NEXTVAL shims) and sequence pseudo-calls
+            // are not cross-estate edges — the call graph does not follow them.
+            if ("BUILTIN".equalsIgnoreCase(type) || "SEQUENCE".equalsIgnoreCase(type)) continue;
+            String pkg = ci.getPackageName();
+            String schema = ci.getSchema();
+            String objectName = (pkg != null && !pkg.isBlank()) ? pkg + "." + name : name;
+            String key = (schema != null ? schema.toUpperCase() : "") + "|" + objectName.toUpperCase();
+            if (!seen.add(key)) continue;
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("target", objectName);
+            c.put("packageName", pkg);
+            c.put("objectName", objectName);
+            c.put("name", name);
+            c.put("type", type);
+            c.put("schema", schema);
+            List<Integer> lines = new ArrayList<>();
+            if (ci.getLine() > 0) lines.add(ci.getLine());
+            c.put("lines", lines);
+            c.put("count", lines.size());
+            out.add(c);
+        }
+        return out;
+    }
+
+    /**
+     * Parse a trigger body with the DIALECT's own grammar (SQL Server / MySQL / DB2 / PostgreSQL),
+     * falling back to the Oracle PL/SQL grammar when the dialect is Oracle or unknown. Used for
+     * call extraction, where a dialect-specific body (e.g. T-SQL's {@code EXEC dbo.usp_x @id}) can
+     * only be recognised by that dialect's parser. Returns null when the body does not parse.
+     */
+    private List<ParsedObject> parseBodyWithDialectGrammar(String body, com.plsqlanalyzer.config.DbType dialect) {
+        if (body == null || body.isBlank()) return null;
+        if (dialect != null && dialect != com.plsqlanalyzer.config.DbType.ORACLE) {
+            com.plsql.parser.multidb.StoredProcedureParser parser =
+                    com.plsql.parser.multidb.StoredProcedureParserFactory.get(dialect);
+            if (parser != null) {
+                try {
+                    ParseResult result = parser.parse(body, "TRIGGER_BODY", null);
+                    if (result == null || result.getObjects() == null || result.getObjects().isEmpty()) return null;
+                    if (result.getErrors() != null && !result.getErrors().isEmpty()) return null;
+                    return result.getObjects();
+                } catch (Exception | StackOverflowError e) {
+                    return null;
+                }
+            }
+        }
+        return parseBodyWithGrammar(body);
     }
 
     /**

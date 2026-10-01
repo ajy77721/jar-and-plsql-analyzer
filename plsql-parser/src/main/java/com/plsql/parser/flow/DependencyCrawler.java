@@ -1078,6 +1078,11 @@ public class DependencyCrawler {
             tn.setTriggerTable(tableU);
             tn.setTriggerEvent(eventU);
             tn.setTriggerTiming(timing);
+            // The trigger body's outbound calls, extracted by TriggerDiscoverer from the parsed
+            // body. Persisting them on the node is what lets the estate trigger facet expose
+            // bodyCalls (the cross-estate edge from a trigger into the routines it calls) — before
+            // this the trigger node carried no calls[] at all, so the facet field never appeared.
+            tn.setCalls(toCallInfos(t.get("calls")));
             tn.setReadable(true);
             // Anchor every trigger at depth 1: a trigger is an artefact of the table it fires on,
             // not a node on the caller's own path, so it is pinned one level under the root rather
@@ -1169,6 +1174,38 @@ public class DependencyCrawler {
             }
         }
         log.info("[Crawler] Emitted trigger nodes+edges for " + emittedTrig.size() + " triggers");
+    }
+
+    /**
+     * Convert the trigger map's {@code calls} list (the {@code {name, packageName, type, schema,
+     * lines[]}} maps TriggerDiscoverer produces) into {@link CallInfo}s, so the trigger node detail
+     * is written through the same {@code groupCalls} path every other node uses. Never null.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<CallInfo> toCallInfos(Object callsObj) {
+        List<CallInfo> out = new ArrayList<>();
+        if (!(callsObj instanceof List<?> list)) return out;
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> cm)) continue;
+            Object nameObj = cm.get("name");
+            if (nameObj == null) nameObj = cm.get("objectName");
+            if (nameObj == null) continue;
+            CallInfo ci = new CallInfo();
+            ci.setName(String.valueOf(nameObj));
+            Object pkg = cm.get("packageName");
+            if (pkg != null) ci.setPackageName(String.valueOf(pkg));
+            Object type = cm.get("type");
+            ci.setType(type != null ? String.valueOf(type) : "EXTERNAL");
+            Object schema = cm.get("schema");
+            if (schema != null) ci.setSchema(String.valueOf(schema));
+            Object lines = cm.get("lines");
+            if (lines instanceof List<?> ln && !ln.isEmpty()) {
+                Object first = ln.get(0);
+                if (first instanceof Number num) ci.setLine(num.intValue());
+            }
+            out.add(ci);
+        }
+        return out;
     }
 
     private void writeNodeSource(ChunkedFlowWriter writer, FlowNode node, String ownerSchema) {

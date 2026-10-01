@@ -145,10 +145,48 @@ public final class ViewDefinitionAnalyzer {
      */
     private static String wrap(DbType dialect, String name, String definitionText, boolean isMaterialized) {
         String trimmed = definitionText.trim();
-        if (trimmed.regionMatches(true, 0, "CREATE", 0, 6)) return trimmed;
+        // A full CREATE statement is passed through untouched — but the FIRST token is not always
+        // the CREATE keyword. SQL Server's sys.sql_modules.definition (and DB2's SYSCAT.VIEWS.TEXT)
+        // commonly carry the source's own leading comments: a definition beginning
+        // "-- view over the reference table\nCREATE VIEW erp_ref.vw_Region AS ..." used to fail the
+        // bare regionMatches check and be treated as a bare SELECT body, so it was wrapped as
+        // "CREATE OR REPLACE VIEW v AS -- view ... CREATE VIEW ..." — a doubly-wrapped statement
+        // that parses to nothing, leaving viewTableOperations/viewJoins null for every commented
+        // view. Skipping whitespace AND comments before the check recovers the real CREATE header
+        // (the lexer skips comments anyway, so the text can be passed through unchanged).
+        int start = firstMeaningfulIndex(trimmed);
+        if (trimmed.regionMatches(true, start, "CREATE", 0, 6)) return trimmed;
         if (dialect == DbType.ORACLE && isMaterialized) {
             return "CREATE MATERIALIZED VIEW " + name + " AS " + trimmed;
         }
         return "CREATE OR REPLACE VIEW " + name + " AS " + trimmed;
+    }
+
+    /**
+     * Index of the first character that is neither whitespace nor part of a line comment
+     * ({@code -- …}) or a slash-star block comment. Returns {@code s.length()} for an
+     * all-comment string. Deliberately a small hand-rolled scanner (not a regex) so it cannot
+     * backtrack and so it treats an unterminated block comment as "nothing meaningful after it"
+     * rather than throwing.
+     */
+    private static int firstMeaningfulIndex(String s) {
+        int i = 0;
+        int n = s.length();
+        while (i < n) {
+            char c = s.charAt(i);
+            if (Character.isWhitespace(c)) {
+                i++;
+            } else if (c == '-' && i + 1 < n && s.charAt(i + 1) == '-') {
+                i += 2;
+                while (i < n && s.charAt(i) != '\n') i++;
+            } else if (c == '/' && i + 1 < n && s.charAt(i + 1) == '*') {
+                int end = s.indexOf("*/", i + 2);
+                if (end < 0) return n;             // unterminated block comment — nothing meaningful
+                i = end + 2;
+            } else {
+                break;
+            }
+        }
+        return i;
     }
 }

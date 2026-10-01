@@ -112,6 +112,22 @@ class EstateFacetReader {
         return "VIEW".equalsIgnoreCase(objectType) || "MATERIALIZED_VIEW".equalsIgnoreCase(objectType);
     }
 
+    /**
+     * Whether a tables-index entry is a <em>defined</em> view rather than a bare name reference.
+     *
+     * <p>A view is only real when the crawl has something to define it with: the defining SQL
+     * ({@code viewDefinition}, from the source parse or the catalog) or the catalog's own
+     * confirmation ({@code dbFound=true}, which also covers a definition-less catalog view such as
+     * an Oracle MV whose query text was not fetched). An entry that is neither — the common
+     * cross-schema case, where a procedure references a view the enrichment never resolved — is a
+     * name-only reference and must not be reported as a view of this estate.
+     */
+    private static boolean hasViewIdentity(JsonNode t) {
+        String def = textOrNull(t, "viewDefinition");
+        if (def != null && !def.isBlank()) return true;
+        return t.path("dbFound").asBoolean(false);
+    }
+
     /** The tables index ({@code {tables:[...]}}), memoized for this analysis, or null when absent. */
     private JsonNode tablesIndex(String name) {
         String ck = r.cacheKey(name, "estate-tables-raw");
@@ -173,7 +189,15 @@ class EstateFacetReader {
             // once per getViews() call (which is itself memoized) so it is invalidated with the rest.
             Map<String, String> nodeTypes = nodeTypeMap(name);
             for (JsonNode t : tables.path("tables")) {
-                if (isView(textOrNull(t, "objectType"))) out.add(viewRow(m, t, nodeTypes, tables));
+                if (!isView(textOrNull(t, "objectType"))) continue;
+                // A view row must be a DEFINED view. A name-only reference — a proc that reads a
+                // view the crawl never resolved (e.g. a cross-schema DB2 view outside the enriched
+                // schema, so dbFound=false and no definition) — is not a view the estate defines,
+                // and must not appear as one. It still surfaces through the referencing node's
+                // used-by/table list; only the phantom VIEW row is suppressed. Identity is
+                // "has a defining SQL text" OR "the catalog confirmed it (dbFound=true)".
+                if (!hasViewIdentity(t)) continue;
+                out.add(viewRow(m, t, nodeTypes, tables));
             }
         }
         r.synthesizedCache.put(ck, out);
@@ -835,6 +859,13 @@ class EstateFacetReader {
             if (tn == null) tn = textOrNull(op, "name");
             if (tn == null) continue;
             String normTn = norm(tn);
+            // SQL Server's transition pseudo-tables (INSERTED / DELETED) are the trigger's
+            // in-memory delta tables, never real base tables. A body scanned at the source (a
+            // DB-discovered trigger whose body the dialect visitor did not parse) can list them as
+            // SELECT sources; they are filtered at the source too (TriggerDiscoverer's SKIP_TABLES
+            // and the SQL Server visitor's insideTriggerBody guard), but a stale artifact from an
+            // earlier crawl would still carry them, so the reader drops them as well.
+            if ("INSERTED".equals(normTn) || "DELETED".equals(normTn)) continue;
             if (!seen.add(normTn)) continue;
             ObjectNode t = m.createObjectNode();
             t.put("name", tn);
@@ -886,6 +917,12 @@ class EstateFacetReader {
         if (tt.contains("EACH ROW") || tt.endsWith("ROW")) return "ROW";
         if (body != null) {
             String b = body.toUpperCase(Locale.ROOT);
+            // Both levels are spelled out in the trigger body's DDL. STATEMENT is checked first:
+            // "FOR EACH STATEMENT" does not contain "FOR EACH ROW", but checking it first keeps
+            // the two mutually exclusive and self-documenting. DB2's statement-level triggers
+            // (and SQL Server's table-level ones) carry only "FOR EACH STATEMENT" here, so
+            // scanning for ROW alone left their level empty.
+            if (b.contains("FOR EACH STATEMENT")) return "STATEMENT";
             if (b.contains("FOR EACH ROW")) return "ROW";
         }
         return "";

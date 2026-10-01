@@ -492,6 +492,116 @@ class EstateFacetsTest {
         assertEquals(2, pkg.path("usageCount").asInt(), "one bare write + one cross-package read");
     }
 
+    /* ─────────────────────── audit gaps (2026-10) ─────────────────────── */
+
+    /**
+     * Fixture for the estate-facet audit gaps: a schema-qualified SQL Server view, a name-only
+     * phantom view, a DB2 FOR EACH STATEMENT trigger whose body carries the level, a trigger whose
+     * tableOps list the INSERTED/DELETED pseudo-tables, and a trigger node detail carrying its
+     * body calls.
+     */
+    private void writeAuditGapFixture() throws IOException {
+        put("api/index.json", """
+                {"entryPoint":"DEMO","nodes":[
+                 {"nodeId":"DB2INST1$TRG$STMT_TRG","name":"STMT_TRG","objectType":"TRIGGER"}]}""");
+        put("api/tables/index.json", """
+                {"tables":[
+                 {"name":"vw_OrderSummary","schema":"erp","objectType":"VIEW","dbFound":true,
+                  "dbColumns":[{"columnName":"OrderId","dataType":"int","nullable":false}],
+                  "viewDefinition":"CREATE VIEW erp.vw_OrderSummary AS SELECT o.OrderId FROM erp.SalesOrder o INNER JOIN erp.Customer c ON c.CustomerId = o.CustomerId LEFT JOIN erp.Region r ON r.RegionId = c.RegionId",
+                  "viewTableOperations":[
+                    {"tableName":"SalesOrder","schema":"erp","operation":"SELECT"},
+                    {"tableName":"Customer","schema":"erp","operation":"SELECT"},
+                    {"tableName":"Region","schema":"erp","operation":"SELECT"}],
+                  "viewJoins":[
+                    {"joinType":"INNER","leftTable":"SALESORDER","joinedTable":"Customer","condition":"c.CustomerId = o.CustomerId","line":3},
+                    {"joinType":"LEFT","leftTable":"CUSTOMER","joinedTable":"Region","condition":"r.RegionId = c.RegionId","line":4}],
+                  "usedBy":[]},
+                 {"name":"VW_REGION","schema":"ERP_REF","objectType":"VIEW","dbFound":false,
+                  "dbResolvedType":"UNKNOWN","usedBy":[]},
+                 {"name":"ERP_GL_ENTRY","schema":"DB2INST1","objectType":"TABLE",
+                  "triggers":[{"nodeId":"DB2INST1$TRG$STMT_TRG","name":"STMT_TRG","schema":"DB2INST1",
+                               "event":"INSERT","timing":"AFTER",
+                               "definition":"CREATE TRIGGER ERP_TRG_AUDIT_STMT_AI AFTER INSERT ON ERP_GL_ENTRY REFERENCING NEW TABLE AS newrows FOR EACH STATEMENT INSERT INTO ERP_AUDIT_LOG(entity) SELECT 'GL_BATCH' FROM newrows"}],
+                  "usedBy":[]},
+                 {"name":"JournalLine","schema":"erp","objectType":"TABLE",
+                  "triggers":[{"name":"trg_JournalLine_AfterDel","schema":"erp","event":"DELETE","timing":"AFTER",
+                               "triggerType":"AFTER","status":"ENABLED","source":"DATABASE",
+                               "definition":"CREATE TRIGGER erp.trg_JournalLine_AfterDel ON erp.JournalLine AFTER DELETE AS BEGIN INSERT INTO erp.AuditTrail(Area) SELECT N'x' FROM deleted d; END;",
+                               "tableOps":[{"operation":"INSERT","tableName":"ERP.AUDITTRAIL","objectType":"TABLE"},
+                                           {"operation":"SELECT","tableName":"DELETED"},
+                                           {"operation":"SELECT","tableName":"INSERTED"}]}],
+                  "usedBy":[]}
+                ]}""");
+        // The statement trigger's node detail carries no persisted level — the facet must derive
+        // STATEMENT from the body's own FOR EACH STATEMENT clause. It also carries the body calls
+        // the crawl now persists on trigger nodes.
+        put("api/nodes/DB2INST1$TRG$STMT_TRG.json", """
+                {"nodeId":"DB2INST1$TRG$STMT_TRG","name":"STMT_TRG","schema":"DB2INST1",
+                 "objectType":"TRIGGER","triggerTable":"ERP_GL_ENTRY","triggerEvent":"INSERT",
+                 "triggerTiming":"AFTER","sourceFile":"DB2INST1.TRG.STMT_TRG.sql",
+                 "calls":[{"target":"ERP_AUDIT_LOG_PROC","objectName":"ERP_AUDIT_LOG_PROC","type":"EXTERNAL",
+                           "schema":"DB2INST1","lines":[6],"count":1}]}""");
+    }
+
+    @Test
+    void schemaQualifiedViewReportsItsBaseTablesAndJoins() throws Exception {
+        writeAuditGapFixture();
+        JsonNode v = row(staticReader.getViews(NAME), "name", "vw_OrderSummary");
+        assertEquals(3, v.path("baseTableCount").asInt(), "three base tables");
+        assertEquals("erp", v.path("baseTables").get(0).path("schema").asText());
+        assertEquals("SalesOrder", v.path("baseTables").get(0).path("name").asText());
+        assertEquals(2, v.path("joinCount").asInt(), "INNER + LEFT joins captured");
+        assertEquals("INNER", v.path("joins").get(0).path("joinType").asText());
+        assertEquals("Customer", v.path("joins").get(0).path("joinedTable").asText());
+    }
+
+    @Test
+    void nameOnlyViewReferenceIsNotAViewRow() throws Exception {
+        writeAuditGapFixture();
+        // VW_REGION has no definition and dbFound=false — it is only a reference, so no view row.
+        assertNull(findRow(staticReader.getViews(NAME), "name", "VW_REGION"),
+                "a name-only reference must not become a VIEW row");
+        assertNotNull(findRow(staticReader.getViews(NAME), "name", "vw_OrderSummary"),
+                "the real, defined view is unaffected");
+    }
+
+    @Test
+    void statementLevelTriggerDerivesStatementFromBody() throws Exception {
+        writeAuditGapFixture();
+        JsonNode trg = row(staticReader.getTriggers(NAME), "name", "STMT_TRG");
+        assertEquals("STATEMENT", trg.path("level").asText(),
+                "FOR EACH STATEMENT in the body must derive level STATEMENT");
+    }
+
+    @Test
+    void transitionPseudoTablesAreNotTouchedTables() throws Exception {
+        writeAuditGapFixture();
+        JsonNode trg = row(staticReader.getTriggers(NAME), "name", "trg_JournalLine_AfterDel");
+        java.util.List<String> touches = new java.util.ArrayList<>();
+        trg.path("touches").forEach(t -> touches.add(t.path("name").asText().toUpperCase()));
+        assertTrue(touches.contains("ERP.AUDITTRAIL"), "real target kept: " + touches);
+        assertFalse(touches.contains("DELETED"), "DELETED must be filtered: " + touches);
+        assertFalse(touches.contains("INSERTED"), "INSERTED must be filtered: " + touches);
+    }
+
+    @Test
+    void triggerNodeCallsFlowThroughAsBodyCalls() throws Exception {
+        writeAuditGapFixture();
+        JsonNode trg = row(staticReader.getTriggers(NAME), "name", "STMT_TRG");
+        assertEquals(1, trg.path("bodyCalls").size(), "trigger node calls become bodyCalls");
+        assertEquals("ERP_AUDIT_LOG_PROC", trg.path("bodyCalls").get(0).path("objectName").asText());
+        assertEquals(1, staticReader.getTriggerDetail(NAME, "STMT_TRG").path("bodyCalls").size());
+    }
+
+    /** Like {@link #row} but returns null instead of failing when no matching row exists. */
+    private static JsonNode findRow(JsonNode array, String field, String value) {
+        for (JsonNode n : array) {
+            if (value.equalsIgnoreCase(n.path(field).asText(""))) return n;
+        }
+        return null;
+    }
+
     /* ─────────────────────── endpoint byte-equivalence ─────────────────────── */
 
     private byte[] bytes(ResponseEntity<?> response) throws IOException {
