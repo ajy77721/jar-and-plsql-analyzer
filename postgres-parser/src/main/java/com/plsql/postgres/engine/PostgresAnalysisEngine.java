@@ -32,6 +32,39 @@ public class PostgresAnalysisEngine {
     private static final Logger log = LoggerFactory.getLogger(PostgresAnalysisEngine.class);
 
     /**
+     * Number of times the lexer could not produce a {@code DOLLAR_QUOTED_STRING} token for the
+     * PL/pgSQL wrapper and the legacy regex scan had to locate the opening tag instead. Exposed so
+     * the regex-retirement rate of the dollar-quote migration is observable (should stay ~0).
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DOLLAR_QUOTE_LEXER_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Leading {@code $tag$} of the first dollar-quoted string in {@code source}, located from the
+     * lexer token stream, as {@code {startIndex, endIndex}} (end exclusive), or null when the
+     * source contains no lexable dollar-quoted string.
+     */
+    private static int[] findDollarQuoteOpenTag(String source) {
+        try {
+            PostgresLexer lexer = new PostgresLexer(CharStreams.fromString(source));
+            lexer.removeErrorListeners();
+            CommonTokenStream tokens = new CommonTokenStream(lexer);
+            tokens.fill();
+            for (Token t : tokens.getTokens()) {
+                if (t.getType() != PostgresLexer.DOLLAR_QUOTED_STRING) continue;
+                String txt = t.getText();
+                int secondDollar = txt.indexOf('$', 1);   // end of the opening `$tag$`
+                if (secondDollar > 0) {
+                    return new int[]{t.getStartIndex(), t.getStartIndex() + secondDollar + 1};
+                }
+            }
+        } catch (RuntimeException ignore) {
+            // fall through to the regex fallback
+        }
+        return null;
+    }
+
+    /**
      * Parse a single POSTGRES PROCEDURE or FUNCTION source.
      *
      * @param source     full CREATE PROCEDURE / FUNCTION DDL text
@@ -120,10 +153,27 @@ public class PostgresAnalysisEngine {
         // error. Both passes preserve every character offset, so the blank() calls below stay
         // aligned with the real `source`.
         String scanText = blankQuotedLiterals(blankComments(source));
-        Matcher m = Pattern.compile("\\$[A-Za-z0-9_]*\\$").matcher(scanText);
-        if (!m.find()) return source;                 // not a $-quoted PL/pgSQL body
-        String tag = m.group();
-        int openStart = m.start(), openEnd = m.end();
+        // The opening `$tag$` is located by the LEXER (PostgresLexer.DOLLAR_QUOTED_STRING) rather
+        // than a regex over hand-blanked text. The lexer already skips comments and tokenizes
+        // string literals correctly, so it cannot be fooled by a "$$"/"$tag$" written in prose or
+        // inside a quoted string — the exact class of bug the blanking passes existed to defend
+        // against. The legacy regex survives only as a counted fallback for input the lexer cannot
+        // tokenize as a dollar-quoted string (e.g. an unbalanced body).
+        int[] openTag = findDollarQuoteOpenTag(source);
+        String tag;
+        int openStart, openEnd;
+        if (openTag != null) {
+            openStart = openTag[0];
+            openEnd = openTag[1];
+            tag = source.substring(openStart, openEnd);
+        } else {
+            DOLLAR_QUOTE_LEXER_FALLBACKS.incrementAndGet();
+            Matcher m = Pattern.compile("\\$[A-Za-z0-9_]*\\$").matcher(scanText);
+            if (!m.find()) return source;             // not a $-quoted PL/pgSQL body
+            tag = m.group();
+            openStart = m.start();
+            openEnd = m.end();
+        }
         int closeStart = scanText.indexOf(tag, openEnd);
         if (closeStart < 0) return source;            // unbalanced — leave as-is
 

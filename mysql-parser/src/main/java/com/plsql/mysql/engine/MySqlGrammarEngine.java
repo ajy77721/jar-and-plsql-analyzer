@@ -85,6 +85,25 @@ public class MySqlGrammarEngine {
         }
     }
 
+    // ── Why DELIMITER handling stays a PRE-LEX step (not a MySqlLexer.g4 rule) ──────────────────
+    // Batch 3 assessed moving this to a lexer rule and deliberately did not, because the construct
+    // is not expressible as one:
+    //   * DELIMITER is a mysql-CLIENT directive, not SQL — the server (and INFORMATION_SCHEMA,
+    //     which is where this engine's source comes from) never sees it. A lexer rule could at
+    //     best tokenize the directive; it could not make the parser skip it without a new grammar
+    //     production for a non-SQL line.
+    //   * The real work is STATEFUL substitution: after `DELIMITER $$`, every subsequent `$$` that
+    //     terminates a statement must become `;` until the next directive. A lexer rule cannot
+    //     rewrite matched text, and a lexer MODE would need the arbitrary, runtime-chosen
+    //     delimiter string (`$$`, `//`, `;;`, …) as a mode trigger, which ANTLR cannot parameterise
+    //     per match.
+    //   * The substitution must also be quote/comment-aware (a `$$` inside a string literal or a
+    //     comment is not a terminator) — see replaceDelimiterOutsideLiterals, which carries that
+    //     state machine. That is precisely the kind of cross-line, context-sensitive rewrite a
+    //     lexer cannot do.
+    // So the pre-lex step is the correct home for it; this is a documented, justified retention,
+    // not an un-migrated gap. (Contrast the Postgres dollar-quote case, which WAS moved to a lexer
+    // rule: there the delimiter is self-describing and needs no substitution.)
     private static final java.util.regex.Pattern DELIMITER_LINE =
             // The trailing `(?:(?:--|#).*|/\*.*)?` tail lets a DELIMITER directive carry an
             // end-of-line comment (`DELIMITER $$ -- switch for the routine body`), a common way

@@ -1209,6 +1209,7 @@ aggregateOrderBy
 literal
     : SQ_STRING
     | ESQ_STRING
+    | DOLLAR_QUOTED_STRING   // $tag$ … $tag$ — a dynamic-SQL body is a single literal token
     | INT_NUM
     | DEC_NUM
     | NULL_KW

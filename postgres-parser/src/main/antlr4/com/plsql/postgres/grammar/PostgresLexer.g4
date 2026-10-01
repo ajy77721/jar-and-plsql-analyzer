@@ -203,6 +203,15 @@ RECURSIVE    : R E C U R S I V E ;
 WORK         : W O R K ;
 
 // ── Identifiers ───────────────────────────────────────────────────────────────
+// Dollar-quoted string literal: $tag$ … $tag$ (tag optional / empty). Declared BEFORE ID — whose
+// character class already includes '$', so `$sql$SELECT …$sql$` previously lexed as the bare ID
+// `$sql$` followed by the body's ordinary tokens (or garbage). ANTLR lexers cannot back-reference
+// the opening tag, so the body is matched non-greedily up to the next `$…$`; that is sufficient to
+// (a) make a dollar-quoted dynamic-SQL literal a single token the parser can consume and (b) let
+// PostgresAnalysisEngine locate the wrapper's opening tag from the token stream instead of a regex
+// over hand-blanked text. Nested different-tag bodies are still resolved by the engine's offset
+// scan (the token's leading tag is all that is read).
+DOLLAR_QUOTED_STRING : '$' [A-Za-z_0-9]* '$' .*? '$' [A-Za-z_0-9]* '$' ;
 // Double-quoted identifiers (POSTGRES uses " not [])
 DQ_ID       : '"' (~'"')+ '"' ;
 ID          : [a-zA-Z_$-￿] [a-zA-Z_$0-9-￿]* ;
