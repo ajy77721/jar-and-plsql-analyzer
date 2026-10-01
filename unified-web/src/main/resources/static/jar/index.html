@@ -22,6 +22,7 @@
     <script src="/shared/theme-colors.js?v=1788261891"></script>
     <title>JAR Analyzer</title>
     <link rel="stylesheet" href="style.css?v=1789232747">
+    <link rel="stylesheet" href="css/db-calls.css?v=1">
     <!-- D3 removed: call graph now uses JProfiler-style HTML tree -->
 </head>
 <body>
@@ -143,6 +144,7 @@
                     <button class="tab active" data-tab="structure" onclick="switchTab('structure')">Code Structure</button>
                     <button class="tab" data-tab="endpoints" onclick="switchTab('endpoints')">Endpoint Flows</button>
                     <button class="tab" data-tab="summary" onclick="switchTab('summary')">Summary</button>
+                    <button class="tab" data-tab="dbcalls" onclick="switchTab('dbcalls')" title="Database procedures, functions and packages this JAR calls">Database Calls</button>
                     <!-- Cross-Reference tab removed: the feature is no longer supported.
                          The panel below and js/cross-ref.js are kept but unreachable, so this is
                          a one-line revert if it is ever brought back. The server routes under
@@ -205,6 +207,16 @@
                 <div id="tab-summary" class="tab-content" style="display:none">
                     <div id="summary-container" class="summary-container"></div>
                 </div>
+                <div id="tab-dbcalls" class="tab-content" style="display:none">
+                    <div class="dbc-toolbar">
+                        <input type="text" id="dbcSearch" class="dbc-search" placeholder="Search DB object, class or method..." oninput="JA.dbCalls.onSearch()">
+                        <div class="dbc-pills" id="dbc-kind-pills"></div>
+                        <button class="btn-sm" onclick="JA.dbCalls.clearFilters()">Clear</button>
+                        <span id="dbcTotalCount" class="sum-chip" style="margin-left:auto">0 calls</span>
+                    </div>
+                    <div id="dbc-summary"></div>
+                    <div id="dbc-container" style="flex:1;overflow:auto;padding:0 14px 14px"></div>
+                </div>
                 <div id="tab-crossref" class="tab-content" style="display:none">
                     <div id="crossref-container">
                         <p class="empty-state" style="padding:24px">
@@ -255,6 +267,8 @@
     <script src="js/summary-export-style.js?v=1788261880"></script>
     <script src="js/summary-export-excel.js?v=1788261878"></script>
     <script src="js/summary.js?v=1789301124"></script>
+    <!-- Database Calls tab — JAR -> DB procedure/function/package facet -->
+    <script src="js/db-calls.js?v=1"></script>
     <script src="js/flow-analysis.js?v=1788675928"></script>
     <!-- <script src="js/cross-ref.js?v=1788290856"></script>  disabled: feature no longer supported -->
     <script src="js/sessions.js?v=1788339260"></script>

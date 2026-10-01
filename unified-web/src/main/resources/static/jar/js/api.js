@@ -211,6 +211,45 @@ JA.api = {
         return res.json();
     },
 
+    /**
+     * The JAR's detected database calls (JAR -> DB procedure/function/package).
+     *
+     * <p>Paged: pass `{limit, after, sort, q, types}`. The `X-Analyzer-Db-Calls-Available` response
+     * header says whether the analysis recorded the facet at all — a JAR analysed before this
+     * feature existed answers with an empty envelope and the header `false`, which the screen
+     * renders as a "re-analysis needed" note rather than an empty list.
+     *
+     * @returns {Promise<{available:boolean, reason:(string|null), envelope:Object}|null>} null on a
+     *          failed request (already reported through JA.apiFail).
+     */
+    async getDbCalls(id, opts) {
+        const o = opts || {};
+        const q = new URLSearchParams();
+        if (o.limit != null) q.set('limit', o.limit);
+        if (o.after) q.set('after', o.after);
+        if (o.sort) q.set('sort', o.sort);
+        if (o.q) q.set('q', o.q);
+        if (o.types) q.set('types', o.types);
+        const url = '/api/jar/jars/' + encodeURIComponent(id) + '/db-calls'
+            + (q.toString() ? '?' + q.toString() : '');
+        const res = await fetch(url, { cache: 'no-store', headers: { 'Accept': PA.PAGE_MEDIA_TYPE } });
+        if (!res.ok) { JA.apiFail(res); return null; }
+        const headerAvailable = res.headers.get('X-Analyzer-Db-Calls-Available') !== 'false';
+        const body = await res.json();
+        return {
+            available: headerAvailable && body.available !== false,
+            reason: body.reason || null,
+            envelope: PA.normalizePage(body)
+        };
+    },
+
+    /** Counts by kind / schema-package / procedure for the Database Calls tab. */
+    async getDbCallsSummary(id) {
+        const res = await fetch('/api/jar/jars/' + encodeURIComponent(id) + '/db-calls/summary', { cache: 'no-store' });
+        if (!res.ok) { JA.apiFail(res); return null; }
+        return res.json();
+    },
+
     async getDomainConfig(id) {
         const res = await fetch('/api/jar/jars/' + encodeURIComponent(id) + '/domain-config', { cache: 'no-store' });
         if (!res.ok) { JA.apiFail(res); return null; }

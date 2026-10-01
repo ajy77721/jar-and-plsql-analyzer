@@ -447,6 +447,55 @@ PA.api = {
     },
 
     /*
+     * Estate facets — views/materialized views, triggers and package globals.
+     *
+     * The three index endpoints are ordinary paged facets (same envelope as /cursors, /tables/page),
+     * so they use `facetPageSource`. The detail / chain / used-by sub-resources are plain documents:
+     * a name the analysis does not have is a 404, which the screens render as "not analyzed" rather
+     * than an empty list. Every list row already carries its own definition/columns/body, so a
+     * detail fetch is only needed for the chain and the estate-wide used-by list.
+     */
+
+    viewsPageSource(params) {
+        return PA.api.facetPageSource('views', params || {});
+    },
+
+    triggersPageSource(params) {
+        return PA.api.facetPageSource('triggers', params || {});
+    },
+
+    globalsPageSource(params) {
+        return PA.api.facetPageSource('globals', params || {});
+    },
+
+    /** One view's detail (row + chain + usedBy), or null when the analysis has no such view. */
+    async getViewDetail(view) {
+        const name = PA.api._analysisName;
+        const res = await fetch(`/api/parser/analyses/${encodeURIComponent(name)}/views/${encodeURIComponent(view)}`);
+        if (res.status === 404) return null;
+        if (!res.ok) return PA.apiFail(res);
+        return res.json();
+    },
+
+    /** One trigger's detail (row + chain + firedBy), or null when absent. */
+    async getTriggerDetail(trigger) {
+        const name = PA.api._analysisName;
+        const res = await fetch(`/api/parser/analyses/${encodeURIComponent(name)}/triggers/${encodeURIComponent(trigger)}`);
+        if (res.status === 404) return null;
+        if (!res.ok) return PA.apiFail(res);
+        return res.json();
+    },
+
+    /** One package's globals detail (variables + estate-wide usedBy), or null when absent. */
+    async getGlobalDetail(pkg) {
+        const name = PA.api._analysisName;
+        const res = await fetch(`/api/parser/analyses/${encodeURIComponent(name)}/globals/${encodeURIComponent(pkg)}`);
+        if (res.status === 404) return null;
+        if (!res.ok) return PA.apiFail(res);
+        return res.json();
+    },
+
+    /*
      * Paged facets (PLAN-08 §4.3 step 12).
      *
      * A page source hands the pager one page at a time instead of the whole facet. The parameters

@@ -66,6 +66,7 @@ JA.app = {
         JA.summary._viewsReport = null;
         JA.summary._extReport = null;
         JA.summary._nodeNavState = null;
+        if (JA.dbCalls) JA.dbCalls.reset();
         document.getElementById('analysis').style.display = 'none';
         document.getElementById('welcome').style.display = '';
         JA.sidebar.render(this.jars, null);
@@ -730,6 +731,8 @@ JA.app = {
             // It also carries the version flags, which is why _loadVersionInfo (a second request
             // for the same widget) is no longer called here — PLAN-08 Q22.
             this.currentJarId = id;
+            // The Database Calls facet is per-JAR and lazy: drop the previous JAR's rows/guard.
+            if (JA.dbCalls) JA.dbCalls.reset();
             // Cleared first: a stale value from the previously selected JAR would both draw the
             // wrong version toggles and stop the fallback below from fetching the right ones.
             this._versionInfo = null;
@@ -1593,6 +1596,11 @@ function switchTab(tabName) {
                 JA.summary.render(JA.app.currentAnalysis);
             }
         }
+    }
+    // Database Calls tab: lazy-load once per JAR (the facet is immutable for an analysis).
+    if (tabName === 'dbcalls' && JA.dbCalls && !JA.dbCalls._loaded) {
+        JA.dbCalls._loaded = true;
+        JA.dbCalls.load();
     }
     // Cross-reference tab: render on first switch (or re-render when jar changes)
     if (tabName === 'crossref' && JA.crossRef && JA.app.currentJarId) {

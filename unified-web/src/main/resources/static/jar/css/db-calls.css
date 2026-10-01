@@ -1,0 +1,140 @@
+/* ==========================================================================
+   Database Calls tab (jar/js/db-calls.js). Reuses the JAR page's .sum-chip and
+   .to-table; only the pieces this screen adds are defined here.
+   ========================================================================== */
+
+.dbc-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+}
+.dbc-search {
+    width: 220px;
+    font-size: 12px;
+    padding: 4px 8px;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+}
+.dbc-search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+.dbc-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+
+.dbc-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 14px 4px;
+}
+.dbc-summary-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin: 0 2px 0 10px;
+}
+.dbc-chip-total { background: var(--accent-subtle); color: var(--accent-hover); }
+
+/* kind pills */
+.dbc-pill {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+}
+.dbc-pill.active { border-color: var(--accent); color: var(--accent-hover); background: var(--accent-subtle); }
+
+/* kind badges */
+.dbc-kind-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .03em;
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    background: var(--badge-gray-bg);
+    color: var(--badge-gray);
+    white-space: nowrap;
+}
+.dbc-kind-chip { font-size: 10px; }
+.dbc-kind-callable, .dbc-kind-chip.dbc-kind-callable { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.dbc-kind-stmt, .dbc-kind-chip.dbc-kind-stmt         { background: var(--badge-teal-bg); color: var(--badge-teal); }
+.dbc-kind-jpa, .dbc-kind-chip.dbc-kind-jpa           { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.dbc-kind-mybatis, .dbc-kind-chip.dbc-kind-mybatis   { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.dbc-kind-spring, .dbc-kind-chip.dbc-kind-spring     { background: var(--badge-green-bg); color: var(--badge-green); }
+
+/* table */
+.dbc-table { width: 100%; }
+.dbc-row { cursor: pointer; }
+.dbc-obj { font-family: var(--font-mono); font-weight: 600; color: var(--badge-blue); }
+.dbc-caller { font-family: var(--font-mono); color: var(--text); }
+.dbc-method { font-family: var(--font-mono); color: var(--text-muted); }
+.dbc-method::before { content: '.'; }
+.dbc-sub { display: block; font-size: 10px; color: var(--text-muted); }
+
+/* detail row */
+.dbc-detail { padding: 6px 2px; }
+.dbc-detail-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.dbc-detail-item { font-size: 11px; color: var(--text-muted); }
+.dbc-detail-item b { color: var(--text); font-weight: 700; }
+.dbc-detail-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.dbc-sql {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    background: var(--bg-inset);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+}
+.dbc-empty { color: var(--text-muted); font-style: italic; }
+
+/* re-analysis-needed note */
+.dbc-note {
+    margin: 20px auto;
+    max-width: 620px;
+    padding: 18px 20px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg-inset);
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.dbc-note-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.dbc-note p { margin: 4px 0; line-height: 1.5; }
+.dbc-note-reason {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    border-left: 3px solid var(--badge-orange);
+    padding-left: 8px;
+}

@@ -1,0 +1,250 @@
+/* ==========================================================================
+   Estate facets — Views & Materialized Views, Triggers, Package Globals.
+   Shared by the three Estate sub-tabs (estateViews.js / estateTriggers.js /
+   estateGlobals.js). Detail panels render inside the PA.tf lazy detail row
+   (a single <td colspan="20">), so every block here is a plain div.
+   ========================================================================== */
+
+.est-detail { padding: 4px 2px; }
+
+/* ── meta line ─────────────────────────────────────────────────────────── */
+.est-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.est-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    background: var(--badge-gray-bg);
+    color: var(--badge-gray);
+    white-space: nowrap;
+}
+.est-badge.view { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.est-badge.mv   { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.est-badge.table { background: var(--badge-teal-bg); color: var(--badge-teal); }
+.est-badge.ok   { background: var(--badge-green-bg); color: var(--badge-green); }
+.est-badge.warn { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.est-meta-item { font-size: 11px; color: var(--text-muted); }
+.est-meta-item b { color: var(--text); font-weight: 700; }
+
+/* ── sections ──────────────────────────────────────────────────────────── */
+.est-section { margin: 10px 0; }
+.est-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+}
+
+/* ── definition / body SQL (DB-sourced DATA — always escaped by the caller) */
+.est-sql {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    background: var(--bg-inset);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    margin: 0;
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+}
+.est-sql.est-body { max-height: 320px; }
+.est-when {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--bg-inset);
+    border-left: 3px solid var(--badge-orange);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+}
+
+/* ── columns table ─────────────────────────────────────────────────────── */
+.est-cols { width: 100%; border-collapse: collapse; font-size: 11px; }
+.est-cols th {
+    text-align: left;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 3px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.est-cols td {
+    padding: 3px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text);
+}
+.est-cols td.est-col-name { font-family: var(--font-mono); font-weight: 600; }
+.est-cols td.est-col-type { font-family: var(--font-mono); color: var(--text-muted); }
+
+/* ── chips (base tables, touched tables, touches) ──────────────────────── */
+.est-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.est-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 3px 8px;
+    color: var(--text);
+}
+.est-chip .est-chip-sub { color: var(--text-muted); font-size: 9px; }
+.est-op-badge {
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    background: var(--badge-gray-bg);
+    color: var(--badge-gray);
+}
+.est-op-badge.select { background: var(--badge-blue-bg); color: var(--badge-blue); }
+.est-op-badge.insert { background: var(--badge-green-bg); color: var(--badge-green); }
+.est-op-badge.update { background: var(--badge-orange-bg); color: var(--badge-orange); }
+.est-op-badge.delete { background: var(--badge-red-bg); color: var(--badge-red); }
+.est-op-badge.write  { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.est-op-badge.read   { background: var(--badge-teal-bg); color: var(--badge-teal); }
+
+/* ── chain visualiser ──────────────────────────────────────────────────── */
+.est-chain {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    background: var(--bg-card);
+}
+.est-chain-title { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); }
+.est-chain-meta { font-size: 10px; color: var(--text-muted); margin: 3px 0 8px; }
+.est-flag {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    margin-left: 5px;
+}
+.est-flag-warn { background: var(--badge-orange-bg); color: var(--badge-orange); }
+
+.est-chain-step { display: flex; align-items: flex-start; gap: 8px; }
+.est-step-idx {
+    flex: none;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: var(--bg-inset);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+    margin-top: 2px;
+    min-width: 22px;
+    text-align: center;
+}
+.est-step-nodes { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+.est-node {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 5px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    border-radius: var(--radius-sm);
+    padding: 3px 9px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-inset);
+    color: var(--text);
+}
+.est-node-view  { border-color: var(--badge-blue); color: var(--badge-blue); background: var(--badge-blue-bg); }
+.est-node-mv    { border-color: var(--badge-purple); color: var(--badge-purple); background: var(--badge-purple-bg); }
+.est-node-table { border-color: var(--badge-teal); color: var(--badge-teal); background: var(--badge-teal-bg); }
+.est-node-trigger { border-color: var(--badge-orange); color: var(--badge-orange); background: var(--badge-orange-bg); }
+.est-node-sub { font-size: 9px; font-weight: 400; color: var(--text-muted); }
+.est-node-empty { border-style: dashed; color: var(--text-muted); background: transparent; }
+
+.est-chain-arrow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 3px 0 3px 30px;
+}
+.est-chain-via {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    color: var(--badge-teal);
+    background: var(--badge-teal-bg);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+}
+
+/* ── used-by / fired-by / readers-writers ──────────────────────────────── */
+.est-usedby { display: flex; flex-direction: column; gap: 3px; }
+.est-usedby-item {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 11px;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-inset);
+}
+.est-usedby-proc {
+    font-weight: 600;
+    color: var(--accent-hover);
+    cursor: pointer;
+    font-family: var(--font-mono);
+}
+.est-usedby-proc:hover { text-decoration: underline; }
+.est-usedby-ops { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.est-usedby-line {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    cursor: pointer;
+}
+.est-usedby-line:hover { color: var(--accent-hover); text-decoration: underline; }
+.est-var-group { margin-bottom: 8px; }
+.est-var-name {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--purple);
+    margin-bottom: 4px;
+}
+
+/* ── states ────────────────────────────────────────────────────────────── */
+.est-empty, .est-loading {
+    padding: 14px 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-style: italic;
+}
+.est-notanalyzed {
+    padding: 12px 14px;
+    margin: 4px 0;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-inset);
+    color: var(--text-muted);
+    font-size: 11px;
+}
+.est-notanalyzed b { color: var(--text); display: block; margin-bottom: 3px; font-style: normal; }
