@@ -57,7 +57,9 @@ public class SourceDownloaderSourceCacheTest {
         when(connManager.isOracle()).thenReturn(true);
         when(connManager.isCircuitOpen(anyString())).thenReturn(false);
         when(connManager.getAnyConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        // The crawler's catalog/source queries go through the guarded statement creator
+        // (read-only guard + queryTimeout), so the downloader calls connManager.prepareStatement.
+        when(connManager.prepareStatement(any(Connection.class), anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true, false);
         when(rs.getString("OWNER")).thenReturn("APP");
@@ -105,7 +107,7 @@ public class SourceDownloaderSourceCacheTest {
         PreparedStatement ps2 = mock(PreparedStatement.class);
         ResultSet rs2 = mock(ResultSet.class);
         when(cm2.getAnyConnection()).thenReturn(conn2);
-        when(conn2.prepareStatement(anyString())).thenReturn(ps2);
+        when(cm2.prepareStatement(any(Connection.class), anyString())).thenReturn(ps2);
         when(ps2.executeQuery()).thenReturn(rs2);
         when(rs2.next()).thenReturn(true, false);
         when(rs2.getString("OWNER")).thenReturn("APP");

@@ -329,3 +329,39 @@ connect with their own identity, fully attributed.
 > Please apply the attached bucket policy to s3://amp-analyzer-parse-jar (account 331472312345)
 > granting S3 read/write to principals in our AWS Organization (org-scoped, service-account
 > excluded), and enable CloudTrail S3 data events for per-user attribution.
+
+---
+
+## DB-impact safety statement (the analyzed database is sacred)
+
+An analysis only ever **reads** the customer database. The guarantees below are enforced in code,
+not just by convention, and are configurable per deployment.
+
+**Read-only.** Every catalog/source query is built through `DbConnectionManager.prepareStatement` /
+`createStatement`, which assert the SQL starts with `SELECT` or `WITH` and throw otherwise. There is
+no DDL/DML path on the analyzed connection. (The one exception, Oracle's
+`DBMS_METADATA.SET_TRANSFORM_PARAM` session setup used only as a read-side DDL formatter, is a
+`prepareCall` outside the query creator.)
+
+**Rate limit.** Catalog/source queries are capped by a token bucket (`app.crawl.db.qps`, default 20).
+One token is taken per connection borrow, so the steady-state query rate never exceeds the cap. Set
+it lower for a fragile or shared database; `0` disables the limiter.
+
+**Statement timeout.** Every guarded statement carries a JDBC `queryTimeout`
+(`app.crawl.db.timeout-seconds`, default 30). A slow query is abandoned at the driver, never left to
+hang a worker.
+
+**Circuit breaker.** After `app.crawl.db.circuit-breaker-threshold` (default 5) consecutive query
+failures the crawl **fails fast** with `"The database is not responding — aborting to protect it"`.
+It does not retry for minutes; the customer DB is left alone.
+
+**Batching.** Catalog lookups are batched (ONE ALL_OBJECTS query per BFS level; batched trigger-source
+pull; batched reverse-dependency lookup). There are no per-name N+1 probes.
+
+**Idempotency.** A re-crawl of an unchanged scope consults the per-analysis idempotency registry
+(`<analysis parent>/.analysis-registry.json`, per-user) and skips objects whose LAST_DDL is unchanged
+and whose previous analysis was complete — no fetch, no re-parse. `--force-refresh` (CLI) / the
+`forceRefresh` analyze-endpoint field overrides it.
+
+Operators tuning a fragile database: lower `app.crawl.db.qps` and `app.crawl.db.timeout-seconds`,
+and lower `app.crawl.db.circuit-breaker-threshold`.

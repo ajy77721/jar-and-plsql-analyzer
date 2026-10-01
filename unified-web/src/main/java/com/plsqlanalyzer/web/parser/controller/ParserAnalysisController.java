@@ -259,6 +259,14 @@ public class ParserAnalysisController {
         String environment = body.get("environment");
         String dbType = body.get("dbType");
         String connName = body.get("connName");
+        // Force-refresh: bypass the analysis idempotency registry for this request. Accepts the
+        // usual truthy spellings so a plain form checkbox works.
+        String forceRefreshRaw = body.get("forceRefresh");
+        boolean forceRefresh = forceRefreshRaw != null
+                && ("true".equalsIgnoreCase(forceRefreshRaw.trim())
+                    || "1".equals(forceRefreshRaw.trim())
+                    || "on".equalsIgnoreCase(forceRefreshRaw.trim())
+                    || "yes".equalsIgnoreCase(forceRefreshRaw.trim()));
 
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("entryPoint", entryPoint.trim());
@@ -268,6 +276,7 @@ public class ParserAnalysisController {
         if (environment != null && !environment.isBlank()) metadata.put("environment", environment.trim());
         if (dbType != null && !dbType.isBlank()) metadata.put("dbType", dbType.trim());
         if (connName != null && !connName.isBlank()) metadata.put("connName", connName.trim());
+        if (forceRefresh) metadata.put("forceRefresh", "true");
 
         String dbLabel = (dbType != null && !dbType.isBlank() && !"ORACLE".equalsIgnoreCase(dbType))
                 ? "[" + dbType.trim() + "] " : "";

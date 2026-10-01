@@ -41,6 +41,7 @@ public class ParserAnalysisExecutor {
         String environment = (String) job.metadata.get("environment");
         String dbType = (String) job.metadata.get("dbType");
         String connName = (String) job.metadata.get("connName");
+        boolean forceRefresh = "true".equalsIgnoreCase(String.valueOf(job.metadata.get("forceRefresh")));
 
         progress(job, broadcast, "[1/3] Starting PL/SQL parse analysis: " + entryPoint);
         progress(job, broadcast, "[2/3] Running flow analysis...");
@@ -59,7 +60,7 @@ public class ParserAnalysisExecutor {
 
         String folderName;
         try {
-            folderName = analysisService.runAnalysis(entryPoint, owner, objectType, project, environment, dbType, connName);
+            folderName = analysisService.runAnalysis(entryPoint, owner, objectType, project, environment, dbType, connName, forceRefresh);
         } finally {
             heartbeat.shutdownNow();
         }

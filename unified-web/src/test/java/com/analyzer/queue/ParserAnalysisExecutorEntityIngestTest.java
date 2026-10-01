@@ -36,7 +36,7 @@ class ParserAnalysisExecutorEntityIngestTest {
     @Test
     void firesWithTheCompletedJobsOwnParamsWhenEnabled() throws Exception {
         AnalysisService analysisService = mock(AnalysisService.class);
-        when(analysisService.runAnalysis(any(), any(), any(), any(), any(), any(), any()))
+        when(analysisService.runAnalysis(any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn("ORACLE~ORACLEDEMO~LOCAL~ERP_USP_RUN_CYCLE");
         when(analysisService.getFlowOutputDir()).thenReturn(java.nio.file.Path.of("data"));
         EntityIngestTrigger ingest = mock(EntityIngestTrigger.class);
@@ -55,7 +55,7 @@ class ParserAnalysisExecutorEntityIngestTest {
     @Test
     void neverFiresWhenDisabled() throws Exception {
         AnalysisService analysisService = mock(AnalysisService.class);
-        when(analysisService.runAnalysis(any(), any(), any(), any(), any(), any(), any()))
+        when(analysisService.runAnalysis(any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn("ORACLE~ORACLEDEMO~LOCAL~ERP_USP_RUN_CYCLE");
         when(analysisService.getFlowOutputDir()).thenReturn(java.nio.file.Path.of("data"));
         EntityIngestTrigger ingest = mock(EntityIngestTrigger.class);
@@ -81,7 +81,7 @@ class ParserAnalysisExecutorEntityIngestTest {
     @Test
     void theJobsOwnResultIsSetBeforeEntityIngestRunsAtAll() throws Exception {
         AnalysisService analysisService = mock(AnalysisService.class);
-        when(analysisService.runAnalysis(any(), any(), any(), any(), any(), any(), any()))
+        when(analysisService.runAnalysis(any(), any(), any(), any(), any(), any(), any(), anyBoolean()))
                 .thenReturn("ORACLE~ORACLEDEMO~LOCAL~ERP_USP_RUN_CYCLE");
         when(analysisService.getFlowOutputDir()).thenReturn(java.nio.file.Path.of("data"));
         EntityIngestTrigger ingest = mock(EntityIngestTrigger.class);

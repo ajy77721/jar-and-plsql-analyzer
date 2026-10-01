@@ -63,6 +63,22 @@ public class AnalysisService {
     @Value("${app.parser.allow-empty-analysis:false}")
     private boolean allowEmptyAnalysis;
 
+    /**
+     * W3 DB-impact safety: catalog/source query QPS cap (token bucket). {@code <=0} disables it.
+     * Default 20 — a re-crawl of an unchanged scope should mostly hit the source cache and the
+     * idempotency registry, so the DB sees very little traffic.
+     */
+    @Value("${app.crawl.db.qps:20}")
+    private double crawlDbQps;
+
+    /** W3: per-statement JDBC queryTimeout (seconds). Default 30. */
+    @Value("${app.crawl.db.timeout-seconds:30}")
+    private int crawlDbTimeoutSeconds;
+
+    /** W3: consecutive failures that abort the crawl to protect the DB. Default 5. */
+    @Value("${app.crawl.db.circuit-breaker-threshold:5}")
+    private int crawlDbCircuitBreakerThreshold;
+
     private final AnalysisReaderFactory readerFactory;
     private final StaticAnalysisReader staticReader;
     /** Precomputed listing-scalar sidecars ({@code views/header.json}) — see {@link AnalysisViewStore}. */
@@ -690,6 +706,17 @@ public class AnalysisService {
     public String runAnalysis(String entryPoint, String owner, String objectType,
                                String project, String environment,
                                String dbType, String connName) throws Exception {
+        return runAnalysis(entryPoint, owner, objectType, project, environment, dbType, connName, false);
+    }
+
+    /**
+     * As the 7-arg overload, plus {@code forceRefresh}: when true the analysis-level idempotency
+     * registry is bypassed so every reachable object is re-fetched/re-analysed even when unchanged.
+     * Wired from the analyze endpoint's {@code forceRefresh} form field.
+     */
+    public String runAnalysis(String entryPoint, String owner, String objectType,
+                               String project, String environment,
+                               String dbType, String connName, boolean forceRefresh) throws Exception {
         long analysisStartMs = System.currentTimeMillis(); // full end-to-end timer (crawl + enrichment + write)
 
         // No owner/objectType supplied at all — resolve the real one via the same smart search
@@ -902,6 +929,12 @@ public class AnalysisService {
         opts.pretty = true;
         // Fail loud on an empty crawl (dead DB / empty schema) unless explicitly overridden.
         opts.allowEmptyAnalysis = allowEmptyAnalysis;
+        // Force-refresh: bypass the idempotency registry for this request.
+        opts.forceRefresh = forceRefresh;
+        // W3 DB-impact safety knobs (rate limiter / statement timeout / circuit breaker).
+        opts.dbQps = crawlDbQps;
+        opts.dbTimeoutSeconds = crawlDbTimeoutSeconds;
+        opts.dbCircuitBreakerThreshold = crawlDbCircuitBreakerThreshold;
 
         try {
             com.plsql.parser.flow.FlowAnalysisMain.run(store, opts);
