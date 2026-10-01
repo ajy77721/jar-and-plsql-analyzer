@@ -87,6 +87,13 @@ SELECT      : S E L E C T ;
 // visitor recovers their values by regex over the original text.
 SEQUENCE    : S E Q U E N C E ;
 SET         : S E T ;
+// sp_executesql — the built-in dynamic-SQL executor. Promoted to a token (batch 2) so the
+// structured execStatement alternative can be chosen by TOKEN, not by a semantic predicate: a
+// predicate used only to discriminate two same-prefix alternatives (both `EXEC <ID> …`) is
+// evaluated at parse time and its failure surfaces as a spurious syntax error. The word is
+// re-admitted as an ordinary identifier via namePart/exprAtom, so a schema-qualified
+// `dbo.sp_executesql` still parses and it can still (rarely) be used as an object name.
+SP_EXECUTESQL : S P '_' E X E C U T E S Q L ;
 THEN        : T H E N ;
 THROW       : T H R O W ;
 TOP         : T O P ;

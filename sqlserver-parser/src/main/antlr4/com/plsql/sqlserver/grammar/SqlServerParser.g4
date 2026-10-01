@@ -155,8 +155,45 @@ triggerDefinition
     : CREATE (OR ALTER)? TRIGGER routineName triggerHeader AS routineBody
     ;
 
+// Trigger header: ON <table> [timing] <event>[, <event>…]
+//
+// STRUCTURED ALTERNATIVE (regex → grammar migration, batch 2): the target table, timing and
+// event list are now real sub-nodes instead of being recovered by three inline regexes over
+// `originalText(triggerHeader)`. The visitor reads them off the tree
+// (visitTriggerHeader) and only falls back to the legacy regexes — counted — when the
+// structured alternative did not match.
+//
+// The second alternative is the ORIGINAL permissive `~AS+` shape, kept verbatim as a hard
+// fallback: any header the structured alternative cannot parse (an unusual vendor extension,
+// a malformed header, …) still parses exactly as it always did, so this change can never turn
+// a previously-parseable trigger into a parse error. ANTLR prefers the lowest viable
+// alternative, so the structured form wins whenever it matches.
+//
+// INSTEAD / OF / AFTER / BEFORE / FOR are deliberately NOT lexer tokens (they are common
+// ordinary identifiers), so the timing keywords are recognised by local semantic predicates
+// on the ID token — the same technique applyKw/intersectKw/exceptKw already use. INSERT /
+// UPDATE / DELETE ARE tokens, so the event list needs no predicate.
 triggerHeader
-    : ~AS+
+    : triggerOnTable triggerTiming? triggerEvent (COMMA? triggerEvent)*
+    | ~AS+
+    ;
+
+triggerOnTable
+    : ON tableRef
+    ;
+
+triggerTiming
+    : {"INSTEAD".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      {"OF".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"AFTER".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"BEFORE".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"FOR".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    ;
+
+triggerEvent
+    : INSERT
+    | UPDATE
+    | DELETE
     ;
 
 // CREATE VIEW name [WITH ...] AS <select/union>
@@ -196,6 +233,7 @@ routineName
 namePart
     : BRACKET_ID
     | ID
+    | SP_EXECUTESQL          // re-admitted so a (schema-qualified) sp_executesql still parses
     ;
 
 paramBlock
@@ -313,9 +351,47 @@ labelStatement
 
 // EXEC (@sql)                 → dynamic SQL
 // EXEC schema.proc args...    → outbound call
+//
+// STRUCTURED sp_executesql alternative (batch 2): `EXEC sp_executesql @sql [, N'@p INT'][, @p=…]`
+// now has real argument nodes, so the @sql variable, the parameter-signature literal and the bound
+// name=value pairs are read off the tree instead of being regex-decoded from stmtTail text. Listed
+// before the generic alternative; when its predicate/structure does not match (e.g. a
+// schema-qualified `dbo.sp_executesql`, or a literal first argument) the generic alternative parses
+// the statement exactly as before and the visitor's counted regex fallback takes over.
 execStatement
     : (EXEC | EXECUTE) LPAREN expr? RPAREN SEMI?
+    | (EXEC | EXECUTE) SP_EXECUTESQL spExecuteSqlArgs? SEMI?
     | (EXEC | EXECUTE) routineName stmtTail SEMI?
+    ;
+
+spExecuteSqlArgs
+    : AT_VAR (COMMA spExecuteSqlArg)*
+    ;
+
+spExecuteSqlArg
+    : N_STRING
+    | SQ_STRING
+    | AT_VAR EQ spArgValue
+    | spArgValue
+    ;
+
+// A single sp_executesql argument value. COMMA is deliberately excluded (unlike exprAtom) so the
+// comma-separated argument list is not swallowed into one value — `@p1=5, @p2='x'` is two args.
+spArgValue
+    : spArgAtom+
+    ;
+
+spArgAtom
+    : parenGroup
+    | literal
+    | AT_VAR
+    | BRACKET_ID
+    | ID
+    | SP_EXECUTESQL
+    | DOT
+    | EQ | NEQ | LT | GT | LEQ | GEQ | PLUS | MINUS | SLASH | PERCENT
+    | AMPERSAND | PIPE | CARET | TILDE | EXCL
+    | NULL_KW
     ;
 
 // DECLARE @a INT, @b DECIMAL(18,2) = 0 ...   (one or more variables / table vars)
@@ -386,8 +462,65 @@ transactionStatement
     ;
 
 // CREATE TABLE #temp( ... ), CREATE INDEX ... (inside a routine body)
+//
+// STRUCTURED ALTERNATIVES (regex → grammar migration, batch 2):
+//   * createSynonym      — CREATE SYNONYM [schema.]name FOR [server.db.]schema.target [@srv]
+//   * createTableStatement — CREATE TABLE name ( column-defs ) — enough structure to read
+//                            IDENTITY column specs off the tree instead of scanning raw text.
+// The generic `CREATE stmtTail` catch-all stays LAST, so anything the two structured forms
+// cannot parse still parses exactly as before (and the visitor's regex fallbacks cover it).
 createStatement
-    : CREATE stmtTail SEMI?
+    : createSynonym
+    | createTableStatement
+    | CREATE stmtTail SEMI?
+    ;
+
+// CREATE SYNONYM [schema.]syn_name FOR [server.database.]schema.target [@linked_server]
+// SYNONYM / FOR are deliberately not lexer tokens (both are ordinary identifiers), so they are
+// recognised by local semantic predicates on the ID token.
+createSynonym
+    : CREATE {"SYNONYM".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      routineName {"FOR".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      tableRef AT_VAR?
+    ;
+
+// CREATE TABLE [schema.]name ( <column-defs> ) [tail]
+// TABLE is an ordinary identifier in this dialect, so it is matched positionally via a predicate.
+createTableStatement
+    : CREATE createTableKw tableRef LPAREN createTableItem (COMMA createTableItem)* RPAREN
+      createTableTail? SEMI?
+    ;
+
+createTableKw
+    : {"TABLE".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    ;
+
+createTableItem
+    : columnDefinition
+    ;
+
+columnDefinition
+    : namePart dataType columnOption*
+    ;
+
+// A column's trailing options. IDENTITY[(seed, increment)] is the one with extraction value, so it
+// is modelled explicitly; every other option (NOT NULL, DEFAULT …, CHECK (…), COLLATE …, …) is
+// consumed permissively — parenGroup for balanced groups, a single token otherwise — because
+// nothing downstream reads them.
+columnOption
+    : identitySpec
+    | parenGroup
+    | ~(COMMA | RPAREN)
+    ;
+
+// IDENTITY[(seed, increment)] — bare IDENTITY defaults to seed=1, increment=1 per T-SQL semantics.
+identitySpec
+    : {"IDENTITY".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      (LPAREN MINUS? INT_NUM COMMA MINUS? INT_NUM RPAREN)?
+    ;
+
+createTableTail
+    : ~SEMI+
     ;
 
 // RETURN ( SELECT ... )   inline TVF body
@@ -399,10 +532,73 @@ returnStatement
 
 // Catch-all: any other statement (OPEN/FETCH/CLOSE/DEALLOCATE/PRINT/THROW/
 // MERGE/WITH/WAITFOR/...). Consumes up to the next statement boundary.
+//
+// STRUCTURED ALTERNATIVES (regex → grammar migration, batch 2): cursorStatement and
+// withStatement are listed FIRST so a recognised shape produces a real sub-tree; the generic
+// token-soup alternative stays LAST and is byte-for-byte the previous rule, so any statement
+// these two cannot parse still parses exactly as before. Keeping them as alternatives of
+// otherStatement (rather than new alternatives of `statement`) preserves the statement
+// INVENTORY: the node remains an OtherStatementContext, so statementType()'s leading-keyword
+// classification — and therefore every pinned statement count — is unchanged.
 otherStatement
-    : ~(SEMI | BEGIN | END | EXEC | EXECUTE | DECLARE | SET | INSERT | UPDATE | DELETE | SELECT | IF | WHILE | RETURN | CREATE | TRY | CATCH | COMMIT | ROLLBACK | THROW | RAISERROR)
+    : cursorStatement
+    | withStatement
+    | ~(SEMI | BEGIN | END | EXEC | EXECUTE | DECLARE | SET | INSERT | UPDATE | DELETE | SELECT | IF | WHILE | RETURN | CREATE | TRY | CATCH | COMMIT | ROLLBACK | THROW | RAISERROR)
       (~(SEMI | BEGIN | END))* SEMI?
     | SEMI
+    ;
+
+// ── T-SQL cursor lifecycle ────────────────────────────────────────────────────
+// OPEN cur; FETCH [orientation] [FROM] cur [INTO vars]; CLOSE cur; DEALLOCATE cur;
+// Modelled on PlSqlParser's cursor_manipulation_statements. OPEN / FETCH / CLOSE / DEALLOCATE
+// and the FETCH orientation words are ordinary identifiers in this dialect, hence the predicates.
+cursorStatement
+    : openCursor
+    | fetchCursor
+    | closeCursor
+    | deallocateCursor
+    ;
+
+openCursor
+    : {"OPEN".equalsIgnoreCase(_input.LT(1).getText())}? ID namePart SEMI?
+    ;
+
+closeCursor
+    : {"CLOSE".equalsIgnoreCase(_input.LT(1).getText())}? ID namePart SEMI?
+    ;
+
+deallocateCursor
+    : {"DEALLOCATE".equalsIgnoreCase(_input.LT(1).getText())}? ID namePart SEMI?
+    ;
+
+fetchCursor
+    : {"FETCH".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      fetchOrientation? FROM? namePart fetchInto? SEMI?
+    ;
+
+fetchOrientation
+    : {"NEXT".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"PRIOR".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"FIRST".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"LAST".equalsIgnoreCase(_input.LT(1).getText())}? ID
+    | {"ABSOLUTE".equalsIgnoreCase(_input.LT(1).getText())}? ID MINUS? INT_NUM
+    | {"RELATIVE".equalsIgnoreCase(_input.LT(1).getText())}? ID MINUS? INT_NUM
+    ;
+
+fetchInto
+    : INTO expr
+    ;
+
+// ── WITH <cte>[, <cte>]… <statement> ─────────────────────────────────────────
+// CTE names were previously recovered by a text regex purely so they could be EXCLUDED from table
+// extraction; they are now real nodes. The trailing `statement` is what the CTE feeds, parsed by
+// the ordinary statement rules (so its own tables/joins are extracted exactly as before).
+withStatement
+    : WITH cteDefinition (COMMA cteDefinition)* statement
+    ;
+
+cteDefinition
+    : namePart (LPAREN columnNameList RPAREN)? AS LPAREN queryExpression RPAREN
     ;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,6 +660,11 @@ stmtToken
     // them would retokenise the entire corpus, a far larger blast radius than this is worth.
     | setOperator SELECT
     | CASE stmtToken* END
+    // NEXT VALUE FOR <sequence> (batch 2): a real node so sequence USAGE is read off the tree
+    // instead of being scanned for. Placed before the catch-all; the catch-all still matches the
+    // bare NEXT/VALUE/FOR words if the full shape is absent, exactly as before.
+    | nextValueFor
+    | existsPredicate
     | ~(SEMI | BEGIN | END | CASE | EXEC | EXECUTE | DECLARE | IF | WHILE | INSERT | UPDATE | DELETE | SELECT | RETURN | CREATE | LPAREN | RPAREN)
     ;
 
@@ -793,12 +994,30 @@ queryRestToken
 // Expression (simplified, enough to parse conditions and SET rhs)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// NEXT VALUE FOR [schema.]sequence  — sequence USAGE.
+// NEXT / VALUE / FOR are ordinary identifiers in this dialect, hence the predicates.
+nextValueFor
+    : {"NEXT".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      {"VALUE".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      {"FOR".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      tableRef
+    ;
+
+// [NOT] EXISTS ( <query> ) — the predicate wrapper around a subquery. EXISTS is a real token.
+existsPredicate
+    : EXISTS LPAREN queryExpression RPAREN
+    ;
+
 expr
     : exprAtom+
     ;
 
 exprAtom
     : parenGroup                 // handles (a+b), function args, and (SELECT ...) subqueries
+    // Batch 2: structured forms placed BEFORE the permissive alternatives so they win when they
+    // match; if either fails, the fallbacks below parse the tokens exactly as before.
+    | existsPredicate
+    | nextValueFor
     | CASE stmtToken* END
     | literal
     | AT_VAR
@@ -812,6 +1031,7 @@ exprAtom
                                  // column/variable name, so it must stay usable as an identifier
     | CONSTRAINT | FOREIGN | REFERENCES   // promoted for ALTER TABLE ... FOREIGN KEY REFERENCES;
                                  // kept usable as ordinary identifiers here
+    | SP_EXECUTESQL              // re-admitted as an ordinary identifier inside expressions
     | UPDATE                     // T-SQL UPDATE(column) trigger function
     | STAR
     | DOT

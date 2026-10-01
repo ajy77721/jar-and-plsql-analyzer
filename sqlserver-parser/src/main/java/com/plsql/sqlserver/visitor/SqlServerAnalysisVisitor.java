@@ -259,6 +259,56 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     // its own tables and recognise, when no such assignment exists, that it is genuinely unresolved.
     private final java.util.Map<String, String> sqlVarLiteralMap = new java.util.HashMap<>();
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Regex-retirement counters (regex → grammar migration, batch 2).
+    //
+    // Mirrors the Batch-1 pattern in PlSqlAnalysisVisitor.DYN_SQL_REGEX_FALLBACKS: each construct
+    // that has been migrated onto a real parse-tree walk keeps its legacy regex ONLY as a
+    // documented fallback, and every time that fallback actually runs the corresponding counter is
+    // incremented (and the first use per site is logged once). The counters make the retirement
+    // rate observable: on a corpus the structured rules handle, they stay flat; a rising counter
+    // names exactly which construct still needs grammar work.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** TRIGGER header (ON table / timing / events) — structured by triggerOnTable/triggerTiming/triggerEvent. */
+    public static final java.util.concurrent.atomic.AtomicLong TRIGGER_HEADER_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** NEXT VALUE FOR sequence usage — structured by nextValueFor. */
+    public static final java.util.concurrent.atomic.AtomicLong SEQUENCE_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** CREATE SYNONYM — structured by createSynonym. */
+    public static final java.util.concurrent.atomic.AtomicLong SYNONYM_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Cursor lifecycle (OPEN/FETCH/CLOSE/DEALLOCATE) — structured by cursorStatement. */
+    public static final java.util.concurrent.atomic.AtomicLong CURSOR_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** EXISTS(subquery) in an IF condition — structured by existsPredicate. */
+    public static final java.util.concurrent.atomic.AtomicLong EXISTS_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** CTE names — structured by cteDefinition. */
+    public static final java.util.concurrent.atomic.AtomicLong CTE_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** IDENTITY columns — structured by createTableStatement/identitySpec. */
+    public static final java.util.concurrent.atomic.AtomicLong IDENTITY_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** sp_executesql argument decode — structured by spExecuteSql. */
+    public static final java.util.concurrent.atomic.AtomicLong SP_EXECUTESQL_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** CREATE SEQUENCE / CREATE INDEX option tails — structured by sequenceOption/indexOption. */
+    public static final java.util.concurrent.atomic.AtomicLong CREATE_OPTION_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    private static final Set<String> FALLBACK_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Record one use of a legacy regex fallback for a migrated construct; logs the first use per site. */
+    private static void countRegexFallback(java.util.concurrent.atomic.AtomicLong counter, String site) {
+        long n = counter.incrementAndGet();
+        if (FALLBACK_LOGGED.add(site)) {
+            System.err.println("[SqlServerAnalysisVisitor] " + site
+                    + ": structured parse produced nothing; using legacy regex fallback (fallback #" + n + ")");
+        }
+    }
+
     private final SqlServerRoutineInfo result;
 
     public SqlServerAnalysisVisitor(String objectName, String schema) {
@@ -317,18 +367,7 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         applyRoutineName(ctx.routineName());
         result.setLineStart(ctx.getStart().getLine());
         result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
-        // Parse the trigger header: ON <table> (AFTER|FOR|INSTEAD OF) <events>
-        String header = originalText(ctx.triggerHeader());
-        if (header != null) {
-            Matcher t = Pattern.compile("(?i)\\bON\\s+\\[?([\\w#$]+)\\]?(?:\\.\\[?([\\w#$]+)\\]?)?").matcher(header);
-            if (t.find()) result.setTriggerTable(t.group(2) != null ? t.group(2) : t.group(1));
-            Matcher tm = Pattern.compile("(?i)\\b(INSTEAD\\s+OF|AFTER|BEFORE|FOR)\\b").matcher(header);
-            if (tm.find()) result.setTriggerTiming(tm.group(1).replaceAll("\\s+", " ").toUpperCase());
-            Matcher ev = Pattern.compile("(?i)\\b(INSERT|UPDATE|DELETE)\\b").matcher(header);
-            StringBuilder events = new StringBuilder();
-            while (ev.find()) { if (events.length() > 0) events.append(","); events.append(ev.group(1).toUpperCase()); }
-            if (events.length() > 0) result.setTriggerEvent(events.toString());
-        }
+        applyTriggerHeader(ctx.triggerHeader());
         collectCteNames(ctx.routineBody());
         insideTriggerBody = true;
         Void r;
@@ -341,6 +380,46 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         extractSequences(ctx.routineBody());
         extractCaseAndSubqueries(ctx.routineBody());
         return r;
+    }
+
+    /**
+     * Decode the trigger header — target table, timing and event list.
+     *
+     * <p>Grammar-first (batch 2): the header rule now carries real {@code triggerOnTable} /
+     * {@code triggerTiming} / {@code triggerEvent} sub-nodes, so the three values are read off the
+     * parse tree with no text scanning at all. Only when the header matched the permissive
+     * {@code ~AS+} fallback alternative (no structured children) do the legacy regexes run, and
+     * that use is counted in {@link #TRIGGER_HEADER_REGEX_FALLBACKS}.
+     */
+    private void applyTriggerHeader(SqlServerParser.TriggerHeaderContext ctx) {
+        if (ctx == null) return;
+        SqlServerParser.TriggerOnTableContext on = ctx.triggerOnTable();
+        if (on != null && on.tableRef() != null) {
+            result.setTriggerTable(extractTableName(on.tableRef()));
+            SqlServerParser.TriggerTimingContext tm = ctx.triggerTiming();
+            if (tm != null) {
+                result.setTriggerTiming(originalText(tm).replaceAll("\\s+", " ").trim().toUpperCase());
+            }
+            StringBuilder events = new StringBuilder();
+            for (SqlServerParser.TriggerEventContext ev : ctx.triggerEvent()) {
+                if (events.length() > 0) events.append(",");
+                events.append(ev.getText().toUpperCase());
+            }
+            if (events.length() > 0) result.setTriggerEvent(events.toString());
+            return;
+        }
+        // Fallback: the permissive header alternative matched. Legacy regexes, counted.
+        String header = originalText(ctx);
+        if (header == null) return;
+        countRegexFallback(TRIGGER_HEADER_REGEX_FALLBACKS, "trigger header");
+        Matcher t = Pattern.compile("(?i)\\bON\\s+\\[?([\\w#$]+)\\]?(?:\\.\\[?([\\w#$]+)\\]?)?").matcher(header);
+        if (t.find()) result.setTriggerTable(t.group(2) != null ? t.group(2) : t.group(1));
+        Matcher tm = Pattern.compile("(?i)\\b(INSTEAD\\s+OF|AFTER|BEFORE|FOR)\\b").matcher(header);
+        if (tm.find()) result.setTriggerTiming(tm.group(1).replaceAll("\\s+", " ").toUpperCase());
+        Matcher ev = Pattern.compile("(?i)\\b(INSERT|UPDATE|DELETE)\\b").matcher(header);
+        StringBuilder events = new StringBuilder();
+        while (ev.find()) { if (events.length() > 0) events.append(","); events.append(ev.group(1).toUpperCase()); }
+        if (events.length() > 0) result.setTriggerEvent(events.toString());
     }
 
     @Override
@@ -1013,6 +1092,12 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
     @Override
     public Void visitExecStatement(SqlServerParser.ExecStatementContext ctx) {
+        // Structured `EXEC sp_executesql @sql [, N'@p INT'][, @p=…]` (batch 2): the arguments are
+        // real nodes, so no text scanning is needed.
+        if (ctx.SP_EXECUTESQL() != null) {
+            handleSpExecuteSqlStructured(ctx);
+            return null;
+        }
         // EXEC(@sql) / EXEC('literal') form has no routineName — plain string execution, a
         // structurally different mechanism from EXEC sp_executesql (no parameterization).
         if (ctx.routineName() == null) {
@@ -1049,8 +1134,12 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
         String procName = extractRoutineName(ctx.routineName());
 
-        // sp_executesql → dynamic SQL, not a regular call
+        // sp_executesql → dynamic SQL, not a regular call.
+        // Reached only via the generic alternative (e.g. a schema-qualified `dbo.sp_executesql`,
+        // where the structured alternative does not apply) — i.e. the legacy text decode below is
+        // now a fallback, and its use is counted.
         if ("sp_executesql".equalsIgnoreCase(procName)) {
+            countRegexFallback(SP_EXECUTESQL_REGEX_FALLBACKS, "sp_executesql args");
             SqlServerDynamicSqlInfo d = new SqlServerDynamicSqlInfo();
             d.setKind(SqlServerDynamicSqlInfo.Kind.EXEC_SP_EXECUTESQL);
             d.setLine(ctx.getStart().getLine());
@@ -1112,6 +1201,36 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             result.getCalls().add(c);
         }
         return null;
+    }
+
+    /**
+     * Grammar-first decode of {@code EXEC sp_executesql @sql [, N'@p INT'][, @p=…]}: the @sql
+     * variable (resolved through the same literal map as EXEC(@var)), the parameter-signature
+     * literal and the bound name=value pairs all come off the {@code spExecuteSqlArgs} node.
+     */
+    private void handleSpExecuteSqlStructured(SqlServerParser.ExecStatementContext ctx) {
+        SqlServerDynamicSqlInfo d = new SqlServerDynamicSqlInfo();
+        d.setKind(SqlServerDynamicSqlInfo.Kind.EXEC_SP_EXECUTESQL);
+        d.setLine(ctx.getStart().getLine());
+        SqlServerParser.SpExecuteSqlArgsContext args = ctx.spExecuteSqlArgs();
+        if (args != null && args.AT_VAR() != null) {
+            String varName = args.AT_VAR().getText();
+            String literal = sqlVarLiteralMap.get(varName);
+            if (literal != null) {
+                d.setSqlSource(literal);
+                scanDynamicSqlLiteralForTables(literal, ctx.getStart().getLine());
+            } else {
+                d.setUnresolvedVarName(varName);
+            }
+            for (SqlServerParser.SpExecuteSqlArgContext a : args.spExecuteSqlArg()) {
+                if (a.N_STRING() != null || a.SQ_STRING() != null) {
+                    if (d.getParamSignature() == null) d.setParamSignature(originalText(a));
+                } else if (a.AT_VAR() != null && a.EQ() != null && a.spArgValue() != null) {
+                    d.getBoundParameters().put(a.AT_VAR().getText(), originalText(a.spArgValue()).trim());
+                }
+            }
+        }
+        result.getDynamicSql().add(d);
     }
 
     // Bug 8: a trailing OUTPUT/OUT keyword on a call-site argument, e.g. "@total OUTPUT".
@@ -1503,12 +1622,35 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
     /** Emit sequence usages (NEXT VALUE FOR schema.seq) found in the body. */
     private void extractSequences(ParserRuleContext bodyCtx) {
+        if (bodyCtx == null) return;
+        // Grammar-first (batch 2): sequence usages come from the nextValueFor nodes in the tree.
+        List<SqlServerParser.NextValueForContext> uses = new ArrayList<>();
+        collectNodes(bodyCtx, SqlServerParser.NextValueForContext.class, uses);
+        if (!uses.isEmpty()) {
+            Set<String> seen = new HashSet<>();
+            for (SqlServerParser.NextValueForContext u : uses) {
+                if (u.tableRef() == null) continue;
+                String[] parts = splitQualifiedName(u.tableRef().getText());
+                String schema = parts.length >= 2 ? stripBrackets(parts[parts.length - 2]) : null;
+                String name   = stripBrackets(parts[parts.length - 1]);
+                if (!seen.add((schema != null ? schema + "." : "") + name.toUpperCase())) continue;
+                SqlServerSequenceInfo s = new SqlServerSequenceInfo();
+                s.setSchema(schema);
+                s.setName(name);
+                s.setLine(u.getStart().getLine());
+                result.getSequences().add(s);
+            }
+            return;
+        }
+        // Fallback: no structured NEXT VALUE FOR node — scan the body text, counted.
         String text = originalText(bodyCtx);
         if (text == null || text.isEmpty()) return;
         int bodyStartLine = bodyCtx.getStart().getLine();
         Set<String> seen = new HashSet<>();
         Matcher m = SEQ_PATTERN.matcher(text);
+        boolean matched = false;
         while (m.find()) {
+            if (!matched) { matched = true; countRegexFallback(SEQUENCE_REGEX_FALLBACKS, "NEXT VALUE FOR"); }
             String schema = m.group(2) != null ? stripBrackets(m.group(1)) : null;
             String name   = m.group(2) != null ? stripBrackets(m.group(2)) : stripBrackets(m.group(1));
             if (!seen.add((schema != null ? schema + "." : "") + name.toUpperCase())) continue;
@@ -2895,7 +3037,14 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         if (PERMISSION_STMT_PATTERN.matcher(txt == null ? "" : txt).find()) return null;
         scanOps(txt, ctx.getStart().getLine());
         attachJoins(txt, ctx.getStart().getLine());   // MERGE USING / WITH-CTE joins
-        recordCursorLifecycleOp(txt, ctx.getStart().getLine());
+        // Grammar-first (batch 2): the cursor lifecycle statement, when the grammar recognised it,
+        // is read off the cursorStatement node. Only an unrecognised shape falls through to the
+        // legacy text scan (counted).
+        if (ctx.cursorStatement() != null) {
+            recordCursorLifecycleStructured(ctx.cursorStatement());
+        } else {
+            recordCursorLifecycleOp(txt, ctx.getStart().getLine());
+        }
         return null;
     }
 
@@ -2906,10 +3055,40 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             "(?i)\\b(OPEN|CLOSE|DEALLOCATE)\\s+([A-Za-z_][\\w]*)\\b"
           + "|\\bFETCH\\b(?:\\s+(?:NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE)\\b)?(?:\\s+FROM)?\\s+([A-Za-z_][\\w]*)\\b");
 
+    /** Grammar-first counterpart of {@link #recordCursorLifecycleOp}: reads the lifecycle op and
+     *  cursor name from the structured cursorStatement node. */
+    private void recordCursorLifecycleStructured(SqlServerParser.CursorStatementContext ctx) {
+        if (ctx == null) return;
+        String op = null;
+        String name = null;
+        if (ctx.openCursor() != null) {
+            op = "OPEN"; name = ctx.openCursor().namePart() != null ? ctx.openCursor().namePart().getText() : null;
+        } else if (ctx.closeCursor() != null) {
+            op = "CLOSE"; name = ctx.closeCursor().namePart() != null ? ctx.closeCursor().namePart().getText() : null;
+        } else if (ctx.deallocateCursor() != null) {
+            op = "DEALLOCATE"; name = ctx.deallocateCursor().namePart() != null ? ctx.deallocateCursor().namePart().getText() : null;
+        } else if (ctx.fetchCursor() != null) {
+            op = "FETCH"; name = ctx.fetchCursor().namePart() != null ? ctx.fetchCursor().namePart().getText() : null;
+        }
+        if (op == null || name == null) return;
+        attachCursorLifecycleOp(op, stripBrackets(name), ctx.getStart().getLine());
+    }
+
+    private void attachCursorLifecycleOp(String op, String cursorName, int line) {
+        for (SqlServerCursorInfo cur : result.getCursors()) {
+            if (cur.getName() != null && cur.getName().equalsIgnoreCase(cursorName)) {
+                cur.addStmtOperation(op, line);
+                break;
+            }
+        }
+    }
+
     private void recordCursorLifecycleOp(String text, int baseLine) {
         if (text == null || result.getCursors().isEmpty()) return;
         Matcher m = CURSOR_LIFECYCLE_PATTERN.matcher(text);
+        boolean counted = false;
         while (m.find()) {
+            if (!counted) { counted = true; countRegexFallback(CURSOR_REGEX_FALLBACKS, "cursor lifecycle"); }
             String op;
             String cursorName;
             if (m.group(1) != null) {
@@ -2933,10 +3112,42 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitCreateStatement(SqlServerParser.CreateStatementContext ctx) {
         String text = originalText(ctx);
-        scanOps(text, ctx.getStart().getLine());
-        extractIdentityColumns(text, ctx.getStart().getLine());
-        extractSynonym(text, ctx.getStart().getLine());
-        return visitChildren(ctx);
+        int line = ctx.getStart().getLine();
+        scanOps(text, line);
+        extractIdentityColumns(text, line, ctx);
+        if (ctx.createSynonym() == null) {
+            extractSynonym(text, line);   // fallback only when the grammar did not structure it
+        }
+        return visitChildren(ctx);        // visitCreateSynonym records the structured synonym
+    }
+
+    /**
+     * CREATE SYNONYM [schema.]syn FOR [server.db.]schema.target [@linked_server].
+     *
+     * <p>Grammar-first (batch 2): recorded from the {@code createSynonym} node, whether it appears
+     * at the top level (compilationUnit) or inside a routine body (createStatement). The synonym
+     * object is a CREATE op, its target a SELECT op — the same read-through shape the Oracle
+     * create_synonym capture uses. The legacy regex runs only when no structured node exists, and
+     * that use is counted.
+     */
+    @Override
+    public Void visitCreateSynonym(SqlServerParser.CreateSynonymContext ctx) {
+        recordSynonym(ctx);
+        return null;
+    }
+
+    private void recordSynonym(SqlServerParser.CreateSynonymContext ctx) {
+        if (ctx == null || ctx.routineName() == null || ctx.tableRef() == null) return;
+        int line = ctx.getStart().getLine();
+        List<SqlServerParser.NamePartContext> parts = ctx.routineName().namePart();
+        String synSchema = parts.size() == 2 ? stripBrackets(parts.get(0).getText()) : null;
+        String synName   = stripBrackets(parts.get(parts.size() - 1).getText());
+        addTableOp(synSchema, synName, line, SqlServerTableOpInfo.DmlType.CREATE);
+
+        String[] tp = splitQualifiedName(ctx.tableRef().getText());
+        String targetSchema = tp.length >= 2 ? stripBrackets(tp[tp.length - 2]) : null;
+        String targetName   = stripBrackets(tp[tp.length - 1]);
+        addTableOp(targetSchema, targetName, line, SqlServerTableOpInfo.DmlType.SELECT);
     }
 
     // CREATE SYNONYM [schema.]syn_name FOR [server.database.]schema.target [@linked_server]
@@ -2954,7 +3165,9 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     private void extractSynonym(String text, int baseLine) {
         if (text == null) return;
         Matcher m = SYNONYM_PATTERN.matcher(text);
+        boolean counted = false;
         while (m.find()) {
+            if (!counted) { counted = true; countRegexFallback(SYNONYM_REGEX_FALLBACKS, "CREATE SYNONYM"); }
             String synSchema = m.group(2) != null ? stripBrackets(m.group(1)) : null;
             String synName   = m.group(2) != null ? stripBrackets(m.group(2)) : stripBrackets(m.group(1));
             int line = lineAt(text, m.start(), baseLine);
@@ -2973,10 +3186,43 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
      * shared {@link SqlServerSequenceInfo} model (see its class doc) so the existing
      * sequences-facet pipeline picks these up without a second concept.
      */
-    private void extractIdentityColumns(String text, int baseLine) {
+    private void extractIdentityColumns(String text, int baseLine,
+                                        SqlServerParser.CreateStatementContext stmtCtx) {
+        // Grammar-first (batch 2): when the CREATE TABLE was parsed structurally, the IDENTITY
+        // column specs come straight off the tree. The regex path below runs only for a
+        // CREATE TABLE shape the structured rule did not match, and that use is counted.
+        SqlServerParser.CreateTableStatementContext tbl =
+                stmtCtx != null ? stmtCtx.createTableStatement() : null;
+        if (tbl != null && tbl.tableRef() != null) {
+            String[] tp = splitQualifiedName(tbl.tableRef().getText());
+            String schema = tp.length >= 2 ? stripBrackets(tp[tp.length - 2]) : null;
+            String table  = stripBrackets(tp[tp.length - 1]);
+            for (SqlServerParser.CreateTableItemContext item : tbl.createTableItem()) {
+                SqlServerParser.ColumnDefinitionContext col = item.columnDefinition();
+                if (col == null || col.namePart() == null) continue;
+                SqlServerParser.IdentitySpecContext id = null;
+                for (SqlServerParser.ColumnOptionContext opt : col.columnOption()) {
+                    if (opt.identitySpec() != null) { id = opt.identitySpec(); break; }
+                }
+                if (id == null) continue;
+                SqlServerSequenceInfo s = new SqlServerSequenceInfo();
+                s.setIdentityColumn(true);
+                s.setSchema(schema);
+                s.setTableName(table);
+                s.setColumnName(stripBrackets(col.namePart().getText()));
+                long[] seedInc = signedIdentityValues(id);
+                s.setSeed(seedInc[0]);
+                s.setIncrement(seedInc[1]);
+                s.setLine(id.getStart().getLine());
+                result.getSequences().add(s);
+            }
+            return;
+        }
         if (text == null || text.isEmpty()) return;
+        boolean counted = false;
         Matcher tableM = CREATE_TABLE_PATTERN.matcher(text);
         while (tableM.find()) {
+            if (!counted) { counted = true; countRegexFallback(IDENTITY_REGEX_FALLBACKS, "IDENTITY columns"); }
             String schema = tableM.group(2) != null ? stripBrackets(tableM.group(1)) : null;
             String table  = tableM.group(2) != null ? stripBrackets(tableM.group(2)) : stripBrackets(tableM.group(1));
             int openParen = tableM.end() - 1;
@@ -2998,6 +3244,28 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
                 result.getSequences().add(s);
             }
         }
+    }
+
+    /**
+     * Reads {@code IDENTITY(seed, increment)} into {@code {seed, increment}}, defaulting both to
+     * 1 (bare IDENTITY) and honouring an optional leading minus on either number.
+     */
+    private static long[] signedIdentityValues(SqlServerParser.IdentitySpecContext id) {
+        long[] out = {1L, 1L};
+        int vi = 0;
+        boolean neg = false;
+        for (int i = 0; i < id.getChildCount() && vi < 2; i++) {
+            org.antlr.v4.runtime.tree.ParseTree c = id.getChild(i);
+            if (!(c instanceof org.antlr.v4.runtime.tree.TerminalNode)) continue;
+            String tx = c.getText();
+            if ("-".equals(tx)) { neg = true; continue; }
+            if (tx.chars().allMatch(Character::isDigit)) {
+                out[vi] = neg ? -Long.parseLong(tx) : Long.parseLong(tx);
+                neg = false;
+                vi++;
+            }
+        }
+        return out;
     }
 
     /** Index of the {@code )} that matches the {@code (} at {@code openParenIdx}, or -1. */
@@ -3377,10 +3645,31 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
     /** Collect CTE names from a routine body so they aren't mistaken for tables. */
     private void collectCteNames(ParserRuleContext bodyCtx) {
+        if (bodyCtx == null) return;
+        // Grammar-first (batch 2): the CTE names are read off the cteDefinition nodes the
+        // withStatement rule now produces. The regex survives only for a WITH-shape the structured
+        // rule could not parse, and that use is counted.
+        List<SqlServerParser.CteDefinitionContext> defs = new ArrayList<>();
+        collectNodes(bodyCtx, SqlServerParser.CteDefinitionContext.class, defs);
+        if (!defs.isEmpty()) {
+            for (SqlServerParser.CteDefinitionContext d : defs) {
+                if (d.namePart() != null) cteNames.add(stripBrackets(d.namePart().getText()).toUpperCase());
+            }
+            return;
+        }
         String text = originalText(bodyCtx);
         if (text == null) return;
+        countRegexFallback(CTE_REGEX_FALLBACKS, "CTE names");
         Matcher m = CTE_PATTERN.matcher(text);
         while (m.find()) cteNames.add(m.group(1).toUpperCase());
+    }
+
+    /** Depth-first collection of every node of {@code type} in the subtree rooted at {@code t}. */
+    private static <T extends ParserRuleContext> void collectNodes(
+            org.antlr.v4.runtime.tree.ParseTree t, Class<T> type, List<T> out) {
+        if (t == null) return;
+        if (type.isInstance(t)) out.add(type.cast(t));
+        for (int i = 0; i < t.getChildCount(); i++) collectNodes(t.getChild(i), type, out);
     }
 
     /** Add a table op, de-duped by schema.name + operation (so a table can show many op types). */
