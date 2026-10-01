@@ -759,7 +759,9 @@ class EstateFacetReader {
                     if (tn == null || tn.isBlank()) continue;
                     String owner = textOrNull(dt, "owner");
                     String k = key(owner != null && !owner.isBlank() ? owner : tableSchema, tn);
-                    ObjectNode row = byKey.computeIfAbsent(k, kk -> newTriggerRow(m, tn, owner));
+                    ObjectNode row = byKey.get(k);
+                    boolean created = false;
+                    if (row == null) { row = newTriggerRow(m, tn, owner); byKey.put(k, row); created = true; }
                     if (row.path("table").asText("").isEmpty() && tableName != null) row.put("table", tableName);
                     if (row.path("tableSchema").asText("").isEmpty() && tableSchema != null) row.put("tableSchema", tableSchema);
                     putIfAbsent(row, "triggerType", textOrNull(dt, "triggerType"));
@@ -767,7 +769,9 @@ class EstateFacetReader {
                     putIfAbsent(row, "timing", timingOf(textOrNull(dt, "triggerType")));
                     putIfAbsent(row, "status", textOrNull(dt, "status"));
                     putIfAbsent(row, "source", "DATABASE");
-                    row.put("dbDiscovered", true);
+                    // Only a row this catalog list ALONE produced is "catalog only"; a row already
+                    // seen in triggers[] or a TRIGGER node keeps its richer provenance.
+                    if (created) row.put("dbDiscovered", true);
                 }
             }
         }

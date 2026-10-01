@@ -77,8 +77,13 @@ public class AnalysisViewStore {
      * {@code willFire} inverse map; global rows carry per-variable and per-procedure counts. A
      * version-2 sidecar holds the pre-enrichment shape, so it is refused and recomputed rather than
      * served without the new fields.
+     *
+     * <p>Version 4: the {@code dbDiscovered} flag on a trigger row now means the row was produced by
+     * the catalog {@code dbTriggers[]} list ALONE, rather than set whenever a dbTriggers entry merely
+     * matched a row already seen in {@code triggers[]} or a TRIGGER node. A version-3 sidecar
+     * mislabels source-parsed triggers as catalog-only, so it is refused and recomputed.
      */
-    public static final int FORMAT_VERSION = 3;
+    public static final int FORMAT_VERSION = 4;
 
     /** The sidecar folder inside an analysis directory. */
     public static final String VIEWS_DIR = "views";
