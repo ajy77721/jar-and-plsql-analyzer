@@ -457,8 +457,43 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         result.setLineStart(ctx.getStart().getLine());
         result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
 
-        String tail = ctx.createSequenceTail() != null ? originalText(ctx.createSequenceTail()) : null;
+        // Grammar-first (batch 2): each option is a named sub-rule; read the values off the tree.
+        // A createSequenceTail alternative means an option shape the named rules do not model —
+        // only then does the legacy regex run, on that tail, and that use is counted.
+        StringBuilder fallbackTail = new StringBuilder();
+        for (SqlServerParser.SequenceOptionContext opt : ctx.sequenceOption()) {
+            if (opt.AS() != null && opt.dataType() != null) {
+                result.setSequenceDataType(stripBrackets(opt.dataType().getText().replaceAll("\\s+", "")));
+            } else if (opt.startWithOption() != null) {
+                result.setSequenceStartWith(signedNum(opt.startWithOption()));
+            } else if (opt.incrementByOption() != null) {
+                result.setSequenceIncrementBy(signedNum(opt.incrementByOption()));
+            } else if (opt.negatedOption() != null) {
+                String name = opt.negatedOption().optionNameKw() != null
+                        ? opt.negatedOption().optionNameKw().getText().toUpperCase() : "";
+                if ("CYCLE".equals(name)) result.setSequenceCycle(false);
+                else if ("CACHE".equals(name)) result.setSequenceCache(false);
+                // NO MINVALUE / NO MAXVALUE leave the value unset — matching the legacy regex,
+                // which only set a min/max when a numeric value followed.
+            } else if (opt.minValueOption() != null) {
+                SqlServerParser.MinValueOptionContext o = opt.minValueOption();
+                if (o.INT_NUM() != null) result.setSequenceMinValue(Long.valueOf(o.INT_NUM().getText()));
+            } else if (opt.maxValueOption() != null) {
+                SqlServerParser.MaxValueOptionContext o = opt.maxValueOption();
+                if (o.INT_NUM() != null) result.setSequenceMaxValue(Long.valueOf(o.INT_NUM().getText()));
+            } else if (opt.cycleOption() != null) {
+                result.setSequenceCycle(true);
+            } else if (opt.cacheOption() != null) {
+                SqlServerParser.CacheOptionContext o = opt.cacheOption();
+                result.setSequenceCache(true);
+                if (o.INT_NUM() != null) result.setSequenceCacheSize(Long.valueOf(o.INT_NUM().getText()));
+            } else if (opt.createSequenceTail() != null) {
+                fallbackTail.append(originalText(opt.createSequenceTail()));
+            }
+        }
+        String tail = fallbackTail.length() > 0 ? fallbackTail.toString() : null;
         if (tail != null) {
+            countRegexFallback(CREATE_OPTION_REGEX_FALLBACKS, "CREATE SEQUENCE options");
             Matcher m;
             m = Pattern.compile("(?i)^\\s*AS\\s+([\\w\\[\\]]+(?:\\s*\\(\\s*\\d+\\s*(?:,\\s*\\d+\\s*)?\\))?)").matcher(tail);
             if (m.find()) result.setSequenceDataType(stripBrackets(m.group(1).replaceAll("\\s+", "")));
@@ -532,8 +567,26 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
                     col.ID() != null ? col.ID().getText() : col.BRACKET_ID().getText()));
         }
 
-        String tail = ctx.createIndexTail() != null ? originalText(ctx.createIndexTail()) : null;
+        // Grammar-first (batch 2): INCLUDE and WHERE are named option nodes. A createIndexTail
+        // option means an unmodelled tail shape is present — only then does the legacy regex run,
+        // and that use is counted.
+        StringBuilder fallbackTail = new StringBuilder();
+        for (SqlServerParser.IndexOptionContext opt : ctx.indexOption()) {
+            if (opt.includeOption() != null) {
+                for (SqlServerParser.IndexColumnContext col : opt.includeOption().indexColumnList().indexColumn()) {
+                    String t = stripBrackets(col.ID() != null ? col.ID().getText() : col.BRACKET_ID().getText());
+                    if (!t.isEmpty()) result.getIndexIncludeColumns().add(t);
+                }
+            } else if (opt.whereOption() != null && opt.whereOption().expr() != null) {
+                String pred = originalText(opt.whereOption().expr()).trim();
+                if (!pred.isEmpty()) result.setIndexFilter(pred);
+            } else if (opt.createIndexTail() != null) {
+                fallbackTail.append(originalText(opt.createIndexTail()));
+            }
+        }
+        String tail = fallbackTail.length() > 0 ? fallbackTail.toString() : null;
         if (tail != null) {
+            countRegexFallback(CREATE_OPTION_REGEX_FALLBACKS, "CREATE INDEX options");
             Matcher inc = Pattern.compile("(?is)\\bINCLUDE\\s*\\(([^)]*)\\)").matcher(tail);
             if (inc.find()) {
                 for (String c : inc.group(1).split(",")) {
@@ -1033,7 +1086,22 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitIfStatement(SqlServerParser.IfStatementContext ctx) {
         if (ctx.expr() != null) {
-            extractExistsSubqueryTables(originalText(ctx.expr()), ctx.getStart().getLine());
+            // Grammar-first (batch 2): an EXISTS(subquery) in the condition is an existsPredicate
+            // node whose queryExpression is a real subtree, so its tables/joins are extracted by
+            // the SAME structured walk a standalone SELECT uses (processQueryExpression). The
+            // node's tokens carry absolute source lines, so the walk is called with baseLine=1
+            // (structuredLine then returns the token's own line, i.e. no offset).
+            List<SqlServerParser.ExistsPredicateContext> preds = new ArrayList<>();
+            collectNodes(ctx.expr(), SqlServerParser.ExistsPredicateContext.class, preds);
+            if (!preds.isEmpty()) {
+                for (SqlServerParser.ExistsPredicateContext p : preds) {
+                    if (p.queryExpression() == null) continue;
+                    processQueryExpression(p.queryExpression(), 1,
+                            buildStructuredAliasMap(p.queryExpression()));
+                }
+            } else {
+                extractExistsSubqueryTables(originalText(ctx.expr()), ctx.getStart().getLine());
+            }
         }
         return visitChildren(ctx);
     }
@@ -1041,11 +1109,14 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     /** Scans an IF condition for EXISTS(...)/NOT EXISTS(...) subqueries and records the
      *  subquery's FROM/JOIN tables as SELECT table ops (and their joins), same as a real
      *  SELECT statement's stmtTail would. Duplicate table+op-type reads (e.g. also appearing
-     *  in the IF/ELSE branch bodies) are naturally suppressed by addTableOp's own de-dup key. */
+     *  in the IF/ELSE branch bodies) are naturally suppressed by addTableOp's own de-dup key.
+     *  Legacy fallback (batch 2) — reached only when the grammar produced no existsPredicate node. */
     private void extractExistsSubqueryTables(String condText, int baseLine) {
         if (condText == null) return;
         Matcher m = EXISTS_PATTERN.matcher(condText);
+        boolean counted = false;
         while (m.find()) {
+            if (!counted) { counted = true; countRegexFallback(EXISTS_REGEX_FALLBACKS, "EXISTS subquery"); }
             int openParen = m.end() - 1;
             int closeParen = matchingCloseParen(condText, openParen);
             if (closeParen < 0) continue;
@@ -3244,6 +3315,21 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
                 result.getSequences().add(s);
             }
         }
+    }
+
+    /** First (optionally minus-signed) integer token in a rule, e.g. START WITH -5 / INCREMENT BY 2. */
+    private static long signedNum(ParserRuleContext ctx) {
+        boolean neg = false;
+        for (int i = 0; i < ctx.getChildCount(); i++) {
+            org.antlr.v4.runtime.tree.ParseTree c = ctx.getChild(i);
+            if (!(c instanceof org.antlr.v4.runtime.tree.TerminalNode)) continue;
+            String tx = c.getText();
+            if ("-".equals(tx)) { neg = true; continue; }
+            if (tx.chars().allMatch(Character::isDigit)) {
+                return neg ? -Long.parseLong(tx) : Long.parseLong(tx);
+            }
+        }
+        return 0L;
     }
 
     /**

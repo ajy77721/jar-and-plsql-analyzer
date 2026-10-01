@@ -115,7 +115,7 @@ createTypeTail
 // permissively and decoded by the visitor.
 createIndex
     : CREATE indexModifier* INDEX routineName ON tableRef
-      LPAREN indexColumnList RPAREN createIndexTail? SEMI?
+      LPAREN indexColumnList RPAREN indexOption* SEMI?
     ;
 
 indexModifier
@@ -130,6 +130,25 @@ indexColumn
     : (ID | BRACKET_ID) (ASC | DESC)?
     ;
 
+// Named index options (batch 2): INCLUDE (cols) and WHERE <predicate> are real nodes — the two
+// the visitor actually reads. Everything else in the tail (WITH (…), ON filegroup, …) is eaten
+// by the trailing permissive alternative, which is the old createIndexTail and doubles as the
+// fallback that tells the visitor a tail it could not decode structurally is present.
+indexOption
+    : includeOption
+    | whereOption
+    | createIndexTail
+    ;
+
+includeOption
+    : {"INCLUDE".equalsIgnoreCase(_input.LT(1).getText())}? ID
+      LPAREN indexColumnList RPAREN
+    ;
+
+whereOption
+    : WHERE expr
+    ;
+
 createIndexTail
     : ~SEMI+
     ;
@@ -137,13 +156,70 @@ createIndexTail
 // CREATE SEQUENCE [schema.]name [AS <type>] [START WITH n] [INCREMENT BY n]
 //                 [MINVALUE n | NO MINVALUE] [MAXVALUE n | NO MAXVALUE]
 //                 [CYCLE | NO CYCLE] [CACHE [n] | NO CACHE]
-// The option list is order-independent and every option is optional, so rather than encoding
-// a combinatorial permutation grammar the tail is consumed permissively (same approach as
-// viewHeader / triggerHeader above); SqlServerAnalysisVisitor.visitCreateSequence recovers the
-// individual option values by regex over the original tail text.
+//
+// The option list is order-independent and every option is optional. Each option now has its own
+// named sub-rule (batch 2) so the visitor reads the values off the parse tree instead of scanning
+// the tail text; createSequenceTail (the old permissive ~SEMI+) remains as the LAST alternative,
+// so an option shape these rules do not model still parses and falls back to the counted regex.
 createSequence
-    : CREATE SEQUENCE routineName createSequenceTail? SEMI?
+    : CREATE SEQUENCE routineName sequenceOption* SEMI?
     ;
+
+sequenceOption
+    : AS dataType
+    | startWithOption
+    | incrementByOption
+    | negatedOption
+    | minValueOption
+    | maxValueOption
+    | cycleOption
+    | cacheOption
+    | createSequenceTail
+    ;
+
+// START WITH n / INCREMENT BY n — WITH and BY are real lexer tokens, so prediction only needs the
+// first-token (START/INCREMENT) predicate.
+startWithOption
+    : {"START".equalsIgnoreCase(_input.LT(1).getText())}? ID WITH MINUS? INT_NUM
+    ;
+
+incrementByOption
+    : {"INCREMENT".equalsIgnoreCase(_input.LT(1).getText())}? ID BY MINUS? INT_NUM
+    ;
+
+// NO MINVALUE | NO MAXVALUE | NO CYCLE | NO CACHE.
+// Deliberately a SINGLE first-token predicate (on NO) with the option name left as a plain ID:
+// a second-token predicate here would be evaluated at parse time rather than prediction, so
+// `NO CYCLE` would first try the MINVALUE branch and fail. The visitor reads optionNameKw's text
+// to decide which negation it is.
+negatedOption
+    : {"NO".equalsIgnoreCase(_input.LT(1).getText())}? ID optionNameKw
+    ;
+
+optionNameKw
+    : ID
+    ;
+
+minValueOption
+    : minValueKw (MINUS? INT_NUM)?
+    ;
+
+maxValueOption
+    : maxValueKw (MINUS? INT_NUM)?
+    ;
+
+cycleOption
+    : cycleKw
+    ;
+
+cacheOption
+    : cacheKw INT_NUM?
+    ;
+
+minValueKw : {"MINVALUE".equalsIgnoreCase(_input.LT(1).getText())}? ID ;
+maxValueKw : {"MAXVALUE".equalsIgnoreCase(_input.LT(1).getText())}? ID ;
+cycleKw : {"CYCLE".equalsIgnoreCase(_input.LT(1).getText())}? ID ;
+cacheKw : {"CACHE".equalsIgnoreCase(_input.LT(1).getText())}? ID ;
 
 createSequenceTail
     : ~SEMI+
