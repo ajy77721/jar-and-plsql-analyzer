@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  *   visitUpdateStatement    → UPDATE table op
  *   visitDeleteStatement    → DELETE table op
  *   visitSelectStatement    → SELECT table op (scans stmtTail for FROM clause)
- */
+ *
  * <p><b>Regex to grammar migration status (batch 2).</b> SELECT/FROM/JOIN extraction was already
  * migrated onto the {@code queryUnit} parse tree in Stages 1-9. This batch moved the following
  * further constructs onto real grammar rules, each keeping its legacy regex ONLY as a counted
