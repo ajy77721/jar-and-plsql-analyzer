@@ -73,7 +73,7 @@ public class DbConnectionManager implements AutoCloseable {
     /** Query-per-second cap for catalog/source queries. <=0 disables throttling. */
     private volatile double rateLimitQps = 20.0;
     /** JDBC queryTimeout (seconds) applied to every statement from prepareStatement/createStatement. */
-    private volatile int statementTimeoutSeconds = 30;
+    private volatile int statementTimeoutSeconds = 300;
     /** Consecutive query failures that trip the GLOBAL circuit breaker. <=0 disables it. */
     private volatile int globalCircuitThreshold = 5;
 
