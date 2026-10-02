@@ -66,19 +66,31 @@ public interface SourceFetchStrategy {
         public final String identityArgs;
         /** DB2 {@code SYSCAT.ROUTINES.SPECIFICNAME} — unique per overload, else null. */
         public final String specificName;
+        /**
+         * DB2 {@code SYSCAT.ROUTINES.ROUTINEMODULENAME} — the owning module when this routine is a
+         * module member, else null (task #28). Used as the package slot so the member keys as
+         * MODULE.SUB.
+         */
+        public final String moduleName;
 
         public ObjectRef(String name, String type, String schema) {
-            this(name, type, schema, null, null, null);
+            this(name, type, schema, null, null, null, null);
         }
 
         public ObjectRef(String name, String type, String schema,
                          String oid, String identityArgs, String specificName) {
+            this(name, type, schema, oid, identityArgs, specificName, null);
+        }
+
+        public ObjectRef(String name, String type, String schema,
+                         String oid, String identityArgs, String specificName, String moduleName) {
             this.name         = name;
             this.type         = type;
             this.schema       = schema;
             this.oid          = oid;
             this.identityArgs = identityArgs;
             this.specificName = specificName;
+            this.moduleName   = moduleName;
         }
 
         @Override public String toString() {

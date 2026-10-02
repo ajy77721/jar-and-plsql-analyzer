@@ -117,4 +117,43 @@ class PostgresDb2OverloadFetchTest {
         assertNull(strategy.fetchSourceBySpecificName(conn, "  ", "DB2INST1"));
         verifyNoInteractions(conn);
     }
+
+    // ── DB2 modules (task #28) ────────────────────────────────────────────────────────────────
+
+    @Test
+    void db2_listObjects_carriesModuleName() throws Exception {
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true).thenReturn(false);
+        when(rs.getString("ROUTINENAME")).thenReturn("NET_PRICE");
+        when(rs.getString("ROUTINETYPE")).thenReturn("F");
+        when(rs.getString("ROUTINESCHEMA")).thenReturn("DB2INST1");
+        when(rs.getString("SPECIFICNAME")).thenReturn("SQL123");
+        when(rs.getString("ROUTINEMODULENAME")).thenReturn("ERP_MOD_PRICING");
+
+        List<SourceFetchStrategy.ObjectRef> refs =
+                new Db2SourceFetchStrategy().listObjects(conn, "DB2INST1");
+
+        assertEquals(1, refs.size());
+        assertEquals("ERP_MOD_PRICING", refs.get(0).moduleName,
+                "module member's owning module (ROUTINEMODULENAME) is exposed for MODULE.SUB keying");
+    }
+
+    @Test
+    void db2_listObjects_nonModuleRoutine_hasNullModuleName() throws Exception {
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true).thenReturn(false);
+        when(rs.getString("ROUTINENAME")).thenReturn("GET_ORDERS");
+        when(rs.getString("ROUTINETYPE")).thenReturn("P");
+        when(rs.getString("ROUTINESCHEMA")).thenReturn("DB2INST1");
+        when(rs.getString("SPECIFICNAME")).thenReturn("SQL999");
+        when(rs.getString("ROUTINEMODULENAME")).thenReturn(null);
+
+        List<SourceFetchStrategy.ObjectRef> refs =
+                new Db2SourceFetchStrategy().listObjects(conn, "DB2INST1");
+
+        assertEquals(1, refs.size());
+        assertNull(refs.get(0).moduleName, "non-module routine keeps a null module slot");
+    }
 }

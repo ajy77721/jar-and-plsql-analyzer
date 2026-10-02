@@ -28,6 +28,18 @@ public class SubprogramInfo {
     private boolean pipelined;
     /** True when this entry is a forward declaration (from package spec) with no body. */
     private boolean forwardDeclaration;
+    /**
+     * Task #29: true when this subprogram is declared inside another subprogram's body (a
+     * nested/local procedure or function), false for a package member or standalone routine.
+     * Additive metadata only — it never participates in id generation, so ids of non-nested
+     * subprograms stay byte-identical.
+     */
+    private boolean nested;
+    /**
+     * Task #29: nesting level — 0 for a top-level/package member, 1 for a subprogram declared one
+     * body deep, 2 for one nested inside that, etc. Mirrors {@link #nested} (0 ⇔ nested=false).
+     */
+    private int scopeDepth;
 
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
@@ -69,4 +81,8 @@ public class SubprogramInfo {
     public void setPipelined(boolean p) { this.pipelined = p; }
     public boolean isForwardDeclaration() { return forwardDeclaration; }
     public void setForwardDeclaration(boolean f) { this.forwardDeclaration = f; }
+    public boolean isNested() { return nested; }
+    public void setNested(boolean n) { this.nested = n; }
+    public int getScopeDepth() { return scopeDepth; }
+    public void setScopeDepth(int d) { this.scopeDepth = d; }
 }

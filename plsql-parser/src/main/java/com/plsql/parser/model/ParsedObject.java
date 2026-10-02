@@ -8,6 +8,13 @@ public class ParsedObject {
     private String type;
     private String name;
     private String schema;
+    /**
+     * Task #28: the owning module/package name when this object is a member of one (DB2 module
+     * member). The crawler uses it as the package slot so the node id becomes MODULE.SUB; null for
+     * ordinary standalone objects (Oracle does not set it — its package identity comes from the
+     * crawl item). Additive: null changes nothing.
+     */
+    private String packageName;
     private int lineStart;
     private int lineEnd;
     private List<ParameterInfo> parameters = new ArrayList<>();
@@ -91,6 +98,8 @@ public class ParsedObject {
     public void setType(String type) { this.type = type; }
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+    public String getPackageName() { return packageName; }
+    public void setPackageName(String packageName) { this.packageName = packageName; }
     public String getSchema() { return schema; }
     public void setSchema(String schema) { this.schema = schema; }
     public int getLineStart() { return lineStart; }

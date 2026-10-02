@@ -290,6 +290,35 @@ class EstateFacetsTest {
         assertEquals("0", gx.path("defaultValue").asText());
     }
 
+    /**
+     * Task #28: a DB2 module's persisted globals must reach the SAME globals facet as Oracle
+     * package globals. The module name (ERP_MOD_PRICING) is not a {@code PACKAGE_BODY} and does
+     * not contain "PKG", so admission relies on the node carrying {@code packageGlobalDeclarations}
+     * — exactly the path the Db2 parser now populates from module-level variables.
+     */
+    @Test
+    void db2ModuleGlobalsAppearInGlobalsFacet() throws Exception {
+        put("api/index.json", "{\"entryPoint\":\"ERP_MOD_PRICING\",\"nodes\":[]}");
+        put("api/tables/index.json", "{\"tables\":[]}");
+        // A DB2 module member node: packageName = module (node id MODULE.SUB), carrying the
+        // module's persisted global declarations (packageGlobalDeclarations).
+        put("api/nodes/DB2INST1$ERP_MOD_PRICING$NET_PRICE.json", """
+                {"nodeId":"DB2INST1$ERP_MOD_PRICING$NET_PRICE",
+                 "name":"ERP_MOD_PRICING.NET_PRICE","packageName":"ERP_MOD_PRICING",
+                 "objectName":"NET_PRICE","schema":"DB2INST1","objectType":"FUNCTION",
+                 "packageGlobalDeclarations":[
+                   {"name":"G_REPRICE_COUNT","dataType":"INTEGER","defaultValue":"0"}]}""");
+
+        JsonNode globals = staticReader.getGlobals(NAME);
+        JsonNode mod = row(globals, "package", "ERP_MOD_PRICING");
+        assertEquals(1, mod.path("variableCount").asInt());
+        JsonNode v = mod.path("variables").get(0);
+        assertEquals("G_REPRICE_COUNT", v.path("name").asText());
+        assertTrue(v.path("declared").asBoolean(), "module variable is a declaration");
+        assertEquals("INTEGER", v.path("dataType").asText());
+        assertEquals("0", v.path("defaultValue").asText());
+    }
+
     @Test
     void absentFacetsDegradeToEmpty() throws Exception {
         put("api/index.json", "{\"entryPoint\":\"DEMO\",\"nodes\":[]}");

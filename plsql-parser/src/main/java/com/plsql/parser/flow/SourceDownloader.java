@@ -171,6 +171,26 @@ public class SourceDownloader {
         return out;
     }
 
+    /**
+     * Task #28: the owning module of a DB2 routine, from the cached catalog's
+     * {@code ROUTINEMODULENAME} column, or null when the routine is not a module member (or the
+     * connection is not DB2). Uses the same one-query, cached catalog as {@link #listDb2Routines},
+     * so keying a module member costs no extra round trip.
+     */
+    public String db2ModuleOf(String routineName, String schema) {
+        if (routineName == null || routineName.isBlank()) return null;
+        if (connManager == null || !connManager.isDB2()) return null;
+        for (SourceFetchStrategy.ObjectRef r : listDb2Routines()) {
+            if (r.name != null && r.name.equalsIgnoreCase(routineName)
+                    && (schema == null || schema.isEmpty()
+                        || (r.schema != null && r.schema.equalsIgnoreCase(schema)))
+                    && r.moduleName != null && !r.moduleName.isBlank()) {
+                return r.moduleName;
+            }
+        }
+        return null;
+    }
+
     /** Fetch ONE Postgres overload's DDL by {@code pg_proc.oid} (in-memory cached per oid). */
     public String downloadPostgresSourceByOid(String oid) {
         if (oid == null || oid.isBlank()) return null;

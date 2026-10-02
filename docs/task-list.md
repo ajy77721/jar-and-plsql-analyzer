@@ -29,6 +29,8 @@
 | 18 | False-pick fixes: globals noise (100%→0), SQLServer view base tables, DB2 phantom view + STATEMENT level, pseudo-table filter, trigger bodyCalls | false-pick audit | 78eca6e, 9f6fa1b |
 | 19 | Log archiving disabled; 87 .bak files removed; docs (writeup + 3-page tech doc + DOCX) | user decisions | 5955d17, 3ed2d7b, 8242fa6, d27fbae |
 | 20 | Clean slate: backup verified (3,438 files/445MB) → wipe → fresh analyses ×7 — 0 errors | user ask | live runs |
+| 28 | **Db2 modules** — grammar-first MODULE / ALTER MODULE PUBLISH / CREATE VARIABLE rules; `ROUTINEMODULENAME` → `ObjectRef.moduleName`; crawler keys a module member MODULE.SUB; module/global vars → packageVariables → globals facet | construct matrix | feat/db2-modules-nesting |
+| 29 | **Nested-subprogram marking** — `nested`/`scopeDepth` on SubprogramInfo/SubprogramSummaryInfo/FlowNode; persisted to `members[]` + `index.json` (procedures facet badge); ids byte-identical for non-nested | construct matrix | feat/db2-modules-nesting |
 
 ---
 
@@ -49,8 +51,6 @@
 | 25 | **Anonymous/DO blocks end-to-end** (Postgres plumbing + the Oracle splitter) | construct matrix | **AC:** a DO $$ block becomes an analyzable unit (Postgres); a DECLARE…BEGIN script section becomes a unit (Oracle); their table ops/calls captured; suites green |
 | 26 | **Result-set-returning procs marker** | construct matrix | **AC:** a returnsResultSet/resultSets field on the routine model per dialect (SQLServer implicit SELECTs count, Db2 WITH RETURN, Oracle REF CURSOR OUT, Postgres refcursor/SETOF); visible in the cursors facet + UI; golden tests |
 | 27 | **TVF/SETOF return shapes persisted** | construct matrix | **AC:** returnType/returnsColumns on SqlServer/Postgres routine models + through the multidb adapters into ParsedObject + visible in the facet |
-| 28 | **Db2 modules** (ROUTINEMODULENAME → MODULE.SUB keying + module vars in globals) | construct matrix | **AC:** a module member keys as MODULE.SUB (like Oracle packages); module variables appear in the globals facet; fixtures prove it |
-| 29 | **Nested-subprogram marking** | construct matrix | **AC:** nested=true/scopeDepth on SubprogramInfo; the procedures facet shows the nesting; existing ids unchanged for non-nested |
 | 30 | **Regex deferred items** (MERGE/WITH promotion, qualified-call rule, CASE contexts, standalone synonym, JPQL grammar) | regex audit | **AC:** each migrated item: grammar-primary + counted fallback + the audit-test suites green; JPQL: either a small grammar or a documented last-resort decision |
 | 31 | **Verify P4** (credentials for ALL queue-job types) | storage audit | **AC:** a test/inspection proving every QueueJob.Type's captured context carries credentials (or the job needs none — documented per type) |
 | 32 | **ChatController persistence** | web audit | **AC:** chat writes route through the user's context (no default-store degradation) + a test |

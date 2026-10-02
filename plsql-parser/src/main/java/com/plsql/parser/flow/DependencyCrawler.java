@@ -345,7 +345,10 @@ public class DependencyCrawler {
 
                 for (int i = levelRest.size() - 1; i >= 0; i--) queue.addFirst(levelRest.get(i));
             }
-            String visitKey = buildVisitKey(item.schema, item.packageName, item.subprogramName);
+            // Task #28: DB2 module members have no item.packageName but do have an owning module;
+            // effectivePackageName supplies it as the PACKAGE slot so the visit key is MODULE.SUB.
+            String itemPackage = effectivePackageName(item, null);
+            String visitKey = buildVisitKey(item.schema, itemPackage, item.subprogramName);
             // Overloaded member: distinguish by SIGNATURE (types when known, else arity) so each
             // overload becomes its own node. Package members resolve against the parsed package;
             // standalone Postgres/DB2 routines against the routine catalog (disc resolved at
@@ -394,7 +397,7 @@ public class DependencyCrawler {
                         String restoredOwner = restored.getSchema();
                         edgeBatch.clear();
                         enqueueExternalCalls(restored.getCalls(), item.depth,
-                                item.packageName, item.subprogramName,
+                                itemPackage, item.subprogramName,
                                 restoredOwner, queue, edgeBatch,
                                 isOverloaded ? itemOverloadDisc : null);
                         aggregateTableInfo(tableInfoMap, restored.getTableOperations(), visitKey);
@@ -516,7 +519,7 @@ public class DependencyCrawler {
                             // Enqueue children from the cached call list
                             String cachedOwnerSchema = cachedNode.getSchema();
                             enqueueExternalCalls(cachedNode.getCalls(), item.depth,
-                                    item.packageName, item.subprogramName,
+                                    itemPackage, item.subprogramName,
                                     cachedOwnerSchema, queue, edgeBatch,
                                     isOverloaded ? itemOverloadDisc : null);
                             aggregateTableInfo(tableInfoMap, cachedNode.getTableOperations(), visitKey);
@@ -703,7 +706,14 @@ public class DependencyCrawler {
                 node.setOrder(orderCounter);
                 node.setDepth(item.depth);
                 node.setSchema(ownerSchema);
-                node.setPackageName(item.packageName);
+                // Task #28: prefer the parsed module/package name (Db2 module member) over the
+                // catalog-derived one, so the node id is MODULE.SUB.
+                String nodePackage = itemPackage;
+                if (nodePackage == null && targetObj != null
+                        && targetObj.getPackageName() != null && !targetObj.getPackageName().isEmpty()) {
+                    nodePackage = targetObj.getPackageName();
+                }
+                node.setPackageName(nodePackage);
                 node.setObjectName(item.subprogramName);
 
                 // Check if source is wrapped/encrypted
@@ -734,6 +744,9 @@ public class DependencyCrawler {
                     node.setReturnsResultSet(targetSub.isReturnsResultSet());
                     node.setResultSets(targetSub.getResultSets());
                     if (targetSub.getReturnType() != null) node.setReturnType(targetSub.getReturnType());
+                    // Task #29: nested/local subprogram marker + depth (additive; never affects the id).
+                    node.setNested(targetSub.isNested());
+                    node.setScopeDepth(targetSub.getScopeDepth());
 
                     List<CallInfo> resolvedCalls = filterLocalVarCalls(
                             resolveCallSchemas(targetSub.getCalls(), ownerSchema),
@@ -743,7 +756,7 @@ public class DependencyCrawler {
                     List<TableOperationInfo> resolvedTableOps = resolveTableSchemas(targetSub.getTableOperations(), ownerSchema);
                     node.setTableOperations(resolvedTableOps);
                     aggregateTableInfo(tableInfoMap, resolvedTableOps, visitKey);
-                    enqueueExternalCalls(resolvedCalls, item.depth, item.packageName,
+                    enqueueExternalCalls(resolvedCalls, item.depth, itemPackage,
                             item.subprogramName, ownerSchema, queue, edgeBatch,
                             isOverloaded ? itemOverloadDisc : null);
 
@@ -846,8 +859,11 @@ public class DependencyCrawler {
                             // does; the counts add up so the marker is visible on the package row.
                             if (sub.isReturnsResultSet()) node.setReturnsResultSet(true);
                             node.setResultSets(node.getResultSets() + sub.getResultSets());
+                            // Task #29: carry the nested marker/depth so the procedures facet can
+                            // badge a member declared inside another member's body.
                             memberSummaries.add(new SubprogramSummaryInfo(
-                                    sub.getName(), sub.getType(), sub.getLineStart(), sub.getLineEnd()));
+                                    sub.getName(), sub.getType(), sub.getLineStart(), sub.getLineEnd(),
+                                    sub.isNested(), sub.getScopeDepth()));
                         }
                         node.setMembers(memberSummaries);
                     }
@@ -899,7 +915,7 @@ public class DependencyCrawler {
                     node.setLocalVariables(allLocalVars);
 
                     aggregateTableInfo(tableInfoMap, allTableOps, visitKey);
-                    enqueueExternalCalls(allCalls, item.depth, item.packageName,
+                    enqueueExternalCalls(allCalls, item.depth, itemPackage,
                             item.subprogramName, ownerSchema, queue, edgeBatch,
                             isOverloaded ? itemOverloadDisc : null);
 
@@ -929,7 +945,7 @@ public class DependencyCrawler {
                         node.setTableOperations(objTableOps);
                         node.setStatements(objStatements);
                         aggregateTableInfo(tableInfoMap, objTableOps, visitKey);
-                        enqueueExternalCalls(objCalls, item.depth, item.packageName,
+                        enqueueExternalCalls(objCalls, item.depth, itemPackage,
                                 item.subprogramName, ownerSchema, queue, edgeBatch,
                                 isOverloaded ? itemOverloadDisc : null);
                     }
@@ -2592,13 +2608,23 @@ public class DependencyCrawler {
             }
             boolean targetOverloaded = targetDisc != null;
 
-            String visitKey = buildVisitKey(targetSchema, targetPackage, targetObject);
+            // Task #28: a DB2 module member called by bare name must produce an edge whose
+            // toNodeId matches the member's MODULE.SUB node id, so resolve the owning module as the
+            // package slot here. The BFS item below keeps packageName=null (the module is
+            // re-derived at poll time), so only the edge key/node id use the effective package.
+            String edgeTargetPackage = targetPackage;
+            if (edgeTargetPackage == null && targetObject != null) {
+                String mod = downloader.db2ModuleOf(targetObject, targetSchema);
+                if (mod != null && !mod.isEmpty()) edgeTargetPackage = mod;
+            }
+
+            String visitKey = buildVisitKey(targetSchema, edgeTargetPackage, targetObject);
             if (targetOverloaded) visitKey = visitKey + "#" + targetDisc;
             if (visited.contains(visitKey)) {
                 addCallEdge(callGraph, callerSchema, callerPackage, callerObject,
                         targetSchema != null ? targetSchema
                                 : (call.getSchema() != null ? call.getSchema() : callerSchema),
-                        targetPackage, targetObject,
+                        edgeTargetPackage, targetObject,
                         call.getLine(), currentDepth, targetDisc, callerOverloadDisc);
                 continue;
             }
@@ -2606,7 +2632,7 @@ public class DependencyCrawler {
             addCallEdge(callGraph, callerSchema, callerPackage, callerObject,
                     targetSchema != null ? targetSchema
                             : (call.getSchema() != null ? call.getSchema() : callerSchema),
-                    targetPackage, targetObject,
+                    edgeTargetPackage, targetObject,
                     call.getLine(), currentDepth, targetDisc, callerOverloadDisc);
 
             // Pre-queue names for bulk ALL_OBJECTS existence check before download:
@@ -2939,6 +2965,27 @@ public class DependencyCrawler {
         // mistaken for a package by addCallEdge's fromPkg heuristic (which scans for ".OBJ").
         String prefix = (schema != null && !schema.isEmpty()) ? schema.toUpperCase() + "$" : "";
         return prefix + subprogramName.toUpperCase();
+    }
+
+    /**
+     * Task #28: the effective PACKAGE slot for a BFS item, feeding {@link #buildVisitKey} and
+     * {@link FlowNode#setPackageName}. Oracle package members carry {@code item.packageName}; a DB2
+     * module member has {@code item.packageName == null} but its owning module is known from the
+     * catalog ({@code SYSCAT.ROUTINES.ROUTINEMODULENAME}, via the parsed object when available, else
+     * the cached routine catalog), so the member keys as MODULE.SUB. Returns null — leaving the
+     * historical standalone key/id — for every other object.
+     */
+    private String effectivePackageName(BfsItem item, ParsedObject targetObj) {
+        if (item.packageName != null && !item.packageName.isEmpty()) return item.packageName;
+        if (targetObj != null && targetObj.getPackageName() != null
+                && !targetObj.getPackageName().isEmpty()) {
+            return targetObj.getPackageName();
+        }
+        if (item.subprogramName != null) {
+            String module = downloader.db2ModuleOf(item.subprogramName, item.schema);
+            if (module != null && !module.isEmpty()) return module;
+        }
+        return null;
     }
 
     /**

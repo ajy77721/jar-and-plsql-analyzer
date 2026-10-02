@@ -96,6 +96,10 @@ MAXVALUE     : M A X V A L U E ;
 // ordinary identifier everywhere else via the `id` rule in Db2Parser.g4.
 MERGE        : M E R G E ;
 MINVALUE     : M I N V A L U E ;
+// MODULE / VARIABLE / PUBLISH are structural only inside createModule / alterModule /
+// createVariable. Every one of them is also listed in the parser's `id` rule so it stays
+// usable as an ordinary identifier elsewhere.
+MODULE       : M O D U L E ;
 NEXT         : N E X T ;
 NOT          : N O T ;
 NO           : N O ;
@@ -112,6 +116,7 @@ PARTITION    : P A R T I T I O N ;
 PREPARE      : P R E P A R E ;
 PRIMARY      : P R I M A R Y ;
 PROCEDURE    : P R O C E D U R E ;
+PUBLISH      : P U B L I S H ;
 REFERENCES   : R E F E R E N C E S ;
 REFERENCING  : R E F E R E N C I N G ;
 RELEASE      : R E L E A S E ;
@@ -149,6 +154,7 @@ UPDATE       : U P D A T E ;
 USING        : U S I N G ;
 VALUE        : V A L U E ;
 VALUES       : V A L U E S ;
+VARIABLE     : V A R I A B L E ;
 VIEW         : V I E W ;
 WHEN         : W H E N ;
 WHERE        : W H E R E ;

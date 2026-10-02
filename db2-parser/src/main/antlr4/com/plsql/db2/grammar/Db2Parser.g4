@@ -14,7 +14,7 @@ options { tokenVocab = Db2Lexer; }
 
 compilationUnit
     : (routineDefinition | createTrigger | createView | createSequence | createIndex
-       | alterTable | createType)? EOF
+       | alterTable | createType | createModule | alterModule | createVariable)? EOF
     ;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -244,6 +244,55 @@ triggerBody
     ;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MODULES — DB2's package analog (task #28)
+//
+//   CREATE MODULE <name> [;]                 -- empty module; members published later
+//   CREATE MODULE <name> ; <declarations> END MODULE ;
+//   ALTER MODULE <name> PUBLISH FUNCTION|PROCEDURE <member>(...) ... <body>
+//   ALTER MODULE <name> PUBLISH VARIABLE <member> <type> [DEFAULT ...]
+//   CREATE VARIABLE [schema.]<name> <type> [DEFAULT ...]
+//
+// A module groups member routines and module-scoped variables. The catalog column
+// SYSCAT.ROUTINES.ROUTINEMODULENAME names the owning module for a member routine; the
+// member's key becomes MODULE.SUB (mirroring Oracle's PACKAGE.SUB). Module variables are
+// the globals facet's declarations (the Oracle package-globals shape).
+//
+// The module body is parsed permissively: member routines (so their calls/table ops are
+// captured) and CREATE VARIABLE declarations (captured as module globals) are matched
+// explicitly; anything else is consumed up to the next CREATE/END. END MODULE is optional
+// because DB2 also accepts the empty `CREATE MODULE m` header on its own.
+// ─────────────────────────────────────────────────────────────────────────────
+
+createModule
+    : CREATE (OR REPLACE)? MODULE moduleName=routineName SEMI?
+      moduleDeclaration*
+      (END MODULE SEMI?)?
+    ;
+
+moduleDeclaration
+    : createVariable
+    | createType
+    | routineDefinition
+    | ~(END | CREATE | EOF)
+    ;
+
+alterModule
+    : ALTER MODULE moduleName=routineName alterModuleAction SEMI?
+    ;
+
+alterModuleAction
+    : PUBLISH? (FUNCTION | PROCEDURE) memberName=routineName
+      LPAREN paramList? RPAREN (RETURNS dataType)? routineCharacteristic* bodyBlock?
+    | PUBLISH? VARIABLE memberName=routineName dataType (DEFAULT defaultVal)?
+    | ADD? VARIABLE memberName=routineName dataType (DEFAULT defaultVal)?
+    | ~(SEMI | EOF)+
+    ;
+
+createVariable
+    : CREATE (OR REPLACE)? VARIABLE routineName dataType (DEFAULT defaultVal)? SEMI?
+    ;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Routine definition
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -309,6 +358,10 @@ id
     | REFERENCES | TABLE
     // TYPE: structural only inside createType, and a very common column name otherwise.
     | TYPE
+    // MODULE: structural only inside createModule/alterModule; VARIABLE/PUBLISH likewise.
+    // They stay usable as ordinary identifiers elsewhere (MODULE/VARIABLE are plausible
+    // column names, PUBLISH a plausible one).
+    | MODULE | VARIABLE | PUBLISH
     ;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -863,7 +916,16 @@ iterateStatement
 
 // Catch-all for unrecognized statements: consume tokens until semicolon or block boundary
 otherStatement
-    : ~(SEMI | BEGIN | END | DECLARE | CALL | IF | WHILE | FOR | LOOP | REPEAT | PREPARE
+    // CREATE-prefixed statements unsupported INSIDE a body (CREATE INDEX / CREATE SEQUENCE /
+    // CREATE VARIABLE / CREATE TYPE / CREATE ALIAS …). These are top-level DDL forms with no
+    // body-level rule; before this alternative, one of them made the enclosing bodyBlock fail
+    // wholesale — the WholeBodyLossGate failure mode (the DML around it vanished). Consumed
+    // permissively to the next semicolon; no identity/table-op is recorded (matching the gate's
+    // "silently losing an unsupported statement is acceptable, losing its neighbours is not").
+    // CREATE stays excluded from the general catch-all below so a malformed CREATE still cannot
+    // be swallowed as an arbitrary token run.
+    : CREATE ~(SEMI | BEGIN | END)* SEMI?
+    | ~(SEMI | BEGIN | END | DECLARE | CALL | IF | WHILE | FOR | LOOP | REPEAT | PREPARE
         | EXECUTE | OPEN | CLOSE | FETCH | INSERT | UPDATE | DELETE | SELECT | RETURN
         | SET | CREATE
         // Block-continuation keywords never START a statement; excluding them keeps the
