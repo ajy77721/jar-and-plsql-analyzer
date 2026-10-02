@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * An {@link OutputStream} that uploads to S3, buffering one part at a time.
@@ -70,6 +71,12 @@ public final class MultipartUploadOutputStream extends OutputStream {
     private final S3Client s3;
     private final String bucket;
     private final String key;
+    /**
+     * User metadata attached to the object (S3 {@code x-amz-meta-*}). The write-behind stamp uses
+     * this so a HEAD can report a millisecond write order even though S3's own Last-Modified is
+     * second-granular. Empty for callers that pass none.
+     */
+    private final Map<String, String> metadata;
 
     private byte[] buffer;
     private int bufferLen;
@@ -97,15 +104,26 @@ public final class MultipartUploadOutputStream extends OutputStream {
      *                      first part large enough that close() can use a single PutObject.
      */
     MultipartUploadOutputStream(S3Client s3, String bucket, String key, long contentLength) {
-        this(s3, bucket, key, contentLength, 0);
+        this(s3, bucket, key, contentLength, 0, Map.of());
     }
 
     MultipartUploadOutputStream(S3Client s3, String bucket, String key, long contentLength,
                                 int fixedPartSize) {
+        this(s3, bucket, key, contentLength, fixedPartSize, Map.of());
+    }
+
+    /**
+     * @param metadata user metadata ({@code x-amz-meta-*}) to attach to the object; empty for none.
+     *                 Applied to whichever commit path is taken — the single PutObject or the
+     *                 CreateMultipartUpload — so it survives either.
+     */
+    MultipartUploadOutputStream(S3Client s3, String bucket, String key, long contentLength,
+                                int fixedPartSize, Map<String, String> metadata) {
         this.s3 = s3;
         this.bucket = bucket;
         this.key = key;
         this.fixedPartSize = fixedPartSize;
+        this.metadata = metadata == null ? Map.of() : metadata;
         if (fixedPartSize > 0) {
             this.currentPartSize = fixedPartSize;
             this.buffer = new byte[Math.min(INITIAL_BUFFER, fixedPartSize)];
@@ -199,7 +217,8 @@ public final class MultipartUploadOutputStream extends OutputStream {
 
     private void beginMultipart() {
         CreateMultipartUploadResponse r = s3.createMultipartUpload(
-                CreateMultipartUploadRequest.builder().bucket(bucket).key(key).build());
+                CreateMultipartUploadRequest.builder().bucket(bucket).key(key)
+                        .metadata(metadata).build());
         uploadId = r.uploadId();
         log.debug("s3://{}/{}: began multipart upload", bucket, key);
     }
@@ -242,7 +261,7 @@ public final class MultipartUploadOutputStream extends OutputStream {
             if (uploadId == null) {
                 // Never grew past one part: a single PutObject is cheaper and needs no cleanup.
                 s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key)
-                                .contentLength(totalBytes).build(),
+                                .contentLength(totalBytes).metadata(metadata).build(),
                         RequestBody.fromInputStream(
                                 new ByteArrayInputStream(buffer, 0, bufferLen), bufferLen));
                 log.debug("s3://{}/{}: single-part upload, {} bytes", bucket, key, totalBytes);

@@ -69,6 +69,16 @@ public class FlowRunStore {
         return baseFlowDir.resolve(safe(jarId));
     }
 
+    /**
+     * {@code jar/flowanalysis/<jarId>} — every flow-analysis run for one JAR, built from the JAR
+     * subtree key so a caller (the JAR-delete path) can remove them without a {@code FlowRunStore}
+     * instance. This subtree lives <em>outside</em> {@code jar/<jarId>}, so the JAR-root prefix
+     * delete cannot reach it; without this it orphans forever (there is no S3 reaper).
+     */
+    public static ArtifactKey flowRootKey(ArtifactKey jarSubtreeRoot, String jarId) {
+        return jarSubtreeRoot.resolve("flowanalysis").resolve(safe(jarId));
+    }
+
     // ── Store plumbing ────────────────────────────────────────────────────────
 
     private InputStream openRead(ArtifactKey key) throws IOException { return store.read(key); }

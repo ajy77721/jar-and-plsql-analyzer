@@ -47,8 +47,8 @@ public final class FakeS3Server implements AutoCloseable {
     private static final DateTimeFormatter ISO =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
-    /** Stored object: bytes plus a modification time. */
-    record Obj(byte[] bytes, Instant modified) {}
+    /** Stored object: bytes, a modification time, and user metadata (x-amz-meta-*). */
+    record Obj(byte[] bytes, Instant modified, Map<String, String> metadata) {}
 
     private final HttpServer http;
     private final String bucket;
@@ -56,6 +56,8 @@ public final class FakeS3Server implements AutoCloseable {
     /** Sorted, because ListObjectsV2 is defined to return keys in lexicographic order. */
     private final NavigableMap<String, Obj> objects = new ConcurrentSkipListMap<>();
     private final Map<String, NavigableMap<Integer, byte[]>> uploads = new ConcurrentHashMap<>();
+    /** User metadata captured at CreateMultipartUpload, applied at CompleteMultipartUpload. */
+    private final Map<String, Map<String, String>> uploadMetadata = new ConcurrentHashMap<>();
     private final Set<String> abortedUploads = ConcurrentHashMap.newKeySet();
 
     /** Request counters, so a test can assert "one listing, no HEADs". */
@@ -195,9 +197,21 @@ public final class FakeS3Server implements AutoCloseable {
         }
         putRequests.incrementAndGet();
         byte[] body = readBody(ex);
-        objects.put(key, new Obj(body, Instant.now()));
+        objects.put(key, new Obj(body, Instant.now(), requestMetadata(ex)));
         ex.getResponseHeaders().add("ETag", etag(body));
         ex.sendResponseHeaders(200, -1);
+    }
+
+    /** The {@code x-amz-meta-*} user metadata on a request, keyed without the prefix. */
+    private static Map<String, String> requestMetadata(HttpExchange ex) {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> h : ex.getRequestHeaders().entrySet()) {
+            String name = h.getKey();
+            if (name != null && name.toLowerCase().startsWith("x-amz-meta-") && !h.getValue().isEmpty()) {
+                out.put(name.substring("x-amz-meta-".length()), h.getValue().get(0));
+            }
+        }
+        return out;
     }
 
     /** CopyObject: a PUT carrying {@code x-amz-copy-source: /bucket/key} instead of a body. */
@@ -211,7 +225,7 @@ public final class FakeS3Server implements AutoCloseable {
             error(ex, 404, "NoSuchKey", "no such copy source " + src);
             return;
         }
-        objects.put(destKey, new Obj(o.bytes(), Instant.now()));
+        objects.put(destKey, new Obj(o.bytes(), Instant.now(), requestMetadata(ex)));
         respond(ex, 200, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
                 + "<CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
                 + "<LastModified>" + ISO.format(Instant.now()) + "</LastModified>"
@@ -251,6 +265,7 @@ public final class FakeS3Server implements AutoCloseable {
         }
         ex.getResponseHeaders().add("ETag", etag(o.bytes()));
         ex.getResponseHeaders().add("Last-Modified", httpDate(o.modified()));
+        emitMetadata(ex, o.metadata());
         ex.sendResponseHeaders(status, body.length == 0 ? -1 : body.length);
         if (body.length > 0) {
             try (OutputStream out = ex.getResponseBody()) {
@@ -271,7 +286,13 @@ public final class FakeS3Server implements AutoCloseable {
         ex.getResponseHeaders().add("Content-Length", String.valueOf(o.bytes().length));
         ex.getResponseHeaders().add("Last-Modified", httpDate(o.modified()));
         ex.getResponseHeaders().add("ETag", etag(o.bytes()));
+        emitMetadata(ex, o.metadata());
         ex.sendResponseHeaders(200, -1);
+    }
+
+    private static void emitMetadata(HttpExchange ex, Map<String, String> metadata) {
+        if (metadata == null) return;
+        metadata.forEach((k, v) -> ex.getResponseHeaders().add("x-amz-meta-" + k, v));
     }
 
     private void deleteObject(HttpExchange ex, String key) throws IOException {
@@ -368,6 +389,7 @@ public final class FakeS3Server implements AutoCloseable {
         readBody(ex);
         String id = "upload-" + uploads.size() + "-" + Integer.toHexString(key.hashCode());
         uploads.put(id, new ConcurrentSkipListMap<>());
+        uploadMetadata.put(id, requestMetadata(ex));
         respond(ex, 200, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
                 + "<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
                 + "<Bucket>" + bucket + "</Bucket><Key>" + escape(key) + "</Key>"
@@ -420,7 +442,8 @@ public final class FakeS3Server implements AutoCloseable {
                     "declared " + declared + " parts but " + parts.size() + " were uploaded");
             return;
         }
-        objects.put(key, new Obj(out.toByteArray(), Instant.now()));
+        Map<String, String> md = uploadMetadata.remove(uploadId);
+        objects.put(key, new Obj(out.toByteArray(), Instant.now(), md == null ? Map.of() : md));
         respond(ex, 200, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
                 + "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
                 + "<Location>" + endpoint() + "/" + bucket + "/" + escape(key) + "</Location>"

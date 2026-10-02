@@ -95,6 +95,29 @@ import java.util.function.Function;
  *
  * <p>Every method here maps to a live paged endpoint. {@link #indexed()} is the honest signal of
  * which implementation answered.
+ *
+ * <h2>Two Mongo entity systems, deliberately not one</h2>
+ *
+ * <p>When {@code app.storage.repository=mongo}, MongoDB holds <b>two independent entity models</b>,
+ * and conflating them is a data-corruption path:
+ *
+ * <ul>
+ *   <li><b>This repository's</b> {@code analysis_run} collection (and its child rows), owned by
+ *       {@link com.analyzer.storage.mongo.MongoAnalysisRepository}. It is a <em>read index</em> over
+ *       the JSON artifacts: it is populated by ingesting from the scan implementation on first
+ *       touch, keyed on the same analysis identity the artifacts use, and its lifecycle follows the
+ *       analysis — see {@link #analyses}.</li>
+ *   <li><b>The ingest module's</b> {@code am_*} collections (owned by {@code analysis-mongo-ingest}),
+ *       a normalised, split entity model written directly by the crawler's ingest step. Every
+ *       collection is prefixed {@code am_} precisely so it can never collide with
+ *       {@code analysis_run}: the data-model plan had independently assigned that same name to the
+ *       ingest run spine, and two writers with incompatible schemas on one collection is corruption,
+ *       not a naming preference.</li>
+ * </ul>
+ *
+ * <p>The two are joined only by the analysis identity, never by shared documents. A change to one
+ * model does not require a change to the other; a change that makes them write the same collection
+ * is the failure this note exists to prevent.
  */
 public interface AnalysisRepository {
 

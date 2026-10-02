@@ -72,7 +72,7 @@ class S3ArtifactStoreWireTest {
             @Override
             OutputStream newUpload(String objectKey, long contentLength) {
                 return new MultipartUploadOutputStream(client(), BUCKET, objectKey,
-                        contentLength, TEST_PART_SIZE);
+                        contentLength, TEST_PART_SIZE, writeStampMetadata());
             }
         };
     }
@@ -109,6 +109,42 @@ class S3ArtifactStoreWireTest {
         assertTrue(store.exists(k));
         assertEquals(json.getBytes(StandardCharsets.UTF_8).length, store.size(k));
         assertTrue(store.lastModified(k) > 0);
+    }
+
+    // ── 1b. write-order stamp (second-granular S3 mtime hardening) ──────────
+
+    @Test
+    void aFastReWriteOrdersAfterAnEarlierWriteRegardlessOfS3SecondGranularity() throws IOException {
+        // The sidecar-vs-index staleness rule compares lastModified values. S3's Last-Modified is
+        // second-granular, so two writes in one second would compare equal and a superseded sidecar
+        // could look fresh. The stamp makes the later write order strictly after the earlier one.
+        ArtifactKey index = ArtifactKey.of("parser", "db1", "proj", "dev", "obj", "api", "index.json");
+        ArtifactKey sidecar = ArtifactKey.of("parser", "db1", "proj", "dev", "obj", "views", "header.json");
+
+        put(index, "{\"v\":1}");
+        long indexMtime = store.lastModified(index);
+        put(sidecar, "{\"v\":2}");
+        long sidecarMtime = store.lastModified(sidecar);
+        assertTrue(sidecarMtime > indexMtime,
+                "a later write must order after an earlier one even within the same S3 second");
+
+        // Re-analysis: the index is rewritten after the sidecar. The sidecar must now compare stale.
+        put(index, "{\"v\":3}");
+        assertTrue(store.lastModified(index) > sidecarMtime,
+                "the rewritten index must order after the older sidecar, so it reads as stale");
+    }
+
+    @Test
+    void copyStampsTheDestinationAsANewWrite() throws IOException {
+        ArtifactKey from = ArtifactKey.of("parser", "obj", "views", "header.json");
+        ArtifactKey to = ArtifactKey.of("parser", "obj", "views", "header.json.bak");
+        put(from, "{\"v\":1}");
+        long sourceMtime = store.lastModified(from);
+
+        store.copy(from, to);
+
+        assertTrue(store.lastModified(to) > sourceMtime,
+                "a copy is a new write and must not inherit the source's older stamp");
     }
 
     @Test

@@ -73,6 +73,7 @@ public class AnalyzerController {
     private final com.jaranalyzer.service.DomainConfigLoader domainConfig;
     /** Paged list queries — the class tree and the bundled-JAR list (PLAN-09 Increment C). */
     private final com.analyzer.storage.AnalysisRepository repository;
+    private final com.jaranalyzer.crossref.CrossRefStore crossRefStore;
 
     public AnalyzerController(JarParserService parserService,
                               CallGraphService callGraphService,
@@ -94,8 +95,10 @@ public class AnalyzerController {
                               @org.springframework.beans.factory.annotation.Qualifier("jarArtifactStore") ArtifactStore store,
                               com.plsqlanalyzer.web.page.FacetPageResponder facets,
                               com.jaranalyzer.service.DomainConfigLoader domainConfig,
-                              com.analyzer.storage.AnalysisRepository repository) {
+                              com.analyzer.storage.AnalysisRepository repository,
+                              com.jaranalyzer.crossref.CrossRefStore crossRefStore) {
         this.repository = repository;
+        this.crossRefStore = crossRefStore;
         this.facets = facets;
         this.domainConfig = domainConfig;
         this.parserService = parserService;
@@ -1600,6 +1603,19 @@ public class AnalyzerController {
 
         // 3. Delete all files: analysis JSON, stored JAR, endpoint outputs, Claude fragments, corrections
         boolean deleted = persistenceService.delete(id);
+
+        // 3.5. Delete the JAR's cross-reference and flow-analysis runs. These live at
+        // jar/crossref/<id>/ and jar/flowanalysis/<id>/ — OUTSIDE jar/<id> — so the JAR-root prefix
+        // delete above cannot reach them, and there is no S3 reaper, so without this they orphan
+        // forever. Best-effort: a cleanup failure must not fail a delete whose primary object is
+        // already gone.
+        try {
+            crossRefStore.deleteAllRuns(id);
+            store.deletePrefix(FlowRunStore.flowRootKey(paths.keyForPath(paths.getBaseDir()), id));
+        } catch (Exception e) {
+            log.warn("Deleted JAR {} but could not remove its cross-ref/flow runs: {}", id, e.getMessage());
+        }
+
         if (!deleted) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "JAR analysis not found: " + id);
         }

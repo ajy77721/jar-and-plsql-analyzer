@@ -28,6 +28,13 @@ import java.nio.file.Path;
  *                                       # falls back to app.storage.mode when unset
  * app.storage.repository=artifact-scan # artifact-scan | mongo — what answers queries
  *
+ * # S3 write-behind: small writes buffer on close and upload on a bounded pool instead of one
+ * # remote round trip per artifact. The write-ahead spill makes a closed write durable before the
+ * # upload starts, so a kill -9 cannot lose it; the surviving spill replays at next boot. Spill
+ * # lives at {data}/cache/spill/{parser|jar}/ and is capped (oldest evicted past the cap).
+ * app.storage.s3.write-behind=false       # master switch
+ * app.storage.s3.write-behind.spill=true  # write-ahead spill for crash safety (S3 only)
+ *
  * # mongodb mode / mongo repository (either or both):
  * app.storage.mongodb.uri=mongodb://localhost:27017
  * app.storage.mongodb.database=analyzer
@@ -104,13 +111,14 @@ public class StorageConfig {
             @Value("${app.storage.hybrid.big-threshold:0}") long hybridBigThreshold,
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
             @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind,
+            @Value("${app.storage.s3.write-behind.spill:true}") boolean s3Spill,
             @Value("${app.cache.disk.enabled:true}") boolean cacheEnabled,
             @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb,
             @Value("${app.cache.heap.max-mb:64}") long cacheHeapMb) {
         return buildAndRegister("parser", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
                 ssoSessionRegistry, currentHttpSession,
                 modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
-                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
+                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind, s3Spill,
                 cacheEnabled, cacheMaxMb, cacheHeapMb);
     }
 
@@ -145,13 +153,14 @@ public class StorageConfig {
             @Value("${app.storage.hybrid.big-threshold:0}") long hybridBigThreshold,
             @Value("${app.storage.hybrid.s3-always-paths:}") String s3AlwaysPaths,
             @Value("${app.storage.s3.write-behind:false}") boolean s3WriteBehind,
+            @Value("${app.storage.s3.write-behind.spill:true}") boolean s3Spill,
             @Value("${app.cache.disk.enabled:true}") boolean cacheEnabled,
             @Value("${app.cache.disk.max-mb:2048}") long cacheMaxMb,
             @Value("${app.cache.heap.max-mb:64}") long cacheHeapMb) {
         return buildAndRegister("jar", mongoConnection, ssoStoreSwapper, ssoCredentialsResolver,
                 ssoSessionRegistry, currentHttpSession,
                 modeProp, dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase,
-                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
+                mongoPrefix, inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind, s3Spill,
                 cacheEnabled, cacheMaxMb, cacheHeapMb);
     }
 
@@ -176,13 +185,25 @@ public class StorageConfig {
             String modeProp, String dataDir, String bucket, String prefix, String region,
             String endpoint, String mongoUri, String mongoDatabase, String mongoPrefix,
             int inlineThreshold, long hybridBigThreshold, String s3AlwaysPaths,
-            boolean s3WriteBehind, boolean cacheEnabled, long cacheMaxMb, long cacheHeapMb) {
+            boolean s3WriteBehind, boolean s3Spill, boolean cacheEnabled, long cacheMaxMb,
+            long cacheHeapMb) {
+        // Write-ahead spill lives beside — not inside — the read cache, so the cache's LRU trim
+        // never walks it and a replayed upload never races a cache mirror. One subtree per feature
+        // so the parser's and the jar's spills cannot collide.
+        Path spillDir = Path.of(dataDir).resolve("cache").resolve("spill").resolve(name);
         // The startup store: what a request with no session-bound state reads and writes through,
         // signed with the credential resolver (which answers the default chain when there is no
         // session). See SessionRoutingArtifactStore for the routing rule.
         ArtifactStore store = buildArtifactStore(mongoConnection, ssoCredentialsResolver, modeProp,
                 dataDir, bucket, prefix, region, endpoint, mongoUri, mongoDatabase, mongoPrefix,
-                inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind);
+                inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
+                s3Spill ? spillDir : null);
+        // Boot replay: the startup store is the only one that may hold spills from a previous
+        // process, and it must drain them before any request is served. Per-user stores built by a
+        // connect share the directory but must NOT replay (they start empty of spills they own).
+        if (store instanceof WriteBehindStore writeBehind) {
+            writeBehind.replaySpills();
+        }
         StorageMode mode = StorageMode.parse(modeProp);
         ArtifactStore effective = store;
         if (mode == StorageMode.S3 || mode == StorageMode.HYBRID) {
@@ -194,7 +215,8 @@ public class StorageConfig {
             ssoStoreSwapper.register(name, (newBucket, newRegion, credentials) ->
                     buildArtifactStore(mongoConnection, credentials, modeProp, dataDir,
                             newBucket, prefix, newRegion, endpoint, mongoUri, mongoDatabase, mongoPrefix,
-                            inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind));
+                            inlineThreshold, hybridBigThreshold, s3AlwaysPaths, s3WriteBehind,
+                            s3Spill ? spillDir : null));
             // The bean handed to consumers is the per-session router, not the startup store: it
             // forwards to the calling user's own store once they have connected, and to `store` only
             // when the request has no session-bound state.
@@ -236,7 +258,7 @@ public class StorageConfig {
             String modeProp, String dataDir, String bucket, String prefix, String region,
             String endpoint, String mongoUri, String mongoDatabase, String mongoPrefix,
             int inlineThreshold, long hybridBigThreshold, String s3AlwaysPaths,
-            boolean s3WriteBehind) {
+            boolean s3WriteBehind, Path spillDir) {
         StorageMode mode = StorageMode.parse(modeProp);
         // Credentials are NOT read from properties: S3 uses the default AWS provider chain, and
         // MongoDB takes authentication from the operator-supplied URI (redacted before logging) —
@@ -279,8 +301,9 @@ public class StorageConfig {
             SsoCredentialsResolver resolver =
                     credentialsProvider instanceof SsoCredentialsResolver r ? r : null;
             log.info("[storage] S3 write-behind enabled (bounded upload pool, read barriers on, "
-                    + "caller context carried to flush threads: {})", resolver != null);
-            store = new WriteBehindStore(store, WriteBehindStore.DEFAULT_THREADS, resolver);
+                    + "caller context carried to flush threads: {}; write-ahead spill: {})",
+                    resolver != null, spillDir != null ? spillDir : "off");
+            store = new WriteBehindStore(store, WriteBehindStore.DEFAULT_THREADS, resolver, spillDir);
         }
         return store;
     }

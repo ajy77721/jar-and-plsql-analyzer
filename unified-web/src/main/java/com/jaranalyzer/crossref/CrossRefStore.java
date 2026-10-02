@@ -208,6 +208,23 @@ public class CrossRefStore {
         }
     }
 
+    /**
+     * Removes <b>every</b> cross-reference run for a JAR — {@code jar/crossref/<jarId>/}. Called
+     * when the JAR itself is deleted: this subtree lives <em>outside</em> {@code jar/<jarId>}, so
+     * the JAR-root prefix delete cannot reach it and it would otherwise orphan forever (there is no
+     * S3 reaper).
+     *
+     * @return the number of artifacts removed
+     */
+    public int deleteAllRuns(String jarId) {
+        try {
+            return store.deletePrefix(jarCrossRefDir(jarId));
+        } catch (IOException e) {
+            log.warn("CrossRefStore: failed to delete all runs for {}: {}", jarId, e.getMessage());
+            return 0;
+        }
+    }
+
     // ── Internal file path helpers ────────────────────────────────────────────
 
     public ArtifactKey metaFile(ArtifactKey runDir)   { return runDir.resolve("meta.json"); }

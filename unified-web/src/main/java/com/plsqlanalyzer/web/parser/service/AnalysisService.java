@@ -636,9 +636,45 @@ public class AnalysisService {
     }
 
     public void deleteAnalysis(String name) throws IOException {
-        if (store.deletePrefix(AnalysisPaths.dirKey(name)) == 0) throw new NoSuchFileException(name);
+        boolean removed = store.deletePrefix(AnalysisPaths.dirKey(name)) > 0;
+        // Timestamped re-run archives are siblings named <OBJECT>_<yyyyMMdd_HHmmss>, OUTSIDE
+        // dirKey(name), so the object-dir delete cannot reach them. Deleting the object must take
+        // its archives (and their Claude data) with it, or they orphan until the next re-run's
+        // keep-3 prune — and forever if the object is never re-run.
+        deleteAllArchives(name);
+        if (!removed) throw new NoSuchFileException(name);
         staticReader.evictCache(name);
         claudePersistenceService.deleteClaudeData(name);
+    }
+
+    /**
+     * Removes every timestamped archive folder for an object (see {@link #pruneOldArchives}, which
+     * keeps the newest {@code keep}). Used by {@link #deleteAnalysis}, where retention is moot: the
+     * object itself is gone. Best-effort — a listing failure must not fail the delete of the
+     * primary object.
+     */
+    private void deleteAllArchives(String baseFolderName) {
+        try {
+            ArtifactKey parent = AnalysisPaths.parentDirKey(baseFolderName);
+            String leaf = AnalysisPaths.leaf(baseFolderName);
+            java.util.regex.Pattern ts = java.util.regex.Pattern.compile(
+                    "^" + java.util.regex.Pattern.quote(leaf) + "_\\d{8}_\\d{6}$");
+            List<ArtifactKey> archives;
+            try (Stream<ArtifactEntry> s = store.list(parent, false)) {
+                archives = s.map(ArtifactEntry::key)
+                        .filter(k -> ts.matcher(k.leaf()).matches())
+                        .collect(java.util.stream.Collectors.toList());
+            }
+            for (ArtifactKey archive : archives) {
+                String archName = AnalysisPaths.nameOfKey(archive);
+                store.deletePrefix(archive);
+                try { claudePersistenceService.deleteClaudeData(archName); } catch (Exception ignored) {}
+                staticReader.evictCache(archName);
+            }
+        } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger(AnalysisService.class)
+                    .warn("[AnalysisService] archive delete failed for {}: {}", baseFolderName, e.getMessage());
+        }
     }
 
     /**

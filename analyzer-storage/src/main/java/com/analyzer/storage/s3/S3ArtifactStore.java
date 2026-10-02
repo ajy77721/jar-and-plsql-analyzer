@@ -19,6 +19,7 @@ import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.MetadataDirective;
 import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
@@ -41,6 +42,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
@@ -67,6 +69,32 @@ public class S3ArtifactStore implements ArtifactStore {
 
     /** CopyObject caps at 5 GiB; above that S3 requires a multipart copy. */
     private static final long MAX_COPY_OBJECT_BYTES = 5L * 1024 * 1024 * 1024;
+
+    /**
+     * User-metadata key carrying this process's write order for the object. S3's own
+     * {@code Last-Modified} is an HTTP date with <b>second</b> granularity, so two writes in the
+     * same second are indistinguishable and an mtime-based freshness check (a sidecar vs the index
+     * it describes) can serve a superseded artifact as fresh. The stamp is a strictly increasing
+     * millisecond value, so {@link #lastModified} orders writes the backend itself cannot.
+     */
+    static final String WRITE_STAMP_KEY = "amp-written-at";
+
+    /** Strictly increasing across writes in this process, anchored to the wall clock. */
+    private static final AtomicLong WRITE_SEQ = new AtomicLong();
+
+    /**
+     * The next write stamp: {@code max(now, last+1)}. Strictly increasing even for writes in the
+     * same millisecond, so two objects written back to back are always ordered. Cross-process this
+     * tracks the wall clock, which is the same best-effort ordering S3's own timestamp gives.
+     */
+    static long nextWriteStamp() {
+        long now = System.currentTimeMillis();
+        return WRITE_SEQ.updateAndGet(prev -> Math.max(now, prev + 1));
+    }
+
+    static Map<String, String> writeStampMetadata() {
+        return Map.of(WRITE_STAMP_KEY, Long.toString(nextWriteStamp()));
+    }
 
     private final S3Client s3;
     private final String bucket;
@@ -131,7 +159,8 @@ public class S3ArtifactStore implements ArtifactStore {
      * behaviour is this one line.
      */
     OutputStream newUpload(String objectKey, long contentLength) {
-        return new MultipartUploadOutputStream(s3, bucket, objectKey, contentLength);
+        return new MultipartUploadOutputStream(s3, bucket, objectKey, contentLength, 0,
+                writeStampMetadata());
     }
 
     /** The client, for a subclass that needs to build its own upload stream. */
@@ -212,7 +241,23 @@ public class S3ArtifactStore implements ArtifactStore {
     @Override
     public long lastModified(ArtifactKey key) {
         HeadObjectResponse h = head(key);
-        return h == null ? -1 : h.lastModified().toEpochMilli();
+        if (h == null) return -1;
+        // Prefer our own write stamp: it is millisecond-ordered, where S3's Last-Modified is only
+        // second-granular. Objects written before this stamp existed (or by another writer) fall
+        // back to S3's timestamp — the previous behaviour.
+        Long stamp = parseWriteStamp(h.metadata());
+        return stamp != null ? stamp : h.lastModified().toEpochMilli();
+    }
+
+    private static Long parseWriteStamp(Map<String, String> metadata) {
+        if (metadata == null) return null;
+        String raw = metadata.get(WRITE_STAMP_KEY);
+        if (raw == null) return null;
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // ── deletes ──────────────────────────────────────────────────────────────
@@ -364,9 +409,14 @@ public class S3ArtifactStore implements ArtifactStore {
             throw new IOException("copy() of " + len + " bytes exceeds S3's 5 GiB CopyObject limit; "
                     + "multipart copy is not implemented (" + from + ")");
         }
+        // A copy is a NEW write: stamp the destination freshly (REPLACE, or S3 would carry the
+        // source's metadata across and the copy would look as old as what it was copied from).
         s3.copyObject(CopyObjectRequest.builder()
                 .sourceBucket(bucket).sourceKey(objectKey(from))
-                .destinationBucket(bucket).destinationKey(objectKey(to)).build());
+                .destinationBucket(bucket).destinationKey(objectKey(to))
+                .metadata(writeStampMetadata())
+                .metadataDirective(MetadataDirective.REPLACE)
+                .build());
     }
 
     /** S3 has no rename: copy, then delete the source only once the copy has succeeded. */
