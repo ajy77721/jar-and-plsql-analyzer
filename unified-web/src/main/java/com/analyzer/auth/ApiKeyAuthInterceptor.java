@@ -1,9 +1,12 @@
 package com.analyzer.auth;
 
+import com.analyzer.storage.StorageMode;
 import com.analyzer.storage.sso.SsoSessionRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -16,58 +19,133 @@ import java.io.IOException;
  * {@link AuthInterceptorConfig}; without that registration this class is inert (the handler chain
  * never invokes it), so the two are only meaningful together.
  *
- * <p>Two checks are applied, in order:
+ * <h2>Mode-aware: is authentication required at all?</h2>
+ *
+ * <p>Authentication is only meaningful when there is something user-scoped to protect. In a pure
+ * {@code local} or {@code mongodb} deployment every artifact lives in one shared store that has no
+ * per-user partition and no bucket to sign for, so there is nothing for a login to unlock — the
+ * gate must not page-lock the tool. In {@code s3}/{@code hybrid} the artifacts are per-user
+ * (each SSO session writes to its own bucket through its own credentials), so a session is
+ * mandatory.
+ *
+ * <p>That decision is the {@code app.auth.required} property, resolved once at startup by
+ * {@link #resolveAuthRequired}:
  * <ol>
- *   <li><b>API key</b> — the session attribute {@value #SESSION_KEY}, set by the {@code /api/auth/*}
- *       login flow. Its absence produces either a 401 JSON body (for {@code /api/**}) or a redirect
- *       to {@code /login} (for everything else).</li>
- *   <li><b>AWS SSO</b> — for data endpoints under {@code /api/} (other than the public
- *       {@code /api/auth/*} routes), the request's session must also be known to
- *       {@link SsoSessionRegistry}. A session that has the API key but never completed the AWS SSO
- *       device flow is rejected with {@code 401} and the body {@code {"ok":false,"error":...}} —
- *       the front end reacts by opening the SSO login modal. Non-API paths deliberately skip this
- *       gate: an SSO-less visitor may still load a page, and that page's own API calls are what get
- *       the 401.</li>
+ *   <li><b>Explicit {@code app.auth.required=true|false}</b> always wins, whatever the mode.</li>
+ *   <li>Otherwise the legacy <b>{@code app.auth.sso.required}</b> escape hatch, when explicitly
+ *       set, is honoured (so an existing local-dev deployment that turned the old SSO gate off is
+ *       not silently re-locked).</li>
+ *   <li>Otherwise it is <b>auto-derived from the effective storage modes</b>: if either the JAR
+ *       analyzer or the PL/SQL parser resolves to {@code s3}/{@code hybrid} — honouring the
+ *       per-feature {@code app.storage.jar.mode}/{@code app.storage.parser.mode} overrides — auth
+ *       is required; if both are {@code local}/{@code mongodb}, it is not.</li>
  * </ol>
  *
+ * <p>When auth is <em>not</em> required this interceptor allows every request unconditionally:
+ * no {@code 401} on {@code /api/**}, no page-lock redirect. The AWS SSO endpoints
+ * ({@code /api/auth/aws/**}) remain reachable, so an optional login is still possible — but in a
+ * pure local/Mongo deployment there is no per-user store for it to bind to (see docs/modes.md), so
+ * a later switch to S3 is a re-connection, not a migration.
+ *
+ * <h2>The gate itself</h2>
+ *
+ * <p>When auth <em>is</em> required, the request's session must be known to
+ * {@link SsoSessionRegistry} — i.e. it completed the AWS SSO device flow. A session that has not is
+ * rejected with {@code 401} and the body {@code {"ok":false,"error":...}} for {@code /api/**} (the
+ * front end reacts by opening the SSO login modal) or bounced to {@code /?login=1} for a page
+ * navigation; asset requests pass so whatever page the visitor is on can render the login. Public
+ * paths ({@code /}, {@code /login}, {@code /api/auth/*}, the admin portal and the docs/manual
+ * endpoints) never reach the gate.
+ *
  * <p>No credential, token, device code or other secret is ever read, logged or echoed here — the
- * interceptor only inspects the presence of the session key and asks the registry whether the
- * opaque session id is authenticated.
+ * interceptor only asks the registry whether the opaque session id is authenticated.
  */
 @Component
 public class ApiKeyAuthInterceptor implements HandlerInterceptor {
 
     public static final String SESSION_KEY = "auth.api.key";
 
+    private static final Logger log = LoggerFactory.getLogger(ApiKeyAuthInterceptor.class);
+
     private static final String SSO_REQUIRED_401_BODY =
             "{\"ok\":false,\"error\":\"Authenticate via AWS SSO first\"}";
-    private static final String API_KEY_401_BODY =
-            "{\"error\":\"Not authenticated\",\"code\":401}";
 
     private final ObjectProvider<SsoSessionRegistry> ssoSessionRegistry;
 
     /**
-     * Escape hatch for deployments that have not (yet) adopted AWS SSO — chiefly the pre-SSO local
-     * development workflow.
-     *
-     * <p>When {@code app.auth.sso.required} is {@code true} (the default) every data endpoint under
-     * {@code /api/} demands a session that {@link SsoSessionRegistry} recognises, in addition to the
-     * API key. Setting the property to {@code false} skips <em>only</em> that second check: the API
-     * key gate above still runs exactly as before and is never disabled by this property. It exists
-     * so that a developer running the tool locally, with no IAM Identity Center instance to log in
-     * to, can keep using the application while the SSO rollout is in progress — it is a
-     * compatibility switch, not a security boundary, and production deployments must leave it at
-     * {@code true}.
-     *
-     * <p>The property is read through {@code @Value} with an inline default of {@code true}, so an
-     * unset property behaves as if it were set to {@code true}; nothing needs to be added to
-     * {@code application.properties} for the secure default to take effect.
+     * Whether the SSO gate runs at all, resolved once at startup by {@link #resolveAuthRequired}.
+     * {@code false} makes {@link #preHandle} a passthrough: no {@code 401} page-lock on
+     * {@code /api/**}, no redirect for page navigations, and the SSO endpoints stay reachable for
+     * an optional login.
      */
-    @Value("${app.auth.sso.required:true}")
-    private boolean ssoRequired;
+    private final boolean authRequired;
 
-    public ApiKeyAuthInterceptor(ObjectProvider<SsoSessionRegistry> ssoSessionRegistry) {
+    /**
+     * Resolves the mode-aware gate from the raw property strings. Kept as a static, side-effect-free
+     * function so the whole decision table is unit-testable without a Spring context.
+     *
+     * <p>Precedence, in order:
+     * <ol>
+     *   <li>an explicit {@code app.auth.required} (blank/unset = not explicit) — always wins;</li>
+     *   <li>an explicit legacy {@code app.auth.sso.required} — honoured for backwards compatibility
+     *       with the pre-mode-aware escape hatch;</li>
+     *   <li>auto-derivation: required iff the JAR <em>or</em> parser effective mode is
+     *       {@code s3}/{@code hybrid}.</li>
+     * </ol>
+     *
+     * <p>An unparseable value (anything other than {@code true}/{@code false}, case-insensitive)
+     * fails the context at startup with the offending property named, matching how an unknown
+     * {@code app.storage.mode} is surfaced rather than silently defaulted.
+     */
+    public static boolean resolveAuthRequired(String authRequired, String legacySsoRequired,
+                                       String jarMode, String parserMode) {
+        Boolean explicit = parseTriState(authRequired, "app.auth.required");
+        if (explicit != null) return explicit;
+        Boolean legacy = parseTriState(legacySsoRequired, "app.auth.sso.required");
+        if (legacy != null) return legacy;
+        return isS3Backed(jarMode) || isS3Backed(parserMode);
+    }
+
+    /**
+     * {@code "true"}/{@code "false"} (case-insensitive, trimmed) to a {@link Boolean}; blank or
+     * {@code null} to {@code null} meaning "not explicitly set". Anything else is a boot failure.
+     */
+    private static Boolean parseTriState(String raw, String propertyName) {
+        if (raw == null || raw.isBlank()) return null;
+        String v = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        return switch (v) {
+            case "true" -> Boolean.TRUE;
+            case "false" -> Boolean.FALSE;
+            default -> throw new IllegalArgumentException(
+                    "Invalid " + propertyName + " '" + raw + "'. Expected: true | false (or leave it unset)");
+        };
+    }
+
+    /** True when a storage-mode string resolves to S3 or HYBRID — the user-scoped, bucket-backed modes. */
+    private static boolean isS3Backed(String modeProp) {
+        StorageMode mode = StorageMode.parse(modeProp);
+        return mode == StorageMode.S3 || mode == StorageMode.HYBRID;
+    }
+
+    public ApiKeyAuthInterceptor(
+            ObjectProvider<SsoSessionRegistry> ssoSessionRegistry,
+            @Value("${app.auth.required:}") String authRequiredProp,
+            @Value("${app.auth.sso.required:}") String legacySsoRequiredProp,
+            @Value("${app.storage.jar.mode:${app.storage.mode:local}}") String jarMode,
+            @Value("${app.storage.parser.mode:${app.storage.mode:local}}") String parserMode) {
         this.ssoSessionRegistry = ssoSessionRegistry;
+        this.authRequired = resolveAuthRequired(
+                authRequiredProp, legacySsoRequiredProp, jarMode, parserMode);
+        log.info("[auth] app.auth.required={} (jar mode={}, parser mode={}); {}",
+                this.authRequired, StorageMode.parse(jarMode), StorageMode.parse(parserMode),
+                this.authRequired
+                        ? "SSO session required for /api/** and page navigations"
+                        : "authentication disabled — all paths allowed, SSO login remains optional");
+    }
+
+    /** Whether the SSO gate runs; {@code false} in pure local/Mongo deployments. Tests and diagnostics. */
+    public boolean isAuthRequired() {
+        return authRequired;
     }
 
     private static boolean isPublic(String path) {
@@ -98,12 +176,16 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
         String path = req.getRequestURI();
         if (isPublic(path)) return true;
 
+        // Mode-aware passthrough: in a pure local/Mongo deployment there is no user-scoped store,
+        // so nothing is gated — every API and page is allowed with no session. The SSO endpoints
+        // are public (isPublic above), so an optional login remains possible.
+        if (!authRequired) return true;
+
         // The AWS SSO device-flow login IS the application's sign-in now. The old Anthropic-key
         // gate was removed as an entry requirement: its login page no longer renders a form, so
         // keeping it as gate 1 locked every user out of every data API (JAR uploads included) with
         // a 401 they had no UI to clear. A session that completed the AWS SSO flow satisfies the
-        // whole gate; with the escape hatch off (local dev, no Identity Center) the app is open,
-        // exactly as before the SSO rollout.
+        // whole gate.
         if (!ssoGateSatisfied(path, req.getSession(false))) {
             if (path.startsWith("/api/")) {
                 writeJson(res, HttpServletResponse.SC_UNAUTHORIZED, SSO_REQUIRED_401_BODY);
@@ -142,13 +224,14 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
      * The caller decides the response shape: 401 JSON for APIs, a redirect to /?login=1 for
      * page navigations, passthrough for assets.
      *
+     * <p>Only called when {@link #authRequired} is true; the mode-aware passthrough in
+     * {@link #preHandle} handles the not-required case before this is reached.
+     *
      * <p>If the registry bean is absent — SSO support not compiled in, or its component scan
      * disabled — the request is allowed. This is a deliberate fail-open: the alternative would be
      * to lock out every deployment that does not ship the registry.
      */
     private boolean ssoGateSatisfied(String path, HttpSession session) {
-        if (!ssoRequired) return true;
-
         SsoSessionRegistry registry = ssoSessionRegistry.getIfAvailable();
         if (registry == null) return true;
         if (session == null) return false;

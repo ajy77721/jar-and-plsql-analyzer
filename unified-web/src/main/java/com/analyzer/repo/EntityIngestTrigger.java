@@ -33,20 +33,28 @@ public class EntityIngestTrigger {
 
     private static final Logger log = LoggerFactory.getLogger(EntityIngestTrigger.class);
 
-    private final ArtifactStore store;
+    /**
+     * The PL/SQL parser feature's store — {@code afterPlsqlAnalyze} reads the analysis it just
+     * wrote through this one.
+     */
+    private final ArtifactStore parserStore;
+
+    /**
+     * The JAR analyzer feature's store — {@code afterJarAnalyze} reads through this one. Kept
+     * separate from {@link #parserStore} because the two features can be pointed at different
+     * backends via {@code app.storage.parser.mode}/{@code app.storage.jar.mode}; using the parser
+     * store for a JAR ingest probed the wrong backend (and found no {@code analysis.json}) whenever
+     * those differed.
+     */
+    private final ArtifactStore jarStore;
+
     private final EntityIngestConfig.EntityIngestConnection connection;
 
-    // NOTE: despite this feature being called out as "already independent of ArtifactStore" and
-    // out of scope for the parser/jar storage-mode split, it directly injects an unqualified
-    // ArtifactStore here (it reads the just-written PL/SQL analysis through it — see class doc).
-    // With the single shared `artifactStore` bean gone, leaving this unqualified would break
-    // Spring context startup for EVERY deployment (NoUniqueBeanDefinitionException), entity-ingest
-    // enabled or not, since @Component beans are instantiated regardless of the feature's own
-    // enabled flag. Qualified to parserArtifactStore — this trigger only ever runs after a PL/SQL
-    // analyze job (see afterPlsqlAnalyze) — as the minimal fix that keeps every deployment booting.
-    public EntityIngestTrigger(@Qualifier("parserArtifactStore") ArtifactStore store,
+    public EntityIngestTrigger(@Qualifier("parserArtifactStore") ArtifactStore parserStore,
+                                @Qualifier("jarArtifactStore") ArtifactStore jarStore,
                                 EntityIngestConfig.EntityIngestConnection connection) {
-        this.store = store;
+        this.parserStore = parserStore;
+        this.jarStore = jarStore;
         this.connection = connection;
     }
 
@@ -64,7 +72,7 @@ public class EntityIngestTrigger {
      * little but memory. Falls through transparently on anything not cached, so a prefetch
      * failure can never break the ingest.
      */
-    private ArtifactStore prefetched(String rootKeyPrefix) throws IOException {
+    private ArtifactStore prefetched(ArtifactStore store, String rootKeyPrefix) throws IOException {
         PrefetchReadStore cached = new PrefetchReadStore(store);
         cached.prefetch(com.analyzer.storage.ArtifactKey.of(rootKeyPrefix.split("/")));
         return cached;
@@ -95,7 +103,8 @@ public class EntityIngestTrigger {
                 + "'[3/3] Analysis complete' log line — a long gap here is entity-ingest writing to "
                 + "Mongo, not the analysis itself hanging)", entryPoint);
         try {
-            MongoIngestService.ArtifactSource source = IngestMain.storeSource(prefetched(rootKeyPrefix), rootKeyPrefix);
+            MongoIngestService.ArtifactSource source =
+                    IngestMain.storeSource(prefetched(parserStore, rootKeyPrefix), rootKeyPrefix);
             try (InputStream probe = source.open("tables.json")) {
                 if (probe == null) {
                     log.warn("[entity-ingest] skipped {}: no tables.json under {}", entryPoint,
@@ -144,7 +153,8 @@ public class EntityIngestTrigger {
         long start = System.currentTimeMillis();
         log.info("[entity-ingest] jar {} -> starting", jarName);
         try {
-            MongoIngestService.ArtifactSource source = IngestMain.storeSource(prefetched(rootKeyPrefix), rootKeyPrefix);
+            MongoIngestService.ArtifactSource source =
+                    IngestMain.storeSource(prefetched(jarStore, rootKeyPrefix), rootKeyPrefix);
             try (InputStream probe = source.open("analysis.json")) {
                 if (probe == null) {
                     log.warn("[entity-ingest] skipped jar {}: no analysis.json under {}", jarName,

@@ -181,12 +181,30 @@ docker build -t unified-analyzer .
 docker run -d -p 8083:8083 -v analyzer-data:/data unified-analyzer
 ```
 
-### Storage Modes — Build + Run (Local / MongoDB / S3)
+### Storage Modes — Build + Run (Local / MongoDB / S3 / Hybrid)
 
-Analysis artifacts (JAR/WAR/PL-SQL results) can be stored in one of three interchangeable
-backends, selected by `app.storage.mode` — same jar, no code change. `config/`, `logs/`,
-`prompts/`, `claude-chatbot/` always stay on local disk in every mode; only `data/jar` and
-`data/plsql` follow the selected mode (they are never created locally in `mongodb`/`s3` mode).
+Analysis artifacts (JAR/WAR/PL-SQL results) can be stored in one of four interchangeable backends,
+selected by a single property — **`app.storage.mode`** = `local` | `s3` | `mongodb` | `hybrid`.
+Same jar, no code change; every layer (per-user SSO routing, write-behind, caches, entity ingest)
+coheres around that one choice. `config/`, `logs/`, `prompts/`, `claude-chatbot/` always stay on
+local disk in every mode; only `data/jar` and `data/plsql` follow the selected mode (they are never
+created locally in `mongodb`/`s3`/`hybrid` mode).
+
+> **Full guide: [`docs/modes.md`](docs/modes.md)** — the mode matrix, every property with its
+> default, the auth behaviour per mode, the `am_*` entity-ingest vs `repository=mongo` distinction,
+> the startup requirements block, and the "I want X → set Y" decision table.
+
+**Authentication is mode-aware.** `app.auth.required` is auto-derived when unset: `s3`/`hybrid` →
+`true` (SSO page-lock, per-user buckets); `local`/`mongodb` → `false` (**zero verification** — every
+`/api/**` is open with no cookie). An explicit `app.auth.required=true|false` always wins. The SSO
+endpoints stay reachable in every mode, so an optional login is still possible.
+
+| Mode | Store | Auth (auto) | Needs |
+|------|-------|-------------|-------|
+| `local` | files under `{data-dir}` | off | — |
+| `mongodb` | manifest doc + GridFS | off | `app.storage.mongodb.uri`, `.database` |
+| `s3` | `s3://{bucket}/{prefix}` | **on** | `app.storage.s3.bucket`, `.region` |
+| `hybrid` | small → Mongo, large → S3 | **on** | bucket + Mongo uri/database |
 
 **Build once, for any mode:**
 ```bash
@@ -194,7 +212,7 @@ python3 scripts/stamp-assets.py
 mvn -pl unified-web -am package -DskipTests -q
 ```
 
-**Local mode** (default, no external dependency):
+**Local mode** (default, no external dependency, no login):
 ```bash
 java -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
   --server.port=8083 --app.config-dir=config --app.data-dir=data
@@ -211,15 +229,27 @@ java -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
   --app.storage.entity-read.enabled=true
 ```
 
-**S3 mode** (requires AWS credentials via the default provider chain):
+**S3 mode** (requires AWS credentials via the default provider chain; SSO login is required):
 ```bash
 java -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
   --app.storage.mode=s3 \
   --app.storage.s3.bucket=<your-bucket> \
   --app.storage.s3.prefix=data \
-  --app.storage.s3.region=<region>
+  --app.storage.s3.region=<region> \
+  --app.storage.sso.start-url='https://d-xxxxxxxx.awsapps.com/start/#'
 ```
 
+**Hybrid mode** (small artifacts in Mongo, large ones in S3):
+```bash
+java -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
+  --app.storage.mode=hybrid \
+  --app.storage.s3.bucket=<your-bucket> --app.storage.s3.region=<region> \
+  --app.storage.mongodb.uri=mongodb://localhost:27017 --app.storage.mongodb.database=analyzer \
+  --app.storage.hybrid.big-threshold=1048576 \
+  --app.storage.hybrid.s3-always-paths=sources
+```
+
+On boot the app prints a `[storage] mode check` block listing each requirement with `✓`/`MISSING`.
 See the in-app **Properties** manual (User Manual → Properties) for the full property reference.
 
 ### Verifying Startup
