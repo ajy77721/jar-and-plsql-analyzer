@@ -57,6 +57,11 @@ public record AnalysisQuery(Dataset dataset, String analysis, String version, St
         PLSQL_TRIGGERS(true, false),
         /** Package global variables, from each node's {@code externalPackageVarRefDetails}. */
         PLSQL_GLOBALS(true, false),
+        /**
+         * Scheduled jobs (Oracle DBMS_SCHEDULER/DBMS_JOB, SQL Agent, pg_cron, MySQL EVENT), from
+         * the crawler's {@code api/jobs/index.json}. See {@code EstateFacetReader#getJobs}.
+         */
+        PLSQL_JOBS(true, false),
 
         /**
          * The procedure list — {@code api/index.json}'s {@code nodes} array. UI-029: added so

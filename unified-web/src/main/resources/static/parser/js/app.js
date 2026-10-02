@@ -39,7 +39,7 @@ PA.loadAnalysis = async function(name, opts) {
         if (PA.joins) PA.joins.data = [];
         if (PA.tableOps) { PA.tableOps.data = []; PA.tableOps._loaded = false; }
         // Estate facets are per-analysis: drop their cached details and reload guards.
-        PA._estateSubLoaded = { views: false, triggers: false, globals: false };
+        PA._estateSubLoaded = { views: false, triggers: false, globals: false, jobs: false };
         if (PA.estateViews) PA.estateViews.reset();
         if (PA.estateTriggers) PA.estateTriggers.reset();
         if (PA.estateGlobals) PA.estateGlobals.reset();
@@ -454,7 +454,7 @@ PA._clearTabContents = function() {
             delete PA.tf._state[tabKeys[j]];
         }
     }
-    PA._estateSubLoaded = { views: false, triggers: false, globals: false };
+    PA._estateSubLoaded = { views: false, triggers: false, globals: false, jobs: false };
     PA.summaryTab.teardown();
 };
 
@@ -697,7 +697,7 @@ PA._detailsCurrentSub = 'sequences';
 
 /* Estate facets (views/MVs, triggers, package globals) — analysis-wide, not node-scoped, so the
    sub-tabs load once per visit exactly like detailsTab's. */
-PA._estateSubLoaded = { views: false, triggers: false, globals: false };
+PA._estateSubLoaded = { views: false, triggers: false, globals: false, jobs: false };
 PA._estateCurrentSub = 'views';
 
 PA._exploreCurrentSub = 'hierarchy';
@@ -880,7 +880,7 @@ PA.estateTab = {
             b.classList.toggle('active', b.dataset.estview === sub);
         });
         document.querySelectorAll('#viewEstate .dt-subview').forEach(function(v) { v.classList.remove('active'); });
-        var viewMap = { views: 'estViewViews', triggers: 'estViewTriggers', globals: 'estViewGlobals' };
+        var viewMap = { views: 'estViewViews', triggers: 'estViewTriggers', globals: 'estViewGlobals', jobs: 'estViewJobs' };
         var el = document.getElementById(viewMap[sub]);
         if (el) el.classList.add('active');
         PA.estateTab._loadSub(sub);
@@ -898,12 +898,17 @@ PA.estateTab = {
             PA._estateSubLoaded.globals = true;
             if (PA.estateGlobals && PA.estateGlobals.load) PA.estateGlobals.load();
         }
+        if (sub === 'jobs' && !PA._estateSubLoaded.jobs) {
+            PA._estateSubLoaded.jobs = true;
+            if (PA.estateJobs && PA.estateJobs.load) PA.estateJobs.load();
+        }
     },
     teardown: function() {
         var subs = [
             { key: 'views', container: 'vwContainer', tfKey: 'vw' },
             { key: 'triggers', container: 'tgContainer', tfKey: 'tg' },
-            { key: 'globals', container: 'glContainer', tfKey: 'gl' }
+            { key: 'globals', container: 'glContainer', tfKey: 'gl' },
+            { key: 'jobs', container: 'jbContainer', tfKey: 'jb' }
         ];
         for (var i = 0; i < subs.length; i++) {
             var s = subs[i];

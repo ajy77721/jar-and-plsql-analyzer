@@ -73,6 +73,14 @@ public class ParsedObject {
     /** SQL Server IDENTITY(seed, increment) columns (audit #8). Empty for every other dialect. */
     private List<IdentityColumnInfo> identityColumns = new ArrayList<>();
 
+    // ---- Scheduled entry-point fields (type="JOB" / "EVENT" only) ----
+    /** Human-readable schedule (Oracle repeat_interval / SQL Agent schedule / pg_cron cron / MySQL EVERY …). */
+    private String schedule;
+    /** TRUE when the job is enabled, FALSE when disabled, null when the catalog does not say. */
+    private Boolean jobEnabled;
+    /** The routine the job invokes (bare name, or PACKAGE.MEMBER), resolved from the catalog/action. */
+    private String jobTarget;
+
     // ---- CREATE SEQUENCE fields (type="SEQUENCE" only) ----
     private Long sequenceStartWith;
     private Long sequenceIncrementBy;
@@ -150,6 +158,12 @@ public class ParsedObject {
     public void setTriggerLevel(String t) { this.triggerLevel = t; }
     public String getTriggerBody() { return triggerBody; }
     public void setTriggerBody(String t) { this.triggerBody = t; }
+    public String getSchedule() { return schedule; }
+    public void setSchedule(String s) { this.schedule = s; }
+    public Boolean getJobEnabled() { return jobEnabled; }
+    public void setJobEnabled(Boolean e) { this.jobEnabled = e; }
+    public String getJobTarget() { return jobTarget; }
+    public void setJobTarget(String t) { this.jobTarget = t; }
     public String getViewQuery() { return viewQuery; }
     public void setViewQuery(String v) { this.viewQuery = v; }
     public boolean isPipelined() { return pipelined; }

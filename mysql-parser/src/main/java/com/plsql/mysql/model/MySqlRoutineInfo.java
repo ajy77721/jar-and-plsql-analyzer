@@ -12,7 +12,7 @@ import java.util.List;
  */
 public class MySqlRoutineInfo {
 
-    public enum RoutineType { PROCEDURE, FUNCTION, TRIGGER, VIEW, INDEX, ALTER_TABLE }
+    public enum RoutineType { PROCEDURE, FUNCTION, TRIGGER, VIEW, INDEX, ALTER_TABLE, EVENT }
 
     // ── Identity ──────────────────────────────────────────────────────────────
     private String      schema;
@@ -27,6 +27,15 @@ public class MySqlRoutineInfo {
     private String      triggerTable;
     private String      triggerEvent;
     private String      triggerTiming;
+
+    // ── Event metadata (populated only for RoutineType.EVENT) ────────────────
+    // MySQL's scheduler object: the ON SCHEDULE clause text (e.g. "EVERY 1 DAY"), whether
+    // the event is ENABLEd (true), DISABLEd (false) or unspecified (null), and the DO body
+    // source. The body is also walked by the ordinary visitor, so CALLs/DML inside it land
+    // in the shared lists exactly like a procedure body.
+    private String      eventSchedule;
+    private Boolean     eventEnabled;
+    private String      eventBody;
 
     // ── Index metadata (populated only for RoutineType.INDEX) ────────────────
     // Same shape as the trigger fields above: the indexed table under indexTable,
@@ -91,6 +100,15 @@ public class MySqlRoutineInfo {
 
     public String      getTriggerTiming() { return triggerTiming; }
     public void        setTriggerTiming(String v) { this.triggerTiming = v; }
+
+    public String      getEventSchedule() { return eventSchedule; }
+    public void        setEventSchedule(String v) { this.eventSchedule = v; }
+
+    public Boolean     getEventEnabled() { return eventEnabled; }
+    public void        setEventEnabled(Boolean v) { this.eventEnabled = v; }
+
+    public String      getEventBody() { return eventBody; }
+    public void        setEventBody(String v) { this.eventBody = v; }
 
     public String      getIndexTable()  { return indexTable; }
     public void        setIndexTable(String v)  { this.indexTable = v; }

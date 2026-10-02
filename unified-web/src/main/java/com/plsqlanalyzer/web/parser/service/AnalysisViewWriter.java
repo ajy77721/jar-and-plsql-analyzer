@@ -67,7 +67,7 @@ public class AnalysisViewWriter {
      * per-table split files, the per-object estate detail files and the non-default complexity
      * variants are members of their facets, not separate counts.
      */
-    public static final int VIEW_COUNT = 13;
+    public static final int VIEW_COUNT = 14;
 
     /**
      * Computes and writes every parser-side view summary for {@code name}. Never throws — each view
@@ -105,6 +105,8 @@ public class AnalysisViewWriter {
         writeTriggerDetails(name, verbose);
         if (facet(name, AnalysisQuery.Dataset.PLSQL_GLOBALS, verbose)) written++;
         writeGlobalDetails(name, verbose);
+        // Scheduled jobs — the crawler's api/jobs/index.json, cached as views/jobs-index.json.
+        if (facet(name, AnalysisQuery.Dataset.PLSQL_JOBS, verbose)) written++;
 
         // The two table-scoped facets, grouped in one scan each — the endpoint is per-table, so a
         // map is the only shape that serves every table without re-scanning per table. Beside each

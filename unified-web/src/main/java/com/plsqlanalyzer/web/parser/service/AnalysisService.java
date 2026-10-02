@@ -474,6 +474,22 @@ public class AnalysisService {
         return entry != null ? entry : staticReader.getGlobalUsedBy(name, variable);
     }
 
+    /** Every scheduled job (see {@link com.plsqlanalyzer.web.parser.service.EstateFacetReader#getJobs}). */
+    public JsonNode getJobs(String name) throws IOException {
+        return staticReader.getJobs(name);
+    }
+
+    /** One scheduled job's row, or null when the analysis has no such job. */
+    public JsonNode getJobDetail(String name, String job) throws IOException {
+        JsonNode jobs = staticReader.getJobs(name);
+        if (jobs == null || !jobs.isArray()) return null;
+        for (JsonNode j : jobs) {
+            String n = j.path("name").asText("");
+            if (n.equalsIgnoreCase(job)) return j;
+        }
+        return null;
+    }
+
     /** Clear the in-memory synthesized cache: one analysis if {@code name} given, else all. */
     public int clearCache(String name) {
         if (name != null && !name.isBlank()) {

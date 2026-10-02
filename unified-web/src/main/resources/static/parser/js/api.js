@@ -468,6 +468,19 @@ PA.api = {
         return PA.api.facetPageSource('globals', params || {});
     },
 
+    jobsPageSource(params) {
+        return PA.api.facetPageSource('jobs', params || {});
+    },
+
+    /** One scheduled job's row, or null when the analysis has no such job. */
+    async getJobDetail(job) {
+        const name = PA.api._analysisName;
+        const res = await fetch(`/api/parser/analyses/${encodeURIComponent(name)}/jobs/${encodeURIComponent(job)}`);
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error('job detail failed: ' + res.status);
+        return res.json();
+    },
+
     /** One view's detail (row + chain + usedBy), or null when the analysis has no such view. */
     async getViewDetail(view) {
         const name = PA.api._analysisName;

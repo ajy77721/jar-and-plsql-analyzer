@@ -1541,4 +1541,33 @@ class EstateFacetReader {
         }
         return out;
     }
+
+    /* ══════════════════════════════ SCHEDULED JOBS ══════════════════════════════ */
+
+    /**
+     * Every scheduled job discovered by the crawler (Oracle DBMS_SCHEDULER/DBMS_JOB, SQL Server
+     * Agent, pg_cron, MySQL EVENT), one row each: {@code name, schema, type, schedule, enabled,
+     * target, targetNodeId, nodeId, callCount}. Never null — an analysis with no scheduler catalog
+     * (or none crawled) returns an empty array, which pages as an empty facet.
+     */
+    JsonNode getJobs(String name) throws IOException {
+        ObjectMapper m = r.mapper;
+        String ck = r.cacheKey(name, "jobs");
+        JsonNode cached = r.synthesizedCache.get(ck);
+        if (cached != null) return cached;
+
+        ArrayNode out = m.createArrayNode();
+        try {
+            JsonNode doc = r.getJobsIndex(name);
+            JsonNode jobs = doc != null ? doc.path("jobs") : null;
+            if (jobs != null && jobs.isArray()) {
+                for (JsonNode j : jobs) out.add(j.deepCopy());
+            }
+        } catch (Exception e) {
+            // No jobs artifact / unreadable: the honest answer is an empty facet, not a 500.
+            out = m.createArrayNode();
+        }
+        r.synthesizedCache.put(ck, out);
+        return out;
+    }
 }

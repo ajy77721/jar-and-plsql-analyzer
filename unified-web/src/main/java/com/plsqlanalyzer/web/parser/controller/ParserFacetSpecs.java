@@ -504,4 +504,40 @@ final class ParserFacetSpecs {
             row -> List.of(),
             row -> List.of(),
             Map.of());
+
+    /**
+     * Scheduled jobs — the roots of many estates (Oracle DBMS_SCHEDULER/DBMS_JOB, SQL Server
+     * Agent, pg_cron, MySQL EVENT). Merged by {@code schema.name}, so that pair is the identity.
+     * The scope predicate follows the job's {@code targetNodeId} — a job is "in scope" for the
+     * procedure it schedules.
+     */
+    static final FacetSpec JOBS = new FacetSpec(
+            "scheduled jobs",
+            FacetSort.byName(
+                    FacetSort.text("NAME_ASC", "name", false),
+                    FacetSort.text("NAME_DESC", "name", true),
+                    FacetSort.text("SCHEMA_ASC", "schema", false),
+                    FacetSort.text("SCHEMA_DESC", "schema", true),
+                    FacetSort.text("TYPE_ASC", "type", false),
+                    FacetSort.text("TYPE_DESC", "type", true),
+                    FacetSort.text("SCHEDULE_ASC", "schedule", false),
+                    FacetSort.text("SCHEDULE_DESC", "schedule", true),
+                    FacetSort.text("TARGET_ASC", "target", false),
+                    FacetSort.text("TARGET_DESC", "target", true),
+                    FacetSort.text("ENABLED_ASC", "enabled", false),
+                    FacetSort.text("ENABLED_DESC", "enabled", true)),
+            "NAME_ASC",
+            50,
+            row -> row.path("schema").asText("").toUpperCase(Locale.ROOT) + "."
+                    + row.path("name").asText("").toUpperCase(Locale.ROOT),
+            row -> lower(row.path("name").asText("") + " " + row.path("schema").asText("") + " "
+                    + row.path("schedule").asText("") + " " + row.path("target").asText("") + " "
+                    + row.path("type").asText("")),
+            row -> List.of(row.path("type").asText("JOB")),
+            row -> {
+                String targetNodeId = row.path("targetNodeId").asText("");
+                return targetNodeId.isEmpty() ? List.of() : List.of(targetNodeId);
+            },
+            Map.of("1", FacetSpec.scalarColumn("schema", ""),
+                   "2", FacetSpec.scalarColumn("type", "JOB")));
 }

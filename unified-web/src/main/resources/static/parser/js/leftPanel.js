@@ -401,6 +401,8 @@ PA._renderLeftProcItem = function(n) {
     html += '<span class="lp-name" style="font-size:11px">' + PA.esc(name) + '</span>';
     html += '<span class="lp-badge" data-tip="Call depth level">d' + depth + '</span>';
     if (loc > 0) html += '<span class="lp-badge" data-tip="Lines of code" style="color:var(--text-muted)">' + loc + '</span>';
+    // "scheduled" badge — this procedure is the target of a discovered scheduled job.
+    if (n.scheduled) html += '<span class="lp-badge" data-tip="Scheduled job target" title="This procedure is run by a scheduled job" style="background:var(--badge-purple-bg);color:var(--badge-purple)">&#9200;</span>';
     html += '</div>';
     return html;
 };PA._renderLeftTableItem = function(t) {

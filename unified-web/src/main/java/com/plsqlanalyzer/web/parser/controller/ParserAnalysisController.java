@@ -1188,6 +1188,40 @@ public class ParserAnalysisController {
         return doc == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(doc);
     }
 
+    /* ═══════════════════════ scheduled jobs ═══════════════════════ */
+
+    /**
+     * {@code /jobs} — every scheduled job (Oracle DBMS_SCHEDULER/DBMS_JOB, SQL Server Agent,
+     * pg_cron, MySQL EVENT) with its schedule, enabled flag and the procedure it targets. A paged
+     * facet like the other estate facets, so an analysis with no scheduler catalog returns an
+     * empty page rather than a 404.
+     */
+    @GetMapping("/analyses/{name}/jobs")
+    public ResponseEntity<JsonNode> getJobs(
+            @PathVariable("name") String name,
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestParam(value = "after", required = false) String after,
+            @RequestParam(value = "sort", required = false) String sort,
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "types", required = false) String types,
+            @RequestParam(value = "cf", required = false) List<String> cf,
+            @RequestParam(value = "scope", required = false) String scope,
+            @RequestParam(value = "procId", required = false) String procId,
+            @RequestHeader(value = "Accept", required = false) String accept) {
+        return facet(name, ParserFacetSpecs.JOBS, null, limit, after, sort, q, types, cf, scope,
+                procId, accept, AnalysisQuery.Dataset.PLSQL_JOBS);
+    }
+
+    @GetMapping("/analyses/{name}/jobs/{job}")
+    public ResponseEntity<JsonNode> getJobDetail(
+            @PathVariable("name") String name, @PathVariable("job") String job) {
+        try {
+            return okOrNotFound(service.getJobDetail(name, job));
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
     /**
      * UI-045/§256 — the real, cross-facet Global Search results grid, replacing {@code
      * PA.globalSearch}'s old same-tab-only DOM filter (`plsql/js/app.js`).

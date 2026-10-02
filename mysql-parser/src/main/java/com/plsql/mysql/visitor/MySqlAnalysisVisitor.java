@@ -191,6 +191,39 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Event identity (MySQL scheduled job)
+    //
+    // Captures the event name, its ON SCHEDULE clause, its ENABLE/DISABLE status and the
+    // DO body. The body is walked with the ordinary visitChildren, so every CALL / DML
+    // inside it is captured by exactly the same methods that handle procedure bodies —
+    // which is what turns a scheduled event into a real entry point with outbound edges.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Override
+    public Void visitCreateEvent(MySqlParser.CreateEventContext ctx) {
+        result.setType(MySqlRoutineInfo.RoutineType.EVENT);
+
+        result.setName(extractObjectId(ctx.eventName().objectId()));
+        if (ctx.eventName().schemaRef() != null) {
+            result.setSchema(extractSimpleId(ctx.eventName().schemaRef().simpleId()));
+        }
+        if (ctx.eventSchedule() != null) {
+            result.setEventSchedule(ctx.eventSchedule().getText());
+        }
+        if (ctx.eventStatus() != null && ctx.eventStatus().ENABLE() != null) {
+            result.setEventEnabled(true);
+        } else if (ctx.eventStatus() != null && ctx.eventStatus().DISABLE() != null) {
+            result.setEventEnabled(false);
+        }
+        if (ctx.eventBody() != null) {
+            result.setEventBody(ctx.eventBody().getText());
+        }
+        result.setLineStart(ctx.getStart().getLine());
+        result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
+        return visitChildren(ctx);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Index identity
     //
     // Captures the index name, its target table, the indexed columns (in declaration

@@ -44,6 +44,8 @@ public class ChunkedFlowWriter {
 
     private final Map<String, String> progressMap = new LinkedHashMap<>();
     private List<Map<String, Object>> discoveredTriggers = new ArrayList<>();
+    /** Scheduled-job facet rows (name/schedule/enabled/target/nodeId), written to api/jobs/index.json. */
+    private List<Map<String, Object>> discoveredJobs = new ArrayList<>();
 
     /**
      * The source artifact name actually written for a node, keyed by node identity — so the
@@ -154,6 +156,14 @@ public class ChunkedFlowWriter {
         this.discoveredTriggers = triggers != null ? triggers : new ArrayList<>();
     }
 
+    public void setDiscoveredJobs(List<Map<String, Object>> jobs) {
+        this.discoveredJobs = jobs != null ? jobs : new ArrayList<>();
+    }
+
+    public List<Map<String, Object>> getDiscoveredJobs() {
+        return discoveredJobs;
+    }
+
     public void markPending(String visitKey) throws IOException {
         progressMap.put(visitKey, "PENDING");
         writeProgress();
@@ -184,6 +194,17 @@ public class ChunkedFlowWriter {
         if (newEdges == null || newEdges.isEmpty()) return;
         String fileName = String.format("edges_%04d.json", chunkIdx);
         writeJson(edgesDirKey.resolve(fileName), newEdges);
+    }
+
+    /**
+     * Append edges under an automatically allocated, collision-free index. Post-crawl additive
+     * emitters (scheduled jobs) run after the BFS and the trigger pass, neither of which reports a
+     * final chunk index back — reusing {@link #appendEdges}'s caller-supplied index would overwrite
+     * an earlier {@code edges_XXXX.json}. This shares the chunk counter so the index is unique.
+     */
+    public void appendEdgesAuto(List<FlowEdge> newEdges) throws IOException {
+        if (newEdges == null || newEdges.isEmpty()) return;
+        appendEdges(newEdges, chunkCounter.incrementAndGet());
     }
 
     public void updateTables(Map<String, SchemaTableInfo> tableInfoMap) throws IOException {
@@ -1416,6 +1437,9 @@ public class ChunkedFlowWriter {
         // ── 3. tables/index.json: all tables, who uses them, which operations ──
         int tableCount = writeTableIndex(apiDir, lightNodes);
 
+        // ── 3b. jobs/index.json: discovered scheduled jobs (job, schedule, enabled, target) ──
+        int jobCount = writeJobsIndex(apiDir);
+
         // ── 4. call_graph.json: deduplicated edges for graph rendering ──
         writeCallGraph(apiDir, edges, cycles);
 
@@ -1436,6 +1460,7 @@ public class ChunkedFlowWriter {
         manifest.setCount("tables", tableCount);
         manifest.setCount("statements", statementCount);
         manifest.setCount("edges", edges.size());
+        manifest.setCount("jobs", jobCount);
         writeManifest();
 
         System.err.println("[ChunkedFlowWriter] API files written: " + apiDir);
@@ -2104,6 +2129,29 @@ public class ChunkedFlowWriter {
         long bytes = writeJson(key, tableIndex);
         manifest.recordArtifact(key, bytes, (long) tableList.size());
         return tableList.size();
+    }
+
+    /**
+     * {@code api/jobs/index.json} — the scheduled-job facet: one row per discovered job with its
+     * schedule, enabled flag, the routine it targets and the job node's own id. Written only from
+     * the post-crawl {@link JobDiscoverer}; an estate with no scheduler catalog gets an empty
+     * document ({@code totalJobs:0}) so the reader degrades to an empty page rather than a 404.
+     */
+    private int writeJobsIndex(ArtifactKey apiDir) throws IOException {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> j : discoveredJobs) {
+            if (j == null) continue;
+            rows.add(new LinkedHashMap<>(j));
+        }
+        rows.sort(Comparator.comparing(m -> (String.valueOf(m.getOrDefault("schema", ""))
+                + "." + m.getOrDefault("name", ""))));
+        Map<String, Object> index = new LinkedHashMap<>();
+        index.put("totalJobs", rows.size());
+        index.put("jobs", rows);
+        ArtifactKey key = apiDir.resolve("jobs", "index.json");
+        long bytes = writeJson(key, index);
+        manifest.recordArtifact(key, bytes, (long) rows.size());
+        return rows.size();
     }
 
     /**

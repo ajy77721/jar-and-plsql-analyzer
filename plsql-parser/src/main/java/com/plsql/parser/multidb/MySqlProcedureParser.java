@@ -59,6 +59,20 @@ public class MySqlProcedureParser implements StoredProcedureParser {
         obj.setStatements(toStatements(info.getStatements()));
         obj.setExceptionHandlers(toExceptionHandlers(info));
         obj.setForeignKeys(toForeignKeys(info.getForeignKeys()));
+        // Scheduled EVENT metadata (RoutineType.EVENT only): the ON SCHEDULE clause, the
+        // ENABLE/DISABLE status and the first procedure the DO body CALLs — the job's target,
+        // which the crawler turns into a SCHEDULES edge. Null for every other routine type.
+        if ("EVENT".equals(obj.getType())) {
+            obj.setSchedule(info.getEventSchedule());
+            obj.setJobEnabled(info.getEventEnabled());
+            for (MySqlCallInfo c : info.getCalls()) {
+                if (c.getName() != null && !c.getName().isBlank()) {
+                    obj.setJobTarget(c.getSchema() != null && !c.getSchema().isBlank()
+                            ? c.getSchema() + "." + c.getName() : c.getName());
+                    break;
+                }
+            }
+        }
 
         result.getObjects().add(obj);
         result.setParseTimeMs(System.currentTimeMillis() - start);

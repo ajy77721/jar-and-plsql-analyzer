@@ -223,6 +223,37 @@ COLUMN        : C O L U M N ;
 CONSTRAINT    : C O N S T R A I N T ;
 FOREIGN       : F O R E I G N ;
 REFERENCES    : R E F E R E N C E S ;
+// ── CREATE EVENT keywords (MySQL's scheduled jobs) ───────────────────────────
+// MySQL's own scheduler is the EVENT object (`CREATE EVENT ... ON SCHEDULE ... DO ...`),
+// the MySQL analogue of Oracle DBMS_SCHEDULER / SQL Agent / pg_cron. Without these
+// tokens a standalone CREATE EVENT failed at the first token after CREATE and the event
+// was invisible to the analyzer. Every one is non-reserved in MySQL and is also listed in
+// the parser's reservedAsId rule, so a column or variable named `event`, `schedule`,
+// `day` or `enable` (all legal MySQL identifiers) keeps lexing usable.
+EVENT         : E V E N T ;
+SCHEDULE      : S C H E D U L E ;
+EVERY         : E V E R Y ;
+AT            : A T ;
+STARTS        : S T A R T S ;
+ENDS          : E N D S ;
+COMPLETION    : C O M P L E T I O N ;
+PRESERVE      : P R E S E R V E ;
+ENABLE        : E N A B L E ;
+DISABLE       : D I S A B L E ;
+SLAVE         : S L A V E ;
+RENAME        : R E N A M E ;
+// Simple interval units for `ON SCHEDULE EVERY <n> DAY`. The compound YEAR_MONTH /
+// DAY_HOUR spellings are rare in events and would add 14 more tokens, so they are not
+// tokenized; only the simple units below are needed for real event schedules.
+YEAR          : Y E A R ;
+QUARTER       : Q U A R T E R ;
+MONTH         : M O N T H ;
+WEEK          : W E E K ;
+DAY           : D A Y ;
+HOUR          : H O U R ;
+MINUTE        : M I N U T E ;
+SECOND        : S E C O N D ;
+MICROSECOND   : M I C R O S E C O N D ;
 // ── JSON_TABLE keywords ──────────────────────────────────────────────────────
 // `SELECT ... FROM t, JSON_TABLE(t.doc, '$.items[*]' COLUMNS (...)) AS jt` is the only
 // table function MySQL has, and without a grammar rule for it the entire SELECT — every

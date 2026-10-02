@@ -132,4 +132,29 @@ public class PostgresSourceFetchStrategy implements SourceFetchStrategy {
         }
         return result;
     }
+
+    // ── Scheduled jobs (pg_cron) ─────────────────────────────────────────────────────────────
+    // Postgres has no built-in scheduler; pg_cron installs a `cron` schema with a `job` table.
+    // When the extension is absent the query fails with "relation cron.job does not exist" —
+    // that is the honest-degradation case, so it is caught here and reported as "no jobs" rather
+    // than failing the crawl. pg_cron jobs have no name; the jobid is used to key them.
+    @Override
+    public List<JobRef> listJobs(Connection conn, String schema) throws SQLException {
+        List<JobRef> out = new ArrayList<>();
+        String sql = "SELECT jobid, schedule, command, nodename, database, username, active FROM cron.job";
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                long jobid = rs.getLong("jobid");
+                String command = rs.getString("command");
+                boolean active = rs.getBoolean("active");
+                String db = rs.getString("database");
+                out.add(new JobRef("pg_cron_job_" + jobid, db, rs.getString("schedule"),
+                        active, JobActionParser.targetFromAction(command), command, "JOB"));
+            }
+        } catch (SQLException e) {
+            log.info("pg_cron catalog not available ({}); no Postgres jobs discovered", e.getMessage());
+        }
+        return out;
+    }
 }
