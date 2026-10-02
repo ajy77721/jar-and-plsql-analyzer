@@ -23,6 +23,14 @@ L4. THE INVARIANT       when work moves to another thread, the snapshot moves WI
                         blindly on a worker; NEVER fall back silently to default credentials
 ```
 
+**The 1-hour wall (task #39).** Temporary credentials obtained through the classic IAM path
+(`POST /api/auth/aws/iam-connect` with a `sessionToken`) are STS credentials whose AWS default
+lifetime is **one hour**. `sts:GetCallerIdentity` verifies identity but does not report the real
+expiry, so the connect response returns the derived window as `expiresAt` (epoch millis) and
+`expiresInSeconds` (3600) — the UI can warn before the token dies and the user re-runs
+`iam-connect` with fresh keys. Long-lived IAM user access keys (no `sessionToken`) do not expire
+and report both fields as `null`. SSO (device-flow) credentials refresh for 24h and are unaffected.
+
 ## 2. The 5 invariants (checked class-by-class below)
 
 - **I1** Every store-touching task on a non-request thread runs under an installed context.

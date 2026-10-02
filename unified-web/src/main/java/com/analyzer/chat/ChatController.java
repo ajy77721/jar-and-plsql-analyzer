@@ -9,6 +9,9 @@ import org.springframework.web.bind.annotation.*;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
+import com.analyzer.storage.sso.SsoCredentialsResolver;
 import org.springframework.beans.factory.annotation.Qualifier;
 
 import java.io.IOException;
@@ -49,12 +52,70 @@ public class ChatController {
 
     private final com.plsqlanalyzer.web.config.ConfigDirService configDirService;
 
+    /**
+     * Snapshots the caller's SSO context for chat writes (task #32), so a script/output write is
+     * carried out under the user's identity rather than the shared default one.
+     */
+    private final SsoCredentialsResolver ssoCredentialsResolver;
+
     public ChatController(ChatService chatService,
                            @Qualifier("jarArtifactStore") ArtifactStore store,
-                           com.plsqlanalyzer.web.config.ConfigDirService configDirService) {
+                           com.plsqlanalyzer.web.config.ConfigDirService configDirService,
+                           SsoCredentialsResolver ssoCredentialsResolver) {
         this.chatService = chatService;
         this.store = store;
         this.configDirService = configDirService;
+        this.ssoCredentialsResolver = ssoCredentialsResolver;
+    }
+
+    /**
+     * Runs a chat write under the caller's captured routing scope and SSO context — the same
+     * CAPTURE → INSTALL idiom every other store-touching controller uses (see
+     * {@code ConversionController}/{@code ClaudeController}). Chat writes are synchronous on the
+     * request thread today, so this is explicit rather than load-bearing for the common case; it
+     * makes the routing auditable and guarantees the write can never degrade to the shared default
+     * store if a future change moves a write off the request thread.
+     *
+     * <p>{@code captureScope()} answers {@link RequestScopedArtifactStore.Scope#NONE} when there is
+     * no request-bound session (local/CLI/pre-SSO), and {@link CapturedSsoContext#capture} answers
+     * {@code null} likewise — so those documented legacy paths are unchanged.
+     */
+    private RequestScopedArtifactStore.Scope captureRoutingScope() {
+        return store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope()
+                : RequestScopedArtifactStore.Scope.NONE;
+    }
+
+    private <T> T withUserContext(java.util.function.Supplier<T> action) {
+        RequestScopedArtifactStore.Scope routingScope = captureRoutingScope();
+        CapturedSsoContext ssoContext = CapturedSsoContext.capture(ssoCredentialsResolver);
+        try (AutoCloseable routed = routingScope.install();
+             AutoCloseable ctx = ssoContext == null ? null : ssoContext.install()) {
+            return action.get();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** An action that may throw {@link IOException} (the file-write path). */
+    @FunctionalInterface
+    private interface IoAction<T> {
+        T run() throws IOException;
+    }
+
+    private <T> T withUserContextIO(IoAction<T> action) throws IOException {
+        RequestScopedArtifactStore.Scope routingScope = captureRoutingScope();
+        CapturedSsoContext ssoContext = CapturedSsoContext.capture(ssoCredentialsResolver);
+        try (AutoCloseable routed = routingScope.install();
+             AutoCloseable ctx = ssoContext == null ? null : ssoContext.install()) {
+            return action.run();
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     /**
@@ -96,7 +157,7 @@ public class ChatController {
      */
     @DeleteMapping("/sessions/{id}/outputs/{filename}")
     public ResponseEntity<Void> deleteOutput(@PathVariable String id, @PathVariable String filename) {
-        boolean removed = chatService.deleteOutput(id, filename);
+        boolean removed = withUserContext(() -> chatService.deleteOutput(id, filename));
         return removed ? ResponseEntity.noContent().build() : ResponseEntity.notFound().build();
     }
 
@@ -128,7 +189,8 @@ public class ChatController {
             return ResponseEntity.badRequest().body(Map.of("error", "Session name is required"));
         }
 
-        ChatSession session = chatService.createSession(name, scope.toUpperCase(), chatType, scopeContext);
+        ChatSession session = withUserContext(
+                () -> chatService.createSession(name, scope.toUpperCase(), chatType, scopeContext));
         return ResponseEntity.ok(Map.of(
                 "id", session.getId(),
                 "name", session.getName(),
@@ -211,7 +273,7 @@ public class ChatController {
 
     @DeleteMapping("/sessions/{id}")
     public ResponseEntity<?> deleteSession(@PathVariable String id) {
-        boolean deleted = chatService.deleteSession(id);
+        boolean deleted = withUserContext(() -> chatService.deleteSession(id));
         if (!deleted) return ResponseEntity.notFound().build();
         return ResponseEntity.ok(Map.of("deleted", id));
     }
@@ -226,7 +288,7 @@ public class ChatController {
         String pageContext = body.get("pageContext");
         log.info("Chat message to session {}: {} chars, context: {}", id, message.length(),
                 pageContext != null ? pageContext.length() + " chars" : "none");
-        ChatMessage response = chatService.sendMessage(id, message, pageContext);
+        ChatMessage response = withUserContext(() -> chatService.sendMessage(id, message, pageContext));
         if (response == null) {
             return ResponseEntity.notFound().build();
         }
@@ -274,7 +336,7 @@ public class ChatController {
 
     @DeleteMapping("/sessions/{id}/scripts/{filename}")
     public ResponseEntity<Void> deleteScript(@PathVariable String id, @PathVariable String filename) {
-        boolean removed = chatService.deleteScript(id, filename);
+        boolean removed = withUserContext(() -> chatService.deleteScript(id, filename));
         return removed ? ResponseEntity.noContent().build() : ResponseEntity.notFound().build();
     }
 
@@ -427,9 +489,12 @@ public class ChatController {
         }
         try {
             byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
-            try (OutputStream out = openWrite(key, bytes.length)) {
-                out.write(bytes);
-            }
+            withUserContextIO(() -> {
+                try (OutputStream out = openWrite(key, bytes.length)) {
+                    out.write(bytes);
+                }
+                return null;
+            });
             log.info("Chat file written: {} ({} bytes)", filePath, content.length());
             return ResponseEntity.ok(Map.of("success", true, "path", filePath, "size", content.length()));
         } catch (IOException e) {

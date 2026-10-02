@@ -43,14 +43,21 @@ import java.util.regex.Pattern;
  * (createSynonym), sp_executesql arguments (SP_EXECUTESQL token + spExecuteSqlArgs), and the
  * CREATE SEQUENCE / CREATE INDEX option tails (sequenceOption/indexOption).
  *
- * <p><b>Deliberately deferred (still regex-primary, documented, not counted as fallback):</b>
- * qualified-call extraction (QUALIFIED_CALL_PATTERN, needs a call-expression rule), the
- * otherStatement text recovery for MERGE/WITH-led statements (KEYWORD_OP_PATTERN /
- * DELETE_TARGET_FROM_PATTERN / TABLE_REF_PATTERN / JOIN_PATTERN / FROM_PATTERN / ALIAS_TABLE_PATTERN),
- * CASE/SUBQUERY statement-inventory counting (CASE has no grammar context), and the helpers
- * SQL_LIKE_PATTERN / STATEMENT_HEAD / PERMISSION_STMT_PATTERN / ARG_OUTPUT_TRAILING_PATTERN.
- * Promoting MERGE/WITH to structural rules is the largest remaining piece (effort L), left for a
- * follow-up; the WITH side is partially covered by withStatement/cteDefinition.
+ * <p><b>Task #30 additions (batch 3):</b> qualified-call extraction now runs off a real
+ * {@code callExpression} rule with {@code QUALIFIED_CALL_REGEX_FALLBACKS} counting the residual
+ * regex scan; CASE statement-inventory counting now runs off {@code caseExpression} contexts with
+ * {@code CASE_REGEX_FALLBACKS} counting the residual; and a standalone CREATE SYNONYM is a valid
+ * {@code compilationUnit} alternative.
+ *
+ * <p><b>Deliberately deferred (still regex-primary, documented):</b> the otherStatement text
+ * recovery for MERGE/WITH-led statements (KEYWORD_OP_PATTERN / DELETE_TARGET_FROM_PATTERN /
+ * TABLE_REF_PATTERN / JOIN_PATTERN / FROM_PATTERN / ALIAS_TABLE_PATTERN), SUBQUERY
+ * statement-inventory counting (subqueries are parsed by the nested {@code queryUnit} entry point,
+ * not this tree), and the helpers SQL_LIKE_PATTERN / STATEMENT_HEAD / PERMISSION_STMT_PATTERN /
+ * ARG_OUTPUT_TRAILING_PATTERN. Promoting MERGE/WITH to structural rules is the largest remaining
+ * piece (effort L), left for a follow-up; the WITH side is partially covered by
+ * withStatement/cteDefinition. The qualified-call and CASE regex scans are retained as counted
+ * fallbacks precisely so calls/markers inside those deferred bodies are not lost.
  */
 public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
@@ -312,6 +319,12 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             new java.util.concurrent.atomic.AtomicLong();
     /** CREATE SEQUENCE / CREATE INDEX option tails — structured by sequenceOption/indexOption. */
     public static final java.util.concurrent.atomic.AtomicLong CREATE_OPTION_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** CASE statement-inventory markers — structured by caseExpression (task #30). */
+    public static final java.util.concurrent.atomic.AtomicLong CASE_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Schema-qualified call extraction — structured by callExpression (task #30). */
+    public static final java.util.concurrent.atomic.AtomicLong QUALIFIED_CALL_REGEX_FALLBACKS =
             new java.util.concurrent.atomic.AtomicLong();
 
     private static final Set<String> FALLBACK_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -800,11 +813,18 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     }
 
     /**
-     * Recover CASE expressions and nested SELECT subqueries from the routine body text.
-     * The grammar consumes both inside stmtTail as raw tokens (no dedicated context),
-     * so they are scanned once over the whole body — same approach used for sequences
-     * and qualified calls. Each match is added to the shared statement inventory using
-     * the common vocabulary tokens "CASE" / "SUBQUERY" so all dialects report uniformly.
+     * Recover CASE expressions and nested SELECT subqueries for the statement inventory.
+     *
+     * <p><b>CASE — grammar-first (task #30).</b> The {@code caseExpression} rule now gives every
+     * occurrence a real context, so the markers are read off the tree (one per occurrence, nested
+     * CASEs included as distinct child contexts). The legacy whole-body regex survives only for a
+     * body where the structured walk found none, and that use is counted in
+     * {@link #CASE_REGEX_FALLBACKS}.
+     *
+     * <p><b>SUBQUERY — still regex-primary.</b> Subqueries are parsed by the separate nested
+     * {@code queryUnit} entry point, not as nodes of this tree, so there is no context to count yet;
+     * the scan is unchanged. Each match uses the common vocabulary tokens "CASE" / "SUBQUERY" so
+     * all dialects report uniformly.
      */
     private void extractCaseAndSubqueries(ParserRuleContext bodyCtx) {
         if (bodyCtx == null) return;
@@ -812,11 +832,22 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         if (text == null || text.isEmpty()) return;
         int baseLine = bodyCtx.getStart().getLine();
 
-        Matcher c = CASE_PATTERN.matcher(text);
-        while (c.find()) {
-            result.getStatements().add(
-                    new SqlServerStatementInfo("CASE", lineAt(text, c.start(), baseLine)));
+        List<SqlServerParser.CaseExpressionContext> cases = new ArrayList<>();
+        collectNodes(bodyCtx, SqlServerParser.CaseExpressionContext.class, cases);
+        if (!cases.isEmpty()) {
+            for (SqlServerParser.CaseExpressionContext c : cases) {
+                result.getStatements().add(
+                        new SqlServerStatementInfo("CASE", c.getStart().getLine()));
+            }
+        } else {
+            countRegexFallback(CASE_REGEX_FALLBACKS, "CASE");
+            Matcher c = CASE_PATTERN.matcher(text);
+            while (c.find()) {
+                result.getStatements().add(
+                        new SqlServerStatementInfo("CASE", lineAt(text, c.start(), baseLine)));
+            }
         }
+
         Matcher s = SUBQUERY_PATTERN.matcher(text);
         while (s.find()) {
             result.getStatements().add(
@@ -1752,13 +1783,33 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
 
     /** Emit proc→function / function→function / →TVF edges for schema-qualified calls in the body. */
     private void extractQualifiedCalls(ParserRuleContext bodyCtx) {
+        if (bodyCtx == null) return;
         String text = originalText(bodyCtx);
         if (text == null || text.isEmpty()) return;
-        // Bug 3: strip comments before scanning, same as statementText's own comment handling —
-        // otherwise a schema.name( pattern that only appears INSIDE a comment (e.g.
-        // "-- see sales.legacy_proc(...) for details") is misread as a real outbound call.
+
+        // Grammar-first (task #30): schema-qualified calls now come off callExpression nodes. A call
+        // with fewer than two name parts is unqualified (ISNULL, GETDATE, COUNT…) — the regex
+        // required a dot, so these are ignored exactly as before. The last two segments are
+        // schema.name, matching the regex's `([\w#$]+)\.([\w#$]+)\s*\(`.
+        List<SqlServerParser.CallExpressionContext> nodes = new ArrayList<>();
+        collectNodes(bodyCtx, SqlServerParser.CallExpressionContext.class, nodes);
+        for (SqlServerParser.CallExpressionContext node : nodes) {
+            if (node.callName() == null) continue;
+            List<SqlServerParser.NamePartContext> parts = node.callName().namePart();
+            if (parts.size() < 2) continue;
+            String schema = stripBrackets(parts.get(parts.size() - 2).getText());
+            String name = stripBrackets(parts.get(parts.size() - 1).getText());
+            addQualifiedCall(schema, name, node.getStart().getLine());
+        }
+
+        // Counted fallback: a qualified call the structured walk could not see — one inside a
+        // deferred MERGE/WITH/otherStatement body, inside a parenthesised subquery (consumed as a
+        // balanced parenGroup, not tokenised), or a bracketed/odd shape the rule did not reach.
+        // Deduped against the structured set, so on a fully-migrated body this contributes nothing
+        // and the counter stays flat. Comment/literal masking is preserved (Bug 3 / Bug 7 below).
         String scanText = stripLineAndBlockComments(text);
         Matcher m = QUALIFIED_CALL_PATTERN.matcher(scanText);
+        boolean counted = false;
         while (m.find()) {
             String schema = m.group(1);
             String name = m.group(2);
@@ -1767,32 +1818,46 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             // Only INTO is excluded; FROM/JOIN may precede legit table-valued-function calls.
             String pre = scanText.substring(Math.max(0, m.start() - 10), m.start());
             if (pre.matches("(?is).*\\bINTO\\s+$")) continue;
-            // Skip self-reference and already-seen targets. Dedup on the SCHEMA-QUALIFIED
-            // name so same-named routines in different schemas (e.g. sales.fn_X vs hr.fn_X)
-            // are kept as distinct calls and never overwrite each other.
-            if (name.equalsIgnoreCase(result.getName())) continue;
             // Bug 2: a CLR user-defined-type method call on a local @variable/@parameter,
             // e.g. @geom1.STIntersects(@geom2), matches this same qualified-call shape but is not
             // a real outbound call to a schema/routine named after that variable — the "schema"
             // part here strips down to a declared @-sigil name in scope. Suppress it, matching
             // the same false-positive class the Oracle/Postgres dialects guard against.
             if (isDeclaredAtVariable(schema)) continue;
-            // Bug 7 (XML-method audit): xml_col.value(...)/.exist(...)/.query(...)/.nodes(...) are
-            // SQL Server's fixed set of built-in XML data-type methods, not calls to a
-            // schema-qualified routine — QUALIFIED_CALL_PATTERN can't structurally tell "xml_col"
-            // (a plain column) apart from a real schema/package prefix. Exclude this exact 4-method
-            // set unconditionally (same allowlist-style special-case as isDeclaredAtVariable's own
-            // CLR-UDT guard), regardless of whether the qualifier is a declared variable.
+            // Same guards addQualifiedCall applies, checked BEFORE the fallback is counted so the
+            // counter records only calls that are genuinely added (not self-refs/XML methods).
+            if (name.equalsIgnoreCase(result.getName())) continue;
             if (XML_METHOD_NAMES.contains(name.toUpperCase())) continue;
             String callKey = (schema != null ? schema.toUpperCase() + "." : "") + name.toUpperCase();
-            if (!seenCalls.add(callKey)) continue;
-            SqlServerCallInfo c = new SqlServerCallInfo();
-            c.setSchema(schema);
-            c.setName(name);
-            // Actual call-site line, not the body start line.
-            c.setLine(lineAt(text, m.start(), bodyCtx.getStart().getLine()));
-            result.getCalls().add(c);
+            if (seenCalls.contains(callKey)) continue;   // already captured structurally
+            if (!counted) {
+                counted = true;
+                countRegexFallback(QUALIFIED_CALL_REGEX_FALLBACKS, "qualified call");
+            }
+            addQualifiedCall(schema, name, lineAt(text, m.start(), bodyCtx.getStart().getLine()));
         }
+    }
+
+    /**
+     * Record one schema-qualified call, applying the guards shared by the structured and regex
+     * paths: skip self-reference, skip SQL Server's fixed built-in XML data-type methods
+     * (Bug 7), and dedup on the SCHEMA-QUALIFIED name so same-named routines in different schemas
+     * (sales.fn_X vs hr.fn_X) stay distinct.
+     */
+    private void addQualifiedCall(String schema, String name, int line) {
+        if (name == null || name.isEmpty()) return;
+        if (name.equalsIgnoreCase(result.getName())) return;
+        // Bug 7 (XML-method audit): xml_col.value(...)/.exist(...)/.query(...)/.nodes(...) are
+        // SQL Server's fixed set of built-in XML data-type methods, not calls to a
+        // schema-qualified routine. Exclude this exact 4-method set unconditionally.
+        if (XML_METHOD_NAMES.contains(name.toUpperCase())) return;
+        String callKey = (schema != null ? schema.toUpperCase() + "." : "") + name.toUpperCase();
+        if (!seenCalls.add(callKey)) return;
+        SqlServerCallInfo c = new SqlServerCallInfo();
+        c.setSchema(schema);
+        c.setName(name);
+        c.setLine(line);
+        result.getCalls().add(c);
     }
 
     /**

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.plsqlanalyzer.web.page.FacetPageResponder;
 import com.plsqlanalyzer.web.page.FacetSpec;
+import com.plsqlanalyzer.web.parser.service.AnalysisPaths;
 import com.plsqlanalyzer.web.parser.service.ParserScopeResolver;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -191,6 +192,7 @@ public class TableDetailController {
             // instead of a constructor's.
             return FacetPageResponder.badRequest(mapper, "Parameter 'table' is required");
         }
+        name = AnalysisPaths.canonical(name);   // task #33 — OracleDemo / ORACLEDEMO resolve alike
         JsonNode document;
         try {
             document = repository.document(AnalysisQuery.ofTable(dataset, name, table));

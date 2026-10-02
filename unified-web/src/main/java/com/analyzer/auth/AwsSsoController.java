@@ -50,7 +50,10 @@ import java.util.Map;
  * POST /api/auth/aws/iam-connect { "accessKeyId": "...", "secretKey": "...", "sessionToken"?: "...",
  *                                 "bucket": "...", "region": "...", "dryRun"?: false }
  *   -> success: { ok:true, source:"iam", bucket, region, name, email, displayName, accountId,
- *                 accountName, roleName, account, role, capabilities:{ read, upload, write } }
+ *                 accountName, roleName, account, role, capabilities:{ read, upload, write },
+ *                 expiresAt, expiresInSeconds }
+ *                 (expiresAt/expiresInSeconds are the ~1h STS window when a sessionToken was
+ *                  supplied; both are null for long-lived IAM user access keys, which do not expire)
  *   -> failure: { ok:false, error, capabilities:{ read, upload, write } }
  *      (the classic-IAM path for accounts with no Identity Center; see the method for the steps)
  * POST /api/auth/aws/poll
@@ -89,6 +92,18 @@ public class AwsSsoController {
 
     /** HttpSession marker set at /start and cleared at /logout; the flow state lives in the registry. */
     private static final String SESSION_START_URL = "aws.sso.startUrl";
+
+    /**
+     * Task #39: the assumed lifetime of a temporary (STS session-token) IAM credential.
+     *
+     * <p>{@code sts:GetCallerIdentity} verifies identity but does NOT report when the supplied
+     * session token dies, so the real expiry cannot be fetched here. AWS's default STS session
+     * duration is one hour, so the IAM-connect response reports that derived window
+     * ({@code expiresAt} / {@code expiresInSeconds}) whenever a {@code sessionToken} was supplied,
+     * and {@code null} for long-lived IAM user access keys (which have no expiry). Mirrors
+     * {@code SsoCredentialsResolver.DEFAULT_CREDENTIAL_LIFETIME_MS}.
+     */
+    private static final long IAM_SESSION_LIFETIME_MS = java.util.concurrent.TimeUnit.HOURS.toMillis(1);
 
     private final AwsSsoLoginService loginService;
     private final SsoStoreSwapper storeSwapper;
@@ -305,9 +320,17 @@ public class AwsSsoController {
      *     "bucket": "...", "region": "...", "dryRun"?: false }
      *   -> success: { ok:true, source:"iam", bucket, region, name, email:null, displayName,
      *                 accountId, accountName:null, roleName:null, account, role,
-     *                 capabilities:{ read, upload, write } }
+     *                 capabilities:{ read, upload, write },
+     *                 expiresAt, expiresInSeconds }
      *   -> failure: { ok:false, error, capabilities:{ read, upload, write } }
      * </pre>
+     *
+     * <p><b>Expiry (task #39):</b> when the request carries a {@code sessionToken} the credentials
+     * are temporary STS credentials, whose AWS default lifetime is one hour; the success response
+     * carries {@code expiresAt} (epoch millis) and {@code expiresInSeconds} (3600) so the UI can
+     * warn before the wall. Long-lived IAM user keys (no session token) report both as
+     * {@code null}. {@code sts:GetCallerIdentity} does not return the real expiry, so this is the
+     * documented derived window, not a server-observed value.
      *
      * <p>Steps, in order, so nothing is ever half-connected:
      * <ol>
@@ -370,7 +393,7 @@ public class AwsSsoController {
             }
             if (dryRun) {
                 // "Test access": keys verified and the probe is green, but nothing is built/swapped.
-                return iamSuccess(null, null, caps, identity);
+                return iamSuccess(null, null, caps, identity, sessionToken != null);
             }
             SsoStoreSwapper.ConnectResult result = storeSwapper.connect(sessionId, bucket, region);
             if (!result.ok()) {
@@ -380,7 +403,8 @@ public class AwsSsoController {
                 return out;
             }
             state.verifiedTarget(result.bucket(), result.region(), result.capabilities());
-            return iamSuccess(result.bucket(), result.region(), result.capabilities(), identity);
+            return iamSuccess(result.bucket(), result.region(), result.capabilities(), identity,
+                    sessionToken != null);
         } catch (IllegalArgumentException e) {
             return error(e.getMessage());
         } catch (RuntimeException e) {
@@ -392,10 +416,15 @@ public class AwsSsoController {
     /**
      * The success shape shared by the IAM connect and its dry-run test. Carries identity and target
      * metadata only — never an access key, secret or session token.
+     *
+     * @param temporary {@code true} when the credentials were built from a supplied
+     *                  {@code sessionToken} (temporary STS credentials). Then the derived ~1h
+     *                  {@code expiresAt}/{@code expiresInSeconds} window is reported; long-lived
+     *                  IAM user keys report both as {@code null}.
      */
     private static Map<String, Object> iamSuccess(String bucket, String region,
                                                   SsoStoreSwapper.Capabilities caps,
-                                                  SsoIdentity identity) {
+                                                  SsoIdentity identity, boolean temporary) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", true);
         // How this session authenticated, so the UI can name the source rather than infer it from the
@@ -413,6 +442,16 @@ public class AwsSsoController {
         out.put("account", identity == null ? null : identity.accountId());
         out.put("role", identity == null ? null : identity.roleName());
         out.put("capabilities", capabilitiesMap(caps));
+        // Task #39: an explicit expires-in note for temporary STS credentials. Derived from the
+        // AWS default session-token lifetime (see IAM_SESSION_LIFETIME_MS) because
+        // sts:GetCallerIdentity does not report the real expiry; null for long-lived keys.
+        if (temporary) {
+            out.put("expiresAt", System.currentTimeMillis() + IAM_SESSION_LIFETIME_MS);
+            out.put("expiresInSeconds", IAM_SESSION_LIFETIME_MS / 1000L);
+        } else {
+            out.put("expiresAt", null);
+            out.put("expiresInSeconds", null);
+        }
         return out;
     }
 

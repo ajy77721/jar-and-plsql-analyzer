@@ -229,7 +229,12 @@ java -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
   --app.storage.entity-read.enabled=true
 ```
 
-**S3 mode** (requires AWS credentials via the default provider chain; SSO login is required):
+**S3 mode** (requires AWS credentials via the default provider chain; SSO login is required).
+Accounts with no AWS Identity Center can instead connect classic IAM access keys via
+`POST /api/auth/aws/iam-connect`; if a `sessionToken` is supplied the credentials are temporary STS
+credentials and expire after **~1 hour** — the response's `expiresAt` / `expiresInSeconds` fields
+carry that window (both `null` for long-lived IAM user keys). Re-run `iam-connect` with fresh keys
+when it lapses:
 ```bash
 java -jar unified-web/target/unified-web-1.0.0-SNAPSHOT.jar \
   --app.storage.mode=s3 \

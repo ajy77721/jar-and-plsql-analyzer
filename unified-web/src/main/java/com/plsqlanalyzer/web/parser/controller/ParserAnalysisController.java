@@ -225,8 +225,10 @@ public class ParserAnalysisController {
     @GetMapping("/analyses/{name}/errors")
     public ResponseEntity<Map<String, Object>> analysisErrors(@PathVariable("name") String name) {
         try {
+            // Task #33: listAnalyses() returns the canonical stored name, so compare canonically.
+            String canonical = AnalysisPaths.canonical(name);
             for (AnalysisInfo a : service.listAnalyses()) {
-                if (name.equals(a.getName())) {
+                if (canonical.equals(a.getName())) {
                     List<String> errors = a.getErrors() == null ? List.of() : a.getErrors();
                     return ResponseEntity.ok(Map.of("name", name, "errors", errors));
                 }
@@ -1394,6 +1396,11 @@ public class ParserAnalysisController {
                                            String procId, String directProcId, List<String> nodeIds,
                                            String accept, AnalysisQuery.Dataset dataset,
                                            JsonNode documentOverride) {
+        // Task #33: canonicalise the identity before it reaches the repository. The artifact-scan
+        // repository already resolves through AnalysisPaths (which canonicalises), but the Mongo
+        // repository matches the "analysis" field exactly, so the query must carry the canonical
+        // spelling for OracleDemo / ORACLEDEMO to hit the same documents.
+        name = AnalysisPaths.canonical(name);
         JsonNode document;
         if (documentOverride != null) {
             document = documentOverride;
@@ -1436,6 +1443,7 @@ public class ParserAnalysisController {
     private ResponseEntity<JsonNode> facetSummary(String name, FacetSpec spec, String arrayField,
                                                   String scope, String procId,
                                                   AnalysisQuery.Dataset dataset) {
+        name = AnalysisPaths.canonical(name);   // task #33 — see facet(...)
         JsonNode document;
         try {
             document = repository.document(AnalysisQuery.of(dataset, name));

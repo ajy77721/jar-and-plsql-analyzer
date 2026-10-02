@@ -139,17 +139,43 @@ public class AnalysisQueueService {
     }
 
     /**
-     * True for the job kinds whose code signs AWS calls with a credential provider directly (the
-     * Claude/Bedrock path), so the submitter's role is captured alongside their stores. The
-     * artifact-only jobs get their credentials from the captured stores' own clients and need no
-     * separate snapshot.
+     * Whether the submitter's role credentials are snapshotted alongside their stores.
+     *
+     * <p><b>Task #31 (P4 verification): true for EVERY job type.</b> The previous split captured
+     * credentials only for the Claude/Bedrock kinds, on the theory that artifact-only jobs get
+     * their credentials from the captured stores' own clients. That left a real hole: a follow-up
+     * job is re-submitted from the queue worker with its <em>parent's</em> snapshots verbatim (see
+     * the private {@code submit} overload), so a {@code JAR_UPLOAD}/{@code WAR_UPLOAD} parent —
+     * which captured no credentials — produced a {@code CLAUDE_ENRICH} child with none, and the
+     * child then signed Bedrock/S3 calls with the ambient default chain instead of the submitter's
+     * role. Capturing unconditionally closes that hole.
+     *
+     * <p>This is safe and cheap: {@link SsoCredentialsResolver#captureCurrent()} answers {@code null}
+     * on a thread with no SSO-bound session (the legacy/default path), so local and pre-SSO runs are
+     * unchanged; when a session exists it snapshots the same short-lived credential triple the
+     * stores already carry.
+     *
+     * <p>Per-type rationale (the switch lists every constant explicitly — adding a new
+     * {@link QueueJob.Type} without updating this method is a compile error, which is the
+     * "every type" guarantee):
+     * <ul>
+     *   <li>{@code CLAUDE_*} / {@code PLSQL_CLAUDE_VERIFY} / {@code PLSQL_PURPOSE_SUMMARY} — sign
+     *       Bedrock calls directly; credentials are required.</li>
+     *   <li>{@code JAR_UPLOAD} / {@code WAR_UPLOAD} / {@code JAR_TARGETED} /
+     *       {@code JAR_EXPORT_BUNDLE} — artifact-only, but the upload/analysis jobs can spawn a
+     *       {@code CLAUDE_ENRICH} follow-up that inherits this snapshot.</li>
+     *   <li>{@code PLSQL_ANALYSIS} / {@code PLSQL_FAST_ANALYSIS} / {@code PARSER_ANALYSIS} /
+     *       {@code PARSER_VALIDATION} — artifact-only; captured so the {@code PARSER_VALIDATION}
+     *       follow-up and any future credential use inherit the submitter's identity.</li>
+     * </ul>
      */
     private static boolean needsCredentials(QueueJob.Type type) {
         return switch (type) {
-            case CLAUDE_ENRICH, CLAUDE_ENRICH_SINGLE, CLAUDE_RESCAN, CLAUDE_FULL_SCAN,
+            case JAR_UPLOAD, JAR_TARGETED, WAR_UPLOAD, JAR_EXPORT_BUNDLE,
+                 PLSQL_ANALYSIS, PLSQL_FAST_ANALYSIS, PARSER_ANALYSIS, PARSER_VALIDATION,
+                 CLAUDE_ENRICH, CLAUDE_ENRICH_SINGLE, CLAUDE_RESCAN, CLAUDE_FULL_SCAN,
                  CLAUDE_CORRECT, CLAUDE_CORRECT_SINGLE, PLSQL_CLAUDE_VERIFY,
                  PLSQL_PURPOSE_SUMMARY -> true;
-            default -> false;
         };
     }
 

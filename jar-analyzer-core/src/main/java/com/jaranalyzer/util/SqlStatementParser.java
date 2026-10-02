@@ -7,6 +7,16 @@ import java.util.regex.Pattern;
 /**
  * Extracts table names from SQL strings found in bytecode (JPQL, HQL, native SQL).
  * Handles SELECT FROM, INSERT INTO, UPDATE, DELETE FROM, JOIN, and subquery patterns.
+ *
+ * <p><b>JPQL/HQL — documented regex-last-resort (task #30(d)).</b> JPQL and Hibernate HQL are not
+ * parsed by a grammar here. Query strings reach the JAR analyzer as opaque bytecode literals, and
+ * the only things extracted are entity/table names and the operation verb — which these regexes
+ * recover reliably for the JPQL/HQL subset real repositories use (SELECT / UPDATE / DELETE,
+ * FROM-shorthand, joins; see {@code SQL_KEYWORDS}' deliberate omissions for JPQL entity names such
+ * as {@code Order}/{@code Set}). A dedicated grammar would be a new ANTLR module for two dialects
+ * to recover the same two facts, so the regex path is retained and its use is made observable by
+ * {@code JpaMethodDetector.JPQL_HQL_REGEX_FALLBACKS} (one increment per JPQL/HQL string handled
+ * here) rather than hidden.
  */
 public final class SqlStatementParser {
 
