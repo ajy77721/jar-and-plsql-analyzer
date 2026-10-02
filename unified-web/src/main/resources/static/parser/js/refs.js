@@ -272,7 +272,10 @@ PA.refs = {
         var html = '<tr class="to-row">';
         if (schema) html += '<td><span class="ct-schema-badge" style="background:' + colorObj.bg + ';color:' + colorObj.fg + '">' + esc(schema) + '</span></td>';
         else html += '<td style="color:var(--text-muted);font-size:11px">-</td>';
-        html += '<td><span class="to-detail-proc" onclick="PA.showProcedure(\'' + PA.escJs(n.id || n.nodeId || name) + '\')">' + esc(name) + '</span></td>';
+        var schedBadge = n.scheduled
+            ? ' <span class="scope-badge" title="This procedure is run by a scheduled job" style="background:var(--badge-purple-bg);color:var(--badge-purple)">&#9200; scheduled</span>'
+            : '';
+        html += '<td><span class="to-detail-proc" onclick="PA.showProcedure(\'' + PA.escJs(n.id || n.nodeId || name) + '\')">' + esc(name) + '</span>' + schedBadge + '</td>';
         html += '<td>' + typeBadge + ' <span style="font-size:11px">' + esc(unitType) + '</span></td>';
         html += '<td>' + scopeBadge + '</td>';
         // Line(s) — its own column now, separate from Procedure. The call happens in the

@@ -21,7 +21,7 @@ options { tokenVocab = MySqlLexer; }
 // ─────────────────────────────────────────────────────────────────────────────
 
 compilationUnit
-    : (createRoutine | createTrigger | createView | createIndex | alterTable SEMI?) EOF
+    : (createRoutine | createTrigger | createView | createIndex | createEvent | alterTable SEMI?) EOF
     ;
 
 createRoutine
@@ -110,6 +110,45 @@ createIndex
 indexName       : (schemaRef DOT)? objectId ;
 indexTypeClause : USING indexType=(BTREE | HASH) ;
 indexColumn     : objectId direction=(ASC | DESC)? ;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CREATE EVENT  (MySQL's scheduled job)
+//   CREATE [DEFINER=...] EVENT [IF NOT EXISTS] name
+//     ON SCHEDULE {AT ts | EVERY n unit [STARTS ts] [ENDS ts]}
+//     [ON COMPLETION [NOT] PRESERVE] [ENABLE|DISABLE [ON SLAVE]] [COMMENT '...']
+//     DO body
+//
+// Wired as its own compilationUnit alternative so a standalone CREATE EVENT script parses
+// cleanly. The DO body deliberately reuses the routine grammar (compoundBlock /
+// routineStatement), so CALLs and DML inside an event are captured by exactly the same
+// visitor logic that handles procedure bodies — no parallel statement grammar. That is what
+// lets a scheduled event become an entry point with real outbound edges (e.g. an event whose
+// body CALLs a procedure yields the event→proc SCHEDULES edge).
+// ─────────────────────────────────────────────────────────────────────────────
+createEvent
+    : CREATE definerClause? EVENT ifNotExists? eventName
+      ON SCHEDULE eventSchedule
+      eventCompletion?
+      eventStatus?
+      eventComment?
+      DO eventBody
+      SEMI?
+    ;
+
+ifNotExists     : IF NOT EXISTS ;
+eventName       : (schemaRef DOT)? objectId ;
+eventSchedule
+    : AT expr
+    | EVERY expr intervalUnit (STARTS expr)? (ENDS expr)?
+    ;
+intervalUnit
+    : (YEAR | QUARTER | MONTH | WEEK | DAY | HOUR | MINUTE | SECOND | MICROSECOND)
+      (TO (YEAR | QUARTER | MONTH | WEEK | DAY | HOUR | MINUTE | SECOND | MICROSECOND))?
+    ;
+eventCompletion : ON COMPLETION (NOT)? PRESERVE ;
+eventStatus     : (ENABLE | DISABLE) (ON SLAVE)? ;
+eventComment    : COMMENT_KW SQ_STRING ;
+eventBody       : compoundBlock | routineStatement ;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ALTER TABLE
@@ -1148,4 +1187,11 @@ reservedAsId
     // The two non-reserved SELECT modifiers. The other four (DISTINCTROW, SQL_SMALL_RESULT,
     // SQL_BIG_RESULT, SQL_CALC_FOUND_ROWS) are reserved in MySQL and stay out.
     | SQL_BUFFER_RESULT | SQL_NO_CACHE
+    // Newly-tokenized CREATE EVENT keywords — all non-reserved in MySQL, and several are
+    // plausible real column/variable names (`event`, `schedule`, `day`, `month`, `week`,
+    // `hour`, `minute`, `second`, `enable`). Without them here, a body referencing such a
+    // column would stop lexing as ID and regress routines that parsed before.
+    | EVENT | SCHEDULE | EVERY | AT | STARTS | ENDS | COMPLETION | PRESERVE
+    | ENABLE | DISABLE | SLAVE | RENAME
+    | YEAR | QUARTER | MONTH | WEEK | DAY | HOUR | MINUTE | SECOND | MICROSECOND
     ;

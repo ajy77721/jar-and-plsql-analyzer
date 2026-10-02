@@ -79,6 +79,27 @@ public class FlowNode {
      * without a separate crawl/output folder per procedure. Empty for every other node.
      */
     private List<SubprogramSummaryInfo> members = new ArrayList<>();
+    /**
+     * Scheduled entry-point fields. {@code objectType="JOB"} (or MySQL {@code EVENT}) carries
+     * {@link #schedule} (repeat_interval / cron / EVERY …), {@link #jobEnabled} and
+     * {@link #jobTarget} (the routine it invokes). A normal routine that is the target of a
+     * discovered job carries {@code scheduled=true} — the "scheduled" badge. Additive and
+     * false/empty for every existing node, so prior output serialises byte-identically
+     * ({@code @JsonInclude(NON_EMPTY)} drops false/null/empty).
+     */
+    private String schedule;
+    private Boolean jobEnabled;
+    private String jobTarget;
+    private boolean scheduled;
+
+    public String getSchedule() { return schedule; }
+    public void setSchedule(String s) { this.schedule = s; }
+    public Boolean getJobEnabled() { return jobEnabled; }
+    public void setJobEnabled(Boolean e) { this.jobEnabled = e; }
+    public String getJobTarget() { return jobTarget; }
+    public void setJobTarget(String t) { this.jobTarget = t; }
+    public boolean isScheduled() { return scheduled; }
+    public void setScheduled(boolean s) { this.scheduled = s; }
 
     public List<SubprogramSummaryInfo> getMembers() { return members; }
     public void setMembers(List<SubprogramSummaryInfo> members) { this.members = members; }

@@ -28,9 +28,13 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     // ---------------------------------------------------------------
     // Builtin package names (upper-cased) used for call classification
     // ---------------------------------------------------------------
+    // DBMS_JOB / DBMS_SCHEDULER are deliberately NOT here: they are the scheduler entry points
+    // that many estates are rooted at, and classifying their calls as BUILTIN hid them. They are
+    // now classified EXTERNAL, so a DBMS_SCHEDULER.CREATE_JOB / DBMS_JOB.SUBMIT call is visible
+    // (and the scheduled jobs themselves are discovered as first-class JOB nodes).
     private static final Set<String> BUILTIN_PACKAGES = new HashSet<>(Arrays.asList(
         "DBMS_OUTPUT", "DBMS_SQL", "DBMS_LOB", "DBMS_UTILITY", "DBMS_LOCK",
-        "DBMS_RANDOM", "DBMS_CRYPTO", "DBMS_JOB", "DBMS_SCHEDULER", "DBMS_PIPE",
+        "DBMS_RANDOM", "DBMS_CRYPTO", "DBMS_PIPE",
         "DBMS_AQ", "DBMS_AQADM", "DBMS_APPLICATION_INFO", "DBMS_SESSION",
         "DBMS_METADATA", "DBMS_STATS", "DBMS_XMLDOM", "DBMS_XMLPARSER",
         "DBMS_XMLGEN", "DBMS_XMLQUERY", "DBMS_XMLSTORE", "DBMS_ALERT",

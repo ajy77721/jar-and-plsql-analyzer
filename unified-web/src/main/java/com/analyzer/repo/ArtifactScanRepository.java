@@ -212,6 +212,8 @@ public class ArtifactScanRepository implements AnalysisRepository {
                     () -> staticReader.getTriggers(name));
             case PLSQL_GLOBALS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.GLOBALS_INDEX,
                     () -> staticReader.getGlobals(name));
+            case PLSQL_JOBS -> view(name, com.plsqlanalyzer.web.parser.service.AnalysisViewStore.JOBS_INDEX,
+                    () -> staticReader.getJobs(name));
             case PLSQL_PROCEDURES -> readerFactory.getReader(name).getProcedures(name);
             // Static reader, matching getTables' own binding: the tables index is a crawler output,
             // not a node scan, and the Claude reader has nothing to add to it.

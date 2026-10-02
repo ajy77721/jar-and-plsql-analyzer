@@ -1083,6 +1083,29 @@ public class DependencyCrawler {
             }
         }
 
+        // Discover scheduled jobs from each dialect's scheduler catalog (Oracle DBMS_SCHEDULER /
+        // DBMS_JOB, SQL Server Agent, pg_cron, MySQL EVENT). Scheduled jobs are the roots of many
+        // estates and were previously invisible; each becomes a first-class node with a SCHEDULES
+        // edge to its target routine. Purely additive and non-fatal — a dialect without a scheduler
+        // catalog simply yields nothing.
+        if (chunkedWriter != null) {
+            long tJobs0 = System.nanoTime();
+            try {
+                JobDiscoverer jobDiscoverer = new JobDiscoverer(
+                        downloader.getConnManager(), schemaResolver, downloader);
+                List<Map<String, Object>> jobs = jobDiscoverer.discover();
+                discoverNanos.addAndGet(System.nanoTime() - tJobs0);
+                if (!jobs.isEmpty()) {
+                    List<Map<String, Object>> jobRows = JobSchedulerEmitter.emit(
+                            jobs, chunkedWriter, visited, errors, orderCounter);
+                    chunkedWriter.setDiscoveredJobs(jobRows);
+                }
+            } catch (Exception e) {
+                errors.add("Job discovery warning: " + e.getMessage());
+                log.info("[Crawler] Job discovery failed (non-fatal): " + e.getMessage());
+            }
+        }
+
         // Final merge: read all chunks back and assemble FlowResult
         if (chunkedWriter != null) {
             long tSave0 = System.nanoTime();
@@ -2503,7 +2526,8 @@ public class DependencyCrawler {
                 }
             }
 
-            if (isBuiltInPackage(targetPackage) || isBuiltInFunction(targetObject)) {
+            if (isBuiltInPackage(targetPackage) || isBuiltInFunction(targetObject)
+                    || isSchedulerPackage(targetPackage)) {
                 continue;
             }
 
@@ -2997,6 +3021,12 @@ public class DependencyCrawler {
      */
     private boolean isBuiltInPackage(String packageName) {
         if (packageName == null) return false;
+        // DBMS_SCHEDULER / DBMS_JOB are the scheduler entry points, not built-in routines to be
+        // suppressed — they are excluded from the builtin classification so a CREATE_JOB/SUBMIT
+        // call is no longer hidden. (Their jobs are discovered as first-class JOB nodes; the
+        // scheduler packages themselves have no PL/SQL source to crawl, so the BFS skip for them
+        // lives in enqueueExternalCalls, not here.)
+        if (isSchedulerPackage(packageName)) return false;
         String upper = packageName.toUpperCase();
         return upper.startsWith("DBMS_")
                 || upper.startsWith("UTL_")
@@ -3008,7 +3038,6 @@ public class DependencyCrawler {
                 || upper.equals("DBMS_UTILITY")
                 || upper.equals("DBMS_SESSION")
                 || upper.equals("DBMS_LOCK")
-                || upper.equals("DBMS_SCHEDULER")
                 || upper.equals("DBMS_METADATA")
                 || upper.equals("DBMS_XMLDOM")
                 || upper.equals("DBMS_XMLPARSER")
@@ -3021,6 +3050,13 @@ public class DependencyCrawler {
                 || upper.equals("HTF")
                 || upper.equals("HTP")
                 || upper.equals("OWA_UTIL");
+    }
+
+    /** True for the Oracle scheduler pseudo-packages (DBMS_SCHEDULER / legacy DBMS_JOB). */
+    private static boolean isSchedulerPackage(String packageName) {
+        if (packageName == null) return false;
+        String u = packageName.toUpperCase();
+        return u.equals("DBMS_SCHEDULER") || u.equals("DBMS_JOB");
     }
 
     /**

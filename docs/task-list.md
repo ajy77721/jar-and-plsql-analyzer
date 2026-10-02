@@ -29,6 +29,7 @@
 | 18 | False-pick fixes: globals noise (100%→0), SQLServer view base tables, DB2 phantom view + STATEMENT level, pseudo-table filter, trigger bodyCalls | false-pick audit | 78eca6e, 9f6fa1b |
 | 19 | Log archiving disabled; 87 .bak files removed; docs (writeup + 3-page tech doc + DOCX) | user decisions | 5955d17, 3ed2d7b, 8242fa6, d27fbae |
 | 20 | Clean slate: backup verified (3,438 files/445MB) → wipe → fresh analyses ×7 — 0 errors | user ask | live runs |
+| 24 | Scheduled/infra entry points: JOB/EVENT nodes + SCHEDULES edges ×4 dialects (Oracle DBMS_SCHEDULER/DBMS_JOB, SQL Server Agent, pg_cron, MySQL EVENT grammar), suppression removed, `/analyses/{n}/jobs` + "scheduled" badge | construct matrix | feat/scheduled-entry-points |
 
 ---
 
@@ -45,7 +46,7 @@
 
 | # | Task | Source audit | Priority |
 |---|---|---|---|
-| 24 | **Scheduled/infra entry points** (DBMS_SCHEDULER / SQL Agent / pg_cron / EVENTS): fetch strategies + a JOB unit type + SCHEDULES edges; stop suppressing as builtins | construct matrix | **AC:** a scheduled job appears as a node with a SCHEDULES edge to its target proc in EVERY dialect fixture; the suppression no longer hides it; facet/API visible; suites green |
+| 24 | ✅ **DONE (feat/scheduled-entry-points)** — **Scheduled/infra entry points** (DBMS_SCHEDULER / SQL Agent / pg_cron / EVENTS): fetch strategies + a JOB unit type + SCHEDULES edges; stop suppressing as builtins | construct matrix | **AC:** a scheduled job appears as a node with a SCHEDULES edge to its target proc in EVERY dialect fixture; the suppression no longer hides it; facet/API visible; suites green |
 | 25 | **Anonymous/DO blocks end-to-end** (Postgres plumbing + the Oracle splitter) | construct matrix | **AC:** a DO $$ block becomes an analyzable unit (Postgres); a DECLARE…BEGIN script section becomes a unit (Oracle); their table ops/calls captured; suites green |
 | 26 | **Result-set-returning procs marker** | construct matrix | **AC:** a returnsResultSet/resultSets field on the routine model per dialect (SQLServer implicit SELECTs count, Db2 WITH RETURN, Oracle REF CURSOR OUT, Postgres refcursor/SETOF); visible in the cursors facet + UI; golden tests |
 | 27 | **TVF/SETOF return shapes persisted** | construct matrix | **AC:** returnType/returnsColumns on SqlServer/Postgres routine models + through the multidb adapters into ParsedObject + visible in the facet |

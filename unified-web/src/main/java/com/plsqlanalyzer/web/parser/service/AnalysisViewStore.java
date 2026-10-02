@@ -157,6 +157,8 @@ public class AnalysisViewStore {
     public static final String GLOBAL_DETAIL_DIR = "global-detail";
     /** {@code {variable -> usedBy[]}} across packages. */
     public static final String GLOBALS_USED_BY = "globals-used-by.json";
+    /** The {@code /jobs} index — scheduled jobs with schedule, enabled flag and target routine. */
+    public static final String JOBS_INDEX = "jobs-index.json";
 
     /**
      * The {@code linear} grid neighbours precomputed at save time beside the default: the only two
@@ -185,7 +187,7 @@ public class AnalysisViewStore {
     private static final String[] FACET_VIEWS = {
             SEQUENCES, CURSORS, DYNAMIC_SQL, JOINS_SUMMARY,
             TABLE_JOINS, TABLE_COLUMNS, COMPLEXITY, SUMMARY_STATS, CALLERS, SEARCH,
-            VIEWS_INDEX, TRIGGERS_INDEX, GLOBALS_INDEX
+            VIEWS_INDEX, TRIGGERS_INDEX, GLOBALS_INDEX, JOBS_INDEX
     };
 
     private final ArtifactStore store;

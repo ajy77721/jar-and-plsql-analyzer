@@ -131,6 +131,11 @@ public class StaticAnalysisReader implements AnalysisDataReader {
         return estateFacet.getGlobalUsedBy(name, variable);
     }
 
+    /** Scheduled jobs with schedule/enabled/target — see {@link EstateFacetReader#getJobs(String)}. */
+    public JsonNode getJobs(String name) throws IOException {
+        return estateFacet.getJobs(name);
+    }
+
     /** {@code {VIEW -> usedBy[]}} whole-analysis map — the {@code views/views-used-by.json} sidecar. */
     public JsonNode getViewsUsedByMap(String name) throws IOException {
         return estateFacet.getViewsUsedByMap(name);
@@ -193,12 +198,65 @@ public class StaticAnalysisReader implements AnalysisDataReader {
 
     @Override
     public JsonNode getProcedures(String name) throws IOException {
-        return indexFacet.getProcedures(name);
+        JsonNode nodes = indexFacet.getProcedures(name);
+        if (nodes == null || !nodes.isArray()) return nodes;
+        // "scheduled" badge: a procedure that is the target of a discovered scheduled job is
+        // stamped `scheduled:true` so the procedures facet can show it. Read from the crawler's
+        // api/jobs/index.json; an analysis with no jobs returns the nodes array untouched
+        // (byte-identical), so existing output is unchanged.
+        Set<String> targets = scheduledTargets(name);
+        if (targets.isEmpty()) return nodes;
+        ArrayNode out = mapper.createArrayNode();
+        for (JsonNode n : nodes) {
+            String nodeId = n.path("nodeId").asText("");
+            String nodeName = n.path("name").asText("");
+            boolean scheduled = targets.contains(nodeId.toUpperCase(Locale.ROOT))
+                    || targets.contains(nodeName.toUpperCase(Locale.ROOT));
+            if (!scheduled) {
+                out.add(n);
+            } else {
+                ObjectNode copy = n.deepCopy();
+                copy.put("scheduled", true);
+                out.add(copy);
+            }
+        }
+        return out;
+    }
+
+    /** Node ids / bare names of every routine targeted by a discovered scheduled job. */
+    private Set<String> scheduledTargets(String name) {
+        Set<String> out = new HashSet<>();
+        try {
+            JsonNode doc = getJobsIndex(name);
+            if (doc == null) return out;
+            for (JsonNode j : doc.path("jobs")) {
+                String targetNodeId = j.path("targetNodeId").asText("");
+                if (!targetNodeId.isEmpty()) out.add(targetNodeId.toUpperCase(Locale.ROOT));
+                String target = j.path("target").asText("");
+                if (!target.isEmpty()) out.add(target.toUpperCase(Locale.ROOT));
+            }
+        } catch (Exception e) {
+            // No jobs artifact (or unreadable) — no scheduled badges. Not an error.
+        }
+        return out;
     }
 
     @Override
     public JsonNode getTables(String name) throws IOException {
         return tableFacet.getTables(name);
+    }
+
+    /**
+     * The crawler's {@code api/jobs/index.json} document ({@code {totalJobs, jobs:[…]}}), or null
+     * when the analysis has none. Scheduled jobs are a crawler output (not a node scan), so this is
+     * a raw artifact read, exactly like {@code getTables}.
+     */
+    public JsonNode getJobsIndex(String name) throws IOException {
+        ArtifactKey key = resolveKey(name, "api/jobs/index.json");
+        if (!store.exists(key)) return null;
+        try (InputStream in = openRead(key)) {
+            return mapper.readTree(in);
+        }
     }
 
     /** Root scalars of the tables index only — see {@link TableFacetReader#getTablesSummary}. */

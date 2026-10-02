@@ -108,4 +108,41 @@ public class MySqlSourceFetchStrategy implements SourceFetchStrategy {
         if (objectType == null) return "PROCEDURE";
         return objectType.toUpperCase().contains("FUNCTION") ? "FUNCTION" : "PROCEDURE";
     }
+
+    // ── Scheduled jobs (MySQL EVENT) ─────────────────────────────────────────────────────────
+    // MySQL's scheduler is the EVENT object. information_schema.EVENTS carries the schedule
+    // (EXECUTE_AT for a one-shot, INTERVAL_VALUE/INTERVAL_FIELD for a recurring one), the status
+    // and the DO body (EVENT_DEFINITION). The body is what the crawler parses like a routine, so
+    // a CALL inside it yields the event→proc SCHEDULES edge. The node type is EVENT, not JOB.
+    @Override
+    public List<JobRef> listJobs(Connection conn, String schema) throws SQLException {
+        String sql = schema != null
+                ? "SELECT EVENT_SCHEMA, EVENT_NAME, EVENT_DEFINITION, EXECUTE_AT, INTERVAL_VALUE, "
+                + "INTERVAL_FIELD, STATUS FROM INFORMATION_SCHEMA.EVENTS WHERE EVENT_SCHEMA = ? "
+                + "ORDER BY EVENT_NAME"
+                : "SELECT EVENT_SCHEMA, EVENT_NAME, EVENT_DEFINITION, EXECUTE_AT, INTERVAL_VALUE, "
+                + "INTERVAL_FIELD, STATUS FROM INFORMATION_SCHEMA.EVENTS ORDER BY EVENT_SCHEMA, EVENT_NAME";
+        List<JobRef> out = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (schema != null) ps.setString(1, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("EVENT_NAME");
+                    if (name == null) continue;
+                    String body = rs.getString("EVENT_DEFINITION");
+                    String intervalValue = rs.getString("INTERVAL_VALUE");
+                    String intervalField = rs.getString("INTERVAL_FIELD");
+                    String executeAt = rs.getString("EXECUTE_AT");
+                    String schedule = (intervalValue != null && !intervalValue.isBlank())
+                            ? "EVERY " + intervalValue + " " + intervalField
+                            : (executeAt != null ? "AT " + executeAt : null);
+                    String status = rs.getString("STATUS");
+                    Boolean enabled = status == null ? null : "ENABLED".equalsIgnoreCase(status);
+                    out.add(new JobRef(name, rs.getString("EVENT_SCHEMA"), schedule, enabled,
+                            JobActionParser.targetFromAction(body), body, "EVENT"));
+                }
+            }
+        }
+        return out;
+    }
 }

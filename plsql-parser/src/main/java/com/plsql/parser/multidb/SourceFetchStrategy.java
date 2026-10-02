@@ -2,6 +2,7 @@ package com.plsql.parser.multidb;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 
 /**
  * Abstracts how stored procedure / function source is fetched from a database.
@@ -54,6 +55,62 @@ public interface SourceFetchStrategy {
      * SYSCAT vs. Postgres pg_get_functiondef) determines whether truncation is even possible.
      */
     boolean isTruncated(String source);
+
+    /**
+     * List the scheduled jobs visible to this connection in the given schema — Oracle
+     * DBMS_SCHEDULER ({@code ALL_SCHEDULER_JOBS}) and legacy DBMS_JOB ({@code ALL_JOBS}),
+     * SQL Server Agent ({@code msdb.dbo.sysjobs}), pg_cron ({@code cron.job}) or MySQL
+     * ({@code information_schema.EVENTS}).
+     *
+     * <p>Dialects/catalogs that are not present (pg_cron not installed, no privileges, a
+     * non-scheduler database) return an empty list rather than throwing — the crawl must
+     * degrade honestly. Implementations should still declare {@code throws SQLException} for
+     * genuine driver failures; callers wrap the whole call and treat failure as "no jobs".
+     */
+    default List<JobRef> listJobs(Connection conn, String schema) throws SQLException {
+        return java.util.Collections.emptyList();
+    }
+
+    /**
+     * Fetch a job's action source by name when the catalog stores it separately from the job row
+     * (Oracle {@code USER_SOURCE}/{@code ALL_SOURCE} type {@code 'JOB'}). Returns null when the
+     * dialect has no such source or the job has none.
+     */
+    default String fetchJobAction(Connection conn, String jobName, String schema)
+            throws SQLException {
+        return null;
+    }
+
+    /** One scheduled job discovered from a dialect's scheduler catalog. */
+    class JobRef {
+        public final String name;
+        public final String schema;
+        /** Human-readable schedule: repeat_interval / cron expression / SQL Agent schedule / EVERY … */
+        public final String schedule;
+        /** TRUE enabled, FALSE disabled, null unknown. */
+        public final Boolean enabled;
+        /** The routine the job invokes (bare name or PACKAGE.MEMBER), or null when not statically known. */
+        public final String target;
+        /** Inline action/program source when the catalog carries it (SQL Agent step command, pg_cron command). */
+        public final String action;
+        /** Node type: "JOB" for Oracle/SQL Server/Postgres, "EVENT" for MySQL. */
+        public final String type;
+
+        public JobRef(String name, String schema, String schedule, Boolean enabled,
+                      String target, String action, String type) {
+            this.name = name;
+            this.schema = schema;
+            this.schedule = schedule;
+            this.enabled = enabled;
+            this.target = target;
+            this.action = action;
+            this.type = type == null ? "JOB" : type;
+        }
+
+        @Override public String toString() {
+            return schema + "." + name + " [" + schedule + "]";
+        }
+    }
 
     /** Lightweight object descriptor returned by listObjects(). */
     class ObjectRef {
