@@ -140,8 +140,14 @@ public final class WriteBehindStore implements ArtifactStore {
     /** Spill record magic — 'W''B''S''1' — so a foreign/corrupt file is rejected, not replayed. */
     private static final int SPILL_MAGIC = 0x57425331;
 
-    /** Stores with a spill dir, for the single shutdown hook. */
-    private static final Set<WriteBehindStore> ACTIVE = ConcurrentHashMap.newKeySet();
+    /**
+     * Stores with a spill dir, for the single shutdown hook. <b>Weak</b> keys: a per-user store is
+     * built on every connect, so a strong set would grow without bound over a long-lived process.
+     * A collected store has no in-flight uploads to flush, so dropping it is harmless.
+     */
+    private static final Set<WriteBehindStore> ACTIVE =
+            java.util.Collections.synchronizedSet(
+                    java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
     private static final AtomicBoolean SHUTDOWN_HOOK_REGISTERED = new AtomicBoolean();
     private static final AtomicLong SPILL_SEQ = new AtomicLong();
 
@@ -308,7 +314,13 @@ public final class WriteBehindStore implements ArtifactStore {
         if (!SHUTDOWN_HOOK_REGISTERED.compareAndSet(false, true)) return;
         try {
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                for (WriteBehindStore store : ACTIVE) {
+                // Snapshot under the set's lock: ACTIVE is a synchronized WeakHashMap-backed set,
+                // and iterating it while a connect adds a store would otherwise throw.
+                List<WriteBehindStore> stores;
+                synchronized (ACTIVE) {
+                    stores = new ArrayList<>(ACTIVE);
+                }
+                for (WriteBehindStore store : stores) {
                     try {
                         boolean drained = store.awaitPending(SHUTDOWN_FLUSH_TIMEOUT_MS);
                         if (!drained) {
