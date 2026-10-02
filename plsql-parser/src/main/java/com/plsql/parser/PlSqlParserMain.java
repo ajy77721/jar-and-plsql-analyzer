@@ -47,10 +47,10 @@ public class PlSqlParserMain {
         // remote backend is a change to StorageFactory alone.
         for (String arg : args) {
             if ("--flow".equals(arg)) {
-                // FlowAnalysisMain.runCli is itself a true CLI entry point (it calls
-                // System.exit on failure internally) — this call only returns on success.
-                FlowAnalysisMain.runCli(args);
-                return 0;
+                // FlowAnalysisMain.runCli returns an exit code and never calls System.exit, so
+                // this in-process-safe method stays safe even for --flow. Propagate its code;
+                // only main() below turns it into a JVM exit.
+                return FlowAnalysisMain.runCli(args);
             }
         }
 

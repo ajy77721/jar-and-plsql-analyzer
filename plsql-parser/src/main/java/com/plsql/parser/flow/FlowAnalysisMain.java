@@ -118,9 +118,10 @@ public class FlowAnalysisMain {
     }
 
     /**
-     * Parses CLI arguments into {@link Options}. Exits the JVM on a usage error, as before.
+     * Parses CLI arguments into {@link Options}. Throws on a usage error; never exits the JVM.
      *
      * @param args remaining arguments after --flow has been consumed
+     * @throws IllegalArgumentException on a usage error
      */
     public static Options parseArgs(String[] args) {
         Options o = new Options();
@@ -229,28 +230,42 @@ public class FlowAnalysisMain {
     }
 
     /**
-     * Only called from {@link #parseArgs}, which is only ever called from {@link #runCli} (the
-     * true CLI entry point, never invoked in-process — the web app builds {@link Options}
-     * directly, see {@code AnalysisService}). If that ever changes, this must stop calling
-     * System.exit, the same way {@link #run} had to when it turned out to run on the web app's
-     * own queue worker thread.
+     * Reports a usage error by <em>throwing</em>, never by exiting the JVM.
+     *
+     * <p>This used to call {@code System.exit(1)}. {@link #parseArgs} is public and documented as
+     * callable in-process, so an exit here was a latent whole-server kill: one bad argument string
+     * passed to an embedded caller would have taken the application down. {@link #runCli} catches
+     * this, prints usage and returns a non-zero exit code; the only place that terminates the
+     * process is {@link com.plsql.parser.PlSqlParserMain#main(String[])}.
      */
     private static void fail(String message) {
-        System.err.println("Error: " + message);
-        printUsage();
-        System.exit(1);
+        throw new IllegalArgumentException(message);
     }
 
     /**
      * CLI shim: parse arguments, create the store for {@code --data-root}, run.
      *
+     * <p>Returns an exit code instead of calling {@link System#exit}, so this method — and the
+     * {@link #parseArgs} it calls — stay safe to invoke in-process (e.g. from an embedding server
+     * or from {@link com.plsql.parser.PlSqlParserMain#runCli}). Only the true process entry point,
+     * {@link com.plsql.parser.PlSqlParserMain#main(String[])}, turns the returned code into a JVM exit.
+     *
      * <p>This is the ONE place in this module that names a filesystem path for artifact data,
      * and only because a command line has nowhere else to say where the data root is. Everything
      * downstream is key-based; pointing the CLI at a remote backend is a change to
      * {@code StorageFactory} alone.
+     *
+     * @return 0 on success, 1 on a usage or runtime failure
      */
-    public static void runCli(String[] args) {
-        Options opts = parseArgs(args);
+    public static int runCli(String[] args) {
+        Options opts;
+        try {
+            opts = parseArgs(args);
+        } catch (IllegalArgumentException usageError) {
+            System.err.println("Error: " + usageError.getMessage());
+            printUsage();
+            return 1;
+        }
         try {
             // Resolve the mode rather than assuming local, so a CLI run honours app.storage.mode
             // exactly as the web app does. Hardcoding local here would write to disk while the
@@ -258,12 +273,14 @@ public class FlowAnalysisMain {
             run(StorageFactory.create(
                     StorageFactory.settingsFor(System.getProperty("app.storage.mode"),
                                                Path.of(opts.dataRoot))), opts);
+            return 0;
         } catch (RuntimeException e) {
-            // run() no longer calls System.exit itself (see its own doc comment) — only the true
-            // standalone CLI entry point terminates the process on failure.
+            // run() no longer calls System.exit itself (see its own doc comment) — it rethrows so
+            // the web app's queue worker can mark the job FAILED. Only the true standalone CLI
+            // entry point (PlSqlParserMain.main) turns a non-zero return into a process exit.
             System.err.println("Fatal error in flow analysis: " + e.getMessage());
             e.printStackTrace(System.err);
-            System.exit(1);
+            return 1;
         }
     }
 
@@ -403,7 +420,8 @@ public class FlowAnalysisMain {
             // class's own doc comment). A single bad request (e.g. an unresolvable DB host) hit
             // this catch block on the worker thread and took down the ENTIRE running server with
             // it — every other user/job died along with the one bad analysis. Rethrow instead;
-            // runCli() catches this and is the only place that still terminates the process.
+            // runCli() turns this into a non-zero return code, and only PlSqlParserMain.main —
+            // the true process entry point — exits the JVM.
             System.err.println("Fatal error in flow analysis: " + e.getMessage());
             e.printStackTrace(System.err);
             // The empty-crawl guard is an IllegalStateException by contract (see DependencyCrawler).
