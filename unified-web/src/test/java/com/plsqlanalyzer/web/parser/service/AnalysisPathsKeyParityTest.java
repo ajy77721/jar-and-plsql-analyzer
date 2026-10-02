@@ -24,8 +24,14 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class AnalysisPathsKeyParityTest {
 
-    /** A fully scoped identity name: DBTYPE ~ PROJECT ~ ENV ~ OBJECT. */
-    private static final String NAME = "DB2~Db2Demo~local~ERP_USP_RUN_CYCLE";
+    /**
+     * A fully scoped identity name: DBTYPE ~ PROJECT ~ ENV ~ OBJECT.
+     *
+     * <p>Canonical (uppercase) as of task #33: {@link AnalysisPaths} now normalises every lookup
+     * through {@link AnalysisPaths#canonical}, so the key/path forms both address the canonical
+     * spelling. The mixed-case input is exercised by {@link #mixedCaseResolvesToTheSameKeys}.
+     */
+    private static final String NAME = "DB2~DB2DEMO~LOCAL~ERP_USP_RUN_CYCLE";
     /** A scopeless (legacy flat) name — no context segments. */
     private static final String FLAT = "ERP_USP_RUN_CYCLE";
 
@@ -100,7 +106,7 @@ class AnalysisPathsKeyParityTest {
     @DisplayName("the '~' delimiter becomes nested key segments, never one flat segment")
     void separatorExpandsToSegments() {
         assertEquals(
-                java.util.List.of("plsql-parse", "DB2", "Db2Demo", "local", "ERP_USP_RUN_CYCLE"),
+                java.util.List.of("plsql-parse", "DB2", "DB2DEMO", "LOCAL", "ERP_USP_RUN_CYCLE"),
                 AnalysisPaths.dirKey(NAME).segments());
         // The Claude sidecar is the deliberate exception: it is stored FLAT, keyed by the whole
         // identity name, matching Path.of(dataBaseDir).resolve(analysisName).
@@ -123,5 +129,36 @@ class AnalysisPathsKeyParityTest {
         String messy = AnalysisPaths.name("db2", "My Project", "pre-prod", "erp.usp run/cycle");
         assertParseParity("messy name", AnalysisPaths.dir(PARSE_BASE, messy),
                 AnalysisPaths.dirKey(messy));
+    }
+
+    // ── Task #33: case-insensitive identity ─────────────────────────────────────
+
+    @Test
+    @DisplayName("mixed-case identity resolves to the same keys as its canonical spelling")
+    void mixedCaseResolvesToTheSameKeys() {
+        String mixed = "DB2~Db2Demo~local~ERP_USP_RUN_CYCLE";
+        assertEquals(NAME, AnalysisPaths.canonical(mixed),
+                "OracleDemo / ORACLEDEMO must canonicalise to one form");
+
+        assertEquals(AnalysisPaths.dirKey(NAME), AnalysisPaths.dirKey(mixed));
+        assertEquals(AnalysisPaths.parentDirKey(NAME), AnalysisPaths.parentDirKey(mixed));
+        assertEquals(AnalysisPaths.resolveKey(NAME, "api/index.json"),
+                AnalysisPaths.resolveKey(mixed, "api/index.json"));
+        assertEquals(AnalysisPaths.claudeDirKey(NAME), AnalysisPaths.claudeDirKey(mixed));
+        assertEquals(AnalysisPaths.claudeFileKey(NAME, "analysis_claude.json"),
+                AnalysisPaths.claudeFileKey(mixed, "analysis_claude.json"));
+        assertEquals(AnalysisPaths.dir(PARSE_BASE, NAME), AnalysisPaths.dir(PARSE_BASE, mixed));
+        assertEquals(AnalysisPaths.resolve(PARSE_BASE, NAME, "api/tables/index.json"),
+                AnalysisPaths.resolve(PARSE_BASE, mixed, "api/tables/index.json"));
+        assertEquals(AnalysisPaths.leaf(NAME), AnalysisPaths.leaf(mixed));
+    }
+
+    @Test
+    @DisplayName("canonical() is idempotent and preserves null/empty")
+    void canonicalIsIdempotent() {
+        assertEquals(NAME, AnalysisPaths.canonical(NAME));
+        assertEquals(NAME, AnalysisPaths.canonical(AnalysisPaths.canonical(NAME)));
+        assertNull(AnalysisPaths.canonical(null));
+        assertEquals("", AnalysisPaths.canonical(""));
     }
 }

@@ -48,20 +48,25 @@ public class SqlServerSynonymConvertAuditTest {
     // ─────────────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("AUDIT 1a: bare CREATE SYNONYM ... FOR ... as a standalone script (top-level, not inside a procedure)")
+    @DisplayName("AUDIT 1a: bare CREATE SYNONYM ... FOR ... as a standalone script (top-level) — now a valid compilation unit")
     void auditCreateSynonymStandalone() {
         String sql = "CREATE SYNONYM dbo.OrdersSyn FOR dbo.Orders;";
         SqlServerRoutineInfo r = parse(sql);
         System.out.println("[AUDIT 1a] tableOps=" + r.getTableOps() + " calls=" + r.getCalls()
                 + " errors=" + r.getErrors());
-        // GRAMMAR FACT: compilationUnit = (routineDefinition | triggerDefinition | viewDefinition)? EOF.
-        // A bare CREATE SYNONYM statement is none of those three, so the parser cannot match the
-        // optional alternative and then immediately require EOF — this is a hard parse failure
-        // (recorded in result.getErrors()), not a silently-accepted-but-unrecognized statement.
-        assertFalse(r.getErrors().isEmpty(),
-                "EXPECTED-BUG-EVIDENCE: a standalone CREATE SYNONYM statement is not one of " +
-                "routineDefinition/triggerDefinition/viewDefinition, so it cannot even parse at the top level");
-        assertTrue(r.getTableOps().isEmpty(), "no synonym info of any kind is produced");
+        // FIXED (task #30): compilationUnit now lists `createSynonym SEMI?` as a valid alternative,
+        // so a standalone CREATE SYNONYM parses cleanly and visitCreateSynonym records the same two
+        // table ops as the in-body path: the synonym object (CREATE) and its target (SELECT, a
+        // read-through reference). This replaces the previous EXPECTED-BUG-EVIDENCE assertions, which
+        // pinned the old behaviour (hard parse failure, no table ops) — the migration deliberately
+        // makes standalone synonyms valid, so the pinned expectation is updated here.
+        assertTrue(r.getErrors().isEmpty(),
+                "a standalone CREATE SYNONYM must now parse cleanly: " + r.getErrors());
+        List<String> names = tableNames(r);
+        assertTrue(names.contains("ORDERSSYN"),
+                "the synonym object must be recorded as a table op: " + r.getTableOps());
+        assertTrue(names.contains("ORDERS"),
+                "the synonym's target must be recorded as a read-through table op: " + r.getTableOps());
     }
 
     @Test

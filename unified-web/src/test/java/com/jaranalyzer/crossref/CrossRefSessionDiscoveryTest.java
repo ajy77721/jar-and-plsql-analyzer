@@ -31,7 +31,9 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class CrossRefSessionDiscoveryTest {
 
-    private static final String NESTED = "DB2~Db2Demo~local~ERP_USP_RUN_CYCLE";
+    // Canonical (uppercase) spelling as stored by AnalysisPaths.name/seg (task #33 makes lookups
+    // canonical, so the directory — and therefore the discovered sessionId — is uppercase).
+    private static final String NESTED = "DB2~DB2DEMO~LOCAL~ERP_USP_RUN_CYCLE";
     private static final String FLAT   = "PG_CNU_INTERFACE_PC_MT_PREV_POL_INFO";
 
     @TempDir

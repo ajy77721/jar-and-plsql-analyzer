@@ -279,7 +279,8 @@ public class ClaudeCallLogger {
      * {@code Path.of(dataBaseDir)} would have silently pinned this to the local filesystem.
      */
     private static ArtifactKey logFileKey(String analysisName) {
-        return ArtifactKey.of(CLAUDE_ROOT, analysisName, "claude", CALL_LOG_FILE);
+        // Task #33: canonical identity so the log for OracleDemo is the same file as ORACLEDEMO's.
+        return ArtifactKey.of(CLAUDE_ROOT, AnalysisPaths.canonical(analysisName), "claude", CALL_LOG_FILE);
     }
 
     @SuppressWarnings("unchecked")

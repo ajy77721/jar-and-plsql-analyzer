@@ -141,4 +141,90 @@ public class SqlServerGrammarFirstMigrationTest {
         assertTrue(tableNames(r).contains("ORDERS"),
                 "the fallback must still recover the subquery's table: " + tableNames(r));
     }
+
+    // ── Task #30: qualified-call + CASE contexts ─────────────────────────────────
+
+    @Test
+    @DisplayName("Task #30: a schema-qualified call resolves from a callExpression node, no fallback")
+    void qualifiedCallResolvedFromParseTree() {
+        long before = SqlServerAnalysisVisitor.QUALIFIED_CALL_REGEX_FALLBACKS.get();
+        String sql = "CREATE PROCEDURE p AS\n" +
+                "BEGIN\n" +
+                "  SET @total = sales.fn_OrderTotal(@orderId);\n" +
+                "END";
+        SqlServerRoutineInfo r = parse(sql);
+        assertTrue(r.getErrors() == null || r.getErrors().isEmpty(), "should parse cleanly: " + r.getErrors());
+        assertTrue(r.getCalls().stream().anyMatch(c -> "fn_OrderTotal".equalsIgnoreCase(c.getName())
+                        && "sales".equalsIgnoreCase(c.getSchema())),
+                "the qualified call must be captured from the parse tree: " + r.getCalls());
+        assertEquals(before, SqlServerAnalysisVisitor.QUALIFIED_CALL_REGEX_FALLBACKS.get(),
+                "the structured path must not touch the qualified-call regex fallback");
+    }
+
+    @Test
+    @DisplayName("Task #30: a call the grammar cannot structure (PRINT body) → counted regex fallback")
+    void qualifiedCallFallbackIsCounted() {
+        long before = SqlServerAnalysisVisitor.QUALIFIED_CALL_REGEX_FALLBACKS.get();
+        // PRINT falls into otherStatement's token-soup catch-all, so no callExpression node exists;
+        // the legacy scan must still recover the call — and be counted.
+        String sql = "CREATE PROCEDURE p AS\n" +
+                "BEGIN\n" +
+                "  PRINT dbo.fn_Log(@msg);\n" +
+                "END";
+        SqlServerRoutineInfo r = parse(sql);
+        assertTrue(r.getErrors() == null || r.getErrors().isEmpty(), "should parse cleanly: " + r.getErrors());
+        assertTrue(SqlServerAnalysisVisitor.QUALIFIED_CALL_REGEX_FALLBACKS.get() > before,
+                "the counted qualified-call regex fallback must have run");
+        assertTrue(r.getCalls().stream().anyMatch(c -> "fn_Log".equalsIgnoreCase(c.getName())),
+                "the fallback must still recover the PRINT-body call: " + r.getCalls());
+    }
+
+    @Test
+    @DisplayName("Task #30: a CASE expression resolves from a caseExpression node, no fallback")
+    void caseResolvedFromParseTree() {
+        long before = SqlServerAnalysisVisitor.CASE_REGEX_FALLBACKS.get();
+        String sql = "CREATE PROCEDURE p AS\n" +
+                "BEGIN\n" +
+                "  RETURN CASE WHEN @x > 0 THEN 1 ELSE 0 END;\n" +
+                "END";
+        SqlServerRoutineInfo r = parse(sql);
+        assertTrue(r.getErrors() == null || r.getErrors().isEmpty(), "should parse cleanly: " + r.getErrors());
+        assertEquals(1, r.getStatements().stream()
+                        .filter(s -> "CASE".equals(s.getType())).count(),
+                "exactly one CASE marker from the structured context: " + r.getStatements());
+        assertEquals(before, SqlServerAnalysisVisitor.CASE_REGEX_FALLBACKS.get(),
+                "the structured path must not touch the CASE regex fallback");
+    }
+
+    @Test
+    @DisplayName("Task #30: a CASE the grammar cannot structure (nested subquery) → counted regex fallback")
+    void caseFallbackIsCounted() {
+        long before = SqlServerAnalysisVisitor.CASE_REGEX_FALLBACKS.get();
+        // The parenthesised subquery is consumed as a balanced parenGroup, so its CASE is not a
+        // caseExpression node; the legacy scan must still count it — and be counted.
+        String sql = "CREATE PROCEDURE p AS\n" +
+                "BEGIN\n" +
+                "  SELECT (SELECT CASE WHEN x > 0 THEN 1 ELSE 0 END FROM dbo.T) AS c FROM dbo.Orders;\n" +
+                "END";
+        SqlServerRoutineInfo r = parse(sql);
+        assertTrue(r.getErrors() == null || r.getErrors().isEmpty(), "should parse cleanly: " + r.getErrors());
+        assertTrue(SqlServerAnalysisVisitor.CASE_REGEX_FALLBACKS.get() > before,
+                "the counted CASE regex fallback must have run");
+        assertTrue(r.getStatements().stream().anyMatch(s -> "CASE".equals(s.getType())),
+                "the fallback must still count the subquery CASE: " + r.getStatements());
+    }
+
+    @Test
+    @DisplayName("Task #30: standalone CREATE SYNONYM is a valid compilation unit")
+    void standaloneSynonymResolvedFromParseTree() {
+        long before = SqlServerAnalysisVisitor.SYNONYM_REGEX_FALLBACKS.get();
+        SqlServerRoutineInfo r = parse("CREATE SYNONYM dbo.OrdersSyn FOR dbo.Orders;");
+        assertTrue(r.getErrors() == null || r.getErrors().isEmpty(),
+                "a standalone synonym must parse cleanly: " + r.getErrors());
+        List<String> names = tableNames(r);
+        assertTrue(names.contains("ORDERSSYN"), "synonym object recorded: " + names);
+        assertTrue(names.contains("ORDERS"), "synonym target recorded: " + names);
+        assertEquals(before, SqlServerAnalysisVisitor.SYNONYM_REGEX_FALLBACKS.get(),
+                "the structured compilation-unit path must not touch the synonym regex fallback");
+    }
 }

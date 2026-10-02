@@ -17,9 +17,15 @@ options { tokenVocab = SqlServerLexer; }
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
+// A standalone CREATE SYNONYM (task #30) is now a first-class compilation unit. Previously the
+// optional alternative list had no synonym form, so `CREATE SYNONYM s.t FOR s2.t2;` at the top
+// level could not match and the required EOF failed — a hard parse error. createSynonym already
+// existed for the in-body case; reusing it here keeps one grammar shape for both, and visitCreateSynonym
+// records the synonym + target table ops identically. The trailing SEMI? is local to this
+// alternative (routineDefinition/viewDefinition consume their own trailing text).
 compilationUnit
     : (routineDefinition | triggerDefinition | viewDefinition | createSequence
-       | createType | createIndex | alterTable)? EOF
+       | createType | createIndex | createSynonym SEMI? | alterTable)? EOF
     ;
 
 // ALTER TABLE [schema.]table
@@ -398,7 +404,7 @@ throwArg
 // not part of an individual argument's expression).
 throwArgAtom
     : parenGroup
-    | CASE stmtToken* END
+    | caseExpression
     | literal
     | AT_VAR
     | AT_AT_VAR
@@ -735,12 +741,17 @@ stmtToken
     // rather than by promoting them to lexer tokens, for the same reason APPLY is: promoting
     // them would retokenise the entire corpus, a far larger blast radius than this is worth.
     | setOperator SELECT
-    | CASE stmtToken* END
+    | caseExpression
     // NEXT VALUE FOR <sequence> (batch 2): a real node so sequence USAGE is read off the tree
     // instead of being scanned for. Placed before the catch-all; the catch-all still matches the
     // bare NEXT/VALUE/FOR words if the full shape is absent, exactly as before.
     | nextValueFor
     | existsPredicate
+    // Task #30: a schema-qualified call expression (`dbo.fn(@x)`, `sales.usp_X(...)`) is now a real
+    // node, so proc→function / →TVF edges are read off the tree instead of the QUALIFIED_CALL_PATTERN
+    // regex. Placed before the catch-all; an unqualified call (`ISNULL(x,0)`) also matches this rule
+    // but the visitor ignores anything without a qualifier, exactly as the regex required a dot.
+    | callExpression
     | ~(SEMI | BEGIN | END | CASE | EXEC | EXECUTE | DECLARE | IF | WHILE | INSERT | UPDATE | DELETE | SELECT | RETURN | CREATE | LPAREN | RPAREN)
     ;
 
@@ -876,7 +887,7 @@ selectList
 selectListToken
     : subquery
     | LPAREN stmtToken* RPAREN
-    | CASE stmtToken* END
+    | caseExpression
     | ~(FROM | INTO | SEMI | BEGIN | END | CASE | LPAREN | RPAREN
         | SELECT | WHERE | GROUP | ORDER | HAVING | UNION)
     ;
@@ -940,9 +951,9 @@ tableSource
 // source with a parenGroup is a call, one without is a table, and no text scanning is involved.
 //
 // Note this does NOT make a TVF into a table op — the visitor still records none, so the
-// phantom-avoidance the textual guard existed for is fully preserved (the call itself is already
-// in the call graph via QUALIFIED_CALL_PATTERN). What it buys is that such a query is now
-// PARSEABLE by these rules at all, so the joins hanging off a TVF base are no longer lost with it.
+// phantom-avoidance the textual guard existed for is fully preserved (the call itself is captured
+// as a callExpression node, task #30). What it buys is that such a query is now PARSEABLE by these
+// rules at all, so the joins hanging off a TVF base are no longer lost with it.
 tableSourceItem
     : qualifiedTableName parenGroup? tableAlias? tableHint*
     | derivedTable tableAlias aliasColumnList?
@@ -1034,7 +1045,7 @@ joinCondition
 
 joinConditionToken
     : LPAREN stmtToken* RPAREN
-    | CASE stmtToken* END
+    | caseExpression
     | ~(SEMI | BEGIN | END | CASE | LPAREN | RPAREN | COMMA
         | JOIN | INNER | LEFT | RIGHT | FULL | CROSS | OUTER
         | SELECT | FROM | WHERE | GROUP | ORDER | HAVING | UNION)
@@ -1058,7 +1069,7 @@ queryRest
 // exactly the way the real UNION token does.
 queryRestToken
     : subquery
-    | CASE stmtToken* END
+    | caseExpression
     | LPAREN stmtToken* RPAREN
     | {!"INTERSECT".equalsIgnoreCase(_input.LT(1).getText())
         && !"EXCEPT".equalsIgnoreCase(_input.LT(1).getText())}?
@@ -1069,6 +1080,26 @@ queryRestToken
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression (simplified, enough to parse conditions and SET rhs)
 // ─────────────────────────────────────────────────────────────────────────────
+
+// CASE expression (simple or searched) — named so the statement inventory can count one context
+// per occurrence (task #30) instead of scanning raw text. Nested CASEs are distinct child
+// contexts, so counting per-context yields exactly one record per occurrence.
+caseExpression
+    : CASE stmtToken* END
+    ;
+
+// A schema-qualified call expression: [db.][schema.]name ( <args> ). The argument list is a
+// balanced parenGroup (the same permissive group stmtToken already uses), so nested parens and
+// subqueries inside the arguments do not break the match. Up to three name parts are accepted so a
+// db.schema.proc call is structured; the visitor uses the LAST TWO segments as schema.name, exactly
+// as the regex's `([\w#$]+)\.([\w#$]+)\s*\(` did.
+callExpression
+    : callName parenGroup
+    ;
+
+callName
+    : namePart (DOT namePart)? (DOT namePart)?
+    ;
 
 // NEXT VALUE FOR [schema.]sequence  — sequence USAGE.
 // NEXT / VALUE / FOR are ordinary identifiers in this dialect, hence the predicates.
@@ -1094,7 +1125,8 @@ exprAtom
     // match; if either fails, the fallbacks below parse the tokens exactly as before.
     | existsPredicate
     | nextValueFor
-    | CASE stmtToken* END
+    | callExpression
+    | caseExpression
     | literal
     | AT_VAR
     | AT_AT_VAR

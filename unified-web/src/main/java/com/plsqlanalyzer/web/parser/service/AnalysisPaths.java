@@ -44,6 +44,32 @@ public final class AnalysisPaths {
     }
 
     /**
+     * Canonical form of an identity name — the canonical back-map for case-insensitive identity
+     * lookup (task #33).
+     *
+     * <p>Every stored name is built through {@link #name}, which runs each segment through
+     * {@link #seg} (uppercase + sanitise); the stored form is therefore a fixed point of
+     * {@code seg}. Lookups, however, arrive verbatim from REST path variables, so the same analysis
+     * can be addressed as {@code OracleDemo} or {@code ORACLEDEMO}. Normalising each segment here
+     * maps every spelling onto the one stored form, which is what makes both resolve to the same
+     * analysis on every endpoint (stats, facets and details alike) rather than relying on a
+     * case-insensitive local filesystem.
+     *
+     * <p>Idempotent: applying it to an already-canonical name returns it unchanged. {@code null} /
+     * empty input is returned as-is so callers keep their existing null handling.
+     */
+    public static String canonical(String name) {
+        if (name == null || name.isEmpty()) return name;
+        String[] parts = name.split(String.valueOf(SEP), -1);
+        StringBuilder sb = new StringBuilder(name.length());
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) sb.append(SEP);
+            sb.append(seg(parts[i]));
+        }
+        return sb.toString();
+    }
+
+    /**
      * Build the identity name from context + object. Empty context parts are dropped,
      * so a fully scopeless call returns just the object segment.
      */
@@ -70,6 +96,7 @@ public final class AnalysisPaths {
     /** The object (leaf) segment of an identity name. */
     public static String leaf(String name) {
         if (name == null || name.isEmpty()) return name;
+        name = canonical(name);
         int i = name.lastIndexOf(SEP);
         return i < 0 ? name : name.substring(i + 1);
     }
@@ -86,7 +113,7 @@ public final class AnalysisPaths {
     /** Resolve an identity name to its nested directory under {@code base}. */
     public static Path dir(Path base, String name) {
         Path p = base;
-        for (String seg : name.split(String.valueOf(SEP))) {
+        for (String seg : canonical(name).split(String.valueOf(SEP))) {
             if (!seg.isEmpty()) p = p.resolve(seg);
         }
         return p;
@@ -147,7 +174,7 @@ public final class AnalysisPaths {
     /** {@code plsql-parse/<DBTYPE>/<PROJECT>/<ENV>/<OBJECT>} for an identity name. */
     public static ArtifactKey dirKey(String name) {
         ArtifactKey k = ArtifactKey.of(PARSE_ROOT);
-        for (String seg : name.split(String.valueOf(SEP))) {
+        for (String seg : canonical(name).split(String.valueOf(SEP))) {
             if (!seg.isEmpty()) k = k.resolve(seg);
         }
         return k;
@@ -171,7 +198,7 @@ public final class AnalysisPaths {
 
     /** {@code plsql/<name>} — the flat Claude sidecar folder, keyed by the identity name. */
     public static ArtifactKey claudeDirKey(String name) {
-        return ArtifactKey.of(CLAUDE_ROOT, name);
+        return ArtifactKey.of(CLAUDE_ROOT, canonical(name));
     }
 
     /** A file inside the Claude sidecar folder, e.g. {@code "analysis_claude.json"}. */

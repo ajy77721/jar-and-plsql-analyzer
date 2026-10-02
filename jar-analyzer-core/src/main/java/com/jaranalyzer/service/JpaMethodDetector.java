@@ -32,6 +32,22 @@ class JpaMethodDetector {
 
     private static final Logger log = LoggerFactory.getLogger(JpaMethodDetector.class);
 
+    /**
+     * Task #30(d): the JPQL/HQL regex-last-resort counter.
+     *
+     * <p><b>Decision (documented, not a grammar).</b> There is no JPQL/HQL grammar in this
+     * codebase. Adding one would mean a new ANTLR grammar module for two dialects whose query
+     * strings arrive as opaque bytecode literals, to recover only the entity/table names and the
+     * operation verb — which the regexes in {@link SqlStatementParser} already do reliably for the
+     * JPQL/HQL subset that appears in real repositories (SELECT / UPDATE / DELETE, FROM-shorthand,
+     * joins). A grammar is therefore disproportionate here; this counter makes the residual regex
+     * usage observable (one increment per JPQL/HQL string handled by the regex path) so the
+     * decision can be revisited if the counter ever climbs in a corpus that needs more than
+     * name/verb extraction. The matching note is on {@link SqlStatementParser}.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong JPQL_HQL_REGEX_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+
     // JdbcTemplate methods that accept SQL string as first argument.
     // "sql" is the JdbcClient (Spring 6.1) entry-point method that accepts the SQL string
     // (GAP-JDBC-CLIENT).
@@ -679,6 +695,9 @@ class JpaMethodDetector {
     }
 
     private void extractJpqlEntities(String jpql, Map<String, String> entityTableMap, List<DetectedTable> results) {
+        // Task #30(d): every JPQL/HQL string goes through the documented regex-last-resort path —
+        // there is no grammar — so count it here. See JPQL_HQL_REGEX_FALLBACKS.
+        JPQL_HQL_REGEX_FALLBACKS.incrementAndGet();
         Set<String> names = SqlStatementParser.extractTableNames(jpql);
         String opType = SqlStatementParser.inferOperationType(jpql);
         String trimmedJpql = jpql.length() > 2000 ? jpql.substring(0, 2000) + "..." : jpql;

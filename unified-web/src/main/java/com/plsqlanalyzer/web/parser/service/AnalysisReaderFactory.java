@@ -24,16 +24,18 @@ public class AnalysisReaderFactory {
     }
 
     public AnalysisDataReader getReader(String analysisName) {
-        String mode = modeMap.getOrDefault(analysisName, "static");
+        String mode = modeMap.getOrDefault(AnalysisPaths.canonical(analysisName), "static");
         return "claude".equals(mode) || "claude_prev".equals(mode)
                 ? claudeReader : staticReader;
     }
 
     public void setMode(String analysisName, String mode) {
-        modeMap.put(analysisName, mode != null ? mode : "static");
+        // Task #33: key by the canonical identity so a mode set via one spelling of the name
+        // (e.g. OracleDemo) is seen under another (ORACLEDEMO).
+        modeMap.put(AnalysisPaths.canonical(analysisName), mode != null ? mode : "static");
     }
 
     public String getMode(String analysisName) {
-        return modeMap.getOrDefault(analysisName, "static");
+        return modeMap.getOrDefault(AnalysisPaths.canonical(analysisName), "static");
     }
 }

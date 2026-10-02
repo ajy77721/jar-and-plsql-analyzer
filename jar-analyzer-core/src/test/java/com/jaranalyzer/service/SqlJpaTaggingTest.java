@@ -816,4 +816,22 @@ class SqlJpaTaggingTest {
                     "java.util.ArrayList.contains() must NOT be tagged as a DB READ (owner guard)");
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Task #30(d): JPQL/HQL is a counted regex-last-resort (no grammar by design)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Task #30(d) — a JPQL @Query string increments the counted regex-last-resort")
+    void jpqlRegexFallbackIsCounted() {
+        long before = JpaMethodDetector.JPQL_HQL_REGEX_FALLBACKS.get();
+        IndexedClass ic = makeClass("com.example.OrderRepository", "OrderRepository",
+                "REPOSITORY", null, null);
+        IndexedMethod im = makeAnnotatedQueryMethod(
+                "findActiveOrders", "SELECT u FROM User u WHERE u.id=?1", false, false);
+        List<DetectedTable> results = detector.detect(im, ic, Map.of("User", "USERS"), Map.of()).resolved();
+        assertFalse(results.isEmpty(), "the regex path must still recover the JPQL entity");
+        assertTrue(JpaMethodDetector.JPQL_HQL_REGEX_FALLBACKS.get() > before,
+                "the JPQL/HQL regex-last-resort counter must record the string it handled");
+    }
 }
