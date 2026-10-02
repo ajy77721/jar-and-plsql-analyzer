@@ -167,7 +167,12 @@ final class ParserFacetSpecs {
                    // exception handlers" server-side instead of aggregating PA.nodeIndex.all() in
                    // the browser. "9" is unused by any existing caller of this facet.
                    "9", row -> List.of(row.path("counts").path("exceptionHandlers").asInt(0) > 0
-                           ? "Y" : "N")));
+                           ? "Y" : "N"),
+                   // Task #26: hidden preset filter (`cf=10:Y`) — procedures/functions that return
+                   // a result set (SQL Server bare SELECTs, DB2 WITH RETURN, Oracle OUT REF CURSOR,
+                   // Postgres refcursor/SETOF). Task #27's returnType/returnsColumns ride the index
+                   // row itself, so the UI can show a TVF/SETOF return shape without a filter.
+                   "10", row -> List.of(row.path("returnsResultSet").asBoolean(false) ? "Y" : "N")));
 
     /**
      * Sequences. Merged by {@code schema.name} by the reader, so that is the row identity.
@@ -232,7 +237,10 @@ final class ParserFacetSpecs {
             FacetSpec::accessDetailProcedureIds,
             Map.of("0", FacetSpec.scalarColumn("cursorName", null),
                    "1", FacetSpec.scalarColumn("cursorType", "EXPLICIT"),
-                   "2", FacetSpec.arrayColumn("operations")));
+                   "2", FacetSpec.arrayColumn("operations"),
+                   // Task #26: hidden preset filter (`cf=8:Y`) — "cursors whose routine returns
+                   // data", the cursors facet's "returns data" surface. "8" is unused elsewhere.
+                   "8", row -> List.of(row.path("returnsData").asBoolean(false) ? "Y" : "N")));
 
     /** Joins. Merged by the ordered table pair, so that pair is the identity. */
     static final FacetSpec JOINS = new FacetSpec(

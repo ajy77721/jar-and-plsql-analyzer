@@ -67,6 +67,10 @@ public class Db2ProcedureParser implements StoredProcedureParser {
         obj.setStatements(toStatements(info.getStatements()));
         obj.setExceptionHandlers(toExceptionHandlers(info.getExceptionHandlers()));
         obj.setForeignKeys(toForeignKeys(info.getForeignKeys()));
+        // Task #26: WITH RETURN cursors are DB2's result-set hand-back — carry the count through
+        // the one bridge the artifact writer consumes.
+        obj.setReturnsResultSet(info.isReturnsResultSet());
+        obj.setResultSets(info.getResultSets());
 
         result.getObjects().add(obj);
         result.setParseTimeMs(System.currentTimeMillis() - start);

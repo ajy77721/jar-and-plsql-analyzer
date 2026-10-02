@@ -6,6 +6,9 @@ public class Db2CursorInfo {
     private String selectText;
     private boolean withHold;
     private int    line;
+    // Task #26: DECLARE c CURSOR WITH RETURN [TO CALLER|TO CLIENT] FOR … — this cursor's result set
+    // is returned to the caller, the DB2 way a procedure hands data back.
+    private boolean withReturn;
 
     public String  getName()       { return name; }
     public void    setName(String name)           { this.name = name; }
@@ -13,6 +16,8 @@ public class Db2CursorInfo {
     public void    setSelectText(String selectText) { this.selectText = selectText; }
     public boolean isWithHold()    { return withHold; }
     public void    setWithHold(boolean withHold)  { this.withHold = withHold; }
+    public boolean isWithReturn()  { return withReturn; }
+    public void    setWithReturn(boolean withReturn) { this.withReturn = withReturn; }
     public int     getLine()       { return line; }
     public void    setLine(int line)              { this.line = line; }
 }

@@ -101,6 +101,15 @@ public class SqlServerProcedureParser implements StoredProcedureParser {
         if (info.getTriggerTiming() != null) obj.setTriggerTiming(info.getTriggerTiming());
         if (info.getViewQuery()     != null) obj.setViewQuery(info.getViewQuery());
 
+        // Tasks #26/#27: result-set count + TVF return shape — this adapter is the only bridge to
+        // the shared model the artifact writer consumes.
+        obj.setReturnsResultSet(info.isReturnsResultSet());
+        obj.setResultSets(info.getResultSets());
+        obj.setReturnType(info.getReturnType());
+        if (info.getReturnsColumns() != null && !info.getReturnsColumns().isEmpty()) {
+            obj.setReturnsColumns(new ArrayList<>(info.getReturnsColumns()));
+        }
+
         return obj;
     }
 

@@ -82,8 +82,12 @@ public class AnalysisViewStore {
      * the catalog {@code dbTriggers[]} list ALONE, rather than set whenever a dbTriggers entry merely
      * matched a row already seen in {@code triggers[]} or a TRIGGER node. A version-3 sidecar
      * mislabels source-parsed triggers as catalog-only, so it is refused and recomputed.
+     *
+     * <p>Version 5 (tasks #26/#27): cursor rows gain {@code returnsData}/{@code resultSets} — the
+     * "returns data" marker sourced from the owning node's new result-set field. A version-4 sidecar
+     * lacks it, so it is refused and recomputed rather than served without the marker.
      */
-    public static final int FORMAT_VERSION = 4;
+    public static final int FORMAT_VERSION = 5;
 
     /** The sidecar folder inside an analysis directory. */
     public static final String VIEWS_DIR = "views";

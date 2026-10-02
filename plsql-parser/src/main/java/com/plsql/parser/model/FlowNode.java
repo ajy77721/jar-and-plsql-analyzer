@@ -72,6 +72,13 @@ public class FlowNode {
      */
     private String overloadSignature;
     private boolean autonomousTransaction; // PRAGMA AUTONOMOUS_TRANSACTION (Oracle)
+    // Tasks #26/#27 — the result-set / return-shape fields must live on FlowNode too, because a
+    // node is written to chunks/chunk_*.json and read back before api/nodes is built; a field
+    // present only on ParsedObject would not survive that round trip.
+    private boolean returnsResultSet;
+    private int resultSets;
+    private String returnType;
+    private List<String> returnsColumns = new ArrayList<>();
     /**
      * Populated ONLY when this node is a package-as-entry-point aggregate (a bare package name
      * crawled as a single node — see DependencyCrawler's aggregation branch): one entry per
@@ -154,6 +161,14 @@ public class FlowNode {
     public void setReadable(boolean readable) { this.readable = readable; }
     public boolean isAutonomousTransaction() { return autonomousTransaction; }
     public void setAutonomousTransaction(boolean v) { this.autonomousTransaction = v; }
+    public boolean isReturnsResultSet() { return returnsResultSet; }
+    public void setReturnsResultSet(boolean v) { this.returnsResultSet = v; }
+    public int getResultSets() { return resultSets; }
+    public void setResultSets(int v) { this.resultSets = v; }
+    public String getReturnType() { return returnType; }
+    public void setReturnType(String v) { this.returnType = v; }
+    public List<String> getReturnsColumns() { return returnsColumns; }
+    public void setReturnsColumns(List<String> v) { this.returnsColumns = v != null ? v : new ArrayList<>(); }
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }
     public String getTriggerEvent() { return triggerEvent; }

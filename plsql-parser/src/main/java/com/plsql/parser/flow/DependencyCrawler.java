@@ -729,6 +729,11 @@ public class DependencyCrawler {
                     node.setExternalPackageVarRefs(targetSub.getExternalPackageVarRefs());
                     node.setExternalPackageVarRefDetails(targetSub.getExternalPackageVarRefDetails());
                     node.setAutonomousTransaction(targetSub.isPragmaAutonomousTransaction());
+                    // Tasks #26/#27: result-set marker + return shape must survive ParsedObject ->
+                    // FlowNode, or the node detail / index / facets never see them.
+                    node.setReturnsResultSet(targetSub.isReturnsResultSet());
+                    node.setResultSets(targetSub.getResultSets());
+                    if (targetSub.getReturnType() != null) node.setReturnType(targetSub.getReturnType());
 
                     List<CallInfo> resolvedCalls = filterLocalVarCalls(
                             resolveCallSchemas(targetSub.getCalls(), ownerSchema),
@@ -837,6 +842,10 @@ public class DependencyCrawler {
                             }
                             if (sub.getLocalVariables() != null) allLocalVars.addAll(sub.getLocalVariables());
                             if (sub.isPragmaAutonomousTransaction()) node.setAutonomousTransaction(true);
+                            // Task #26: a package-as-entry-point node returns data if any member
+                            // does; the counts add up so the marker is visible on the package row.
+                            if (sub.isReturnsResultSet()) node.setReturnsResultSet(true);
+                            node.setResultSets(node.getResultSets() + sub.getResultSets());
                             memberSummaries.add(new SubprogramSummaryInfo(
                                     sub.getName(), sub.getType(), sub.getLineStart(), sub.getLineEnd()));
                         }
@@ -844,6 +853,15 @@ public class DependencyCrawler {
                     }
 
                     if (targetObj.isPragmaAutonomousTransaction()) node.setAutonomousTransaction(true);
+
+                    // Tasks #26/#27: result-set marker + TVF/SETOF return shape from the parsed
+                    // object. Package members aggregate into this same node below.
+                    node.setReturnsResultSet(targetObj.isReturnsResultSet());
+                    node.setResultSets(targetObj.getResultSets());
+                    if (targetObj.getReturnType() != null) node.setReturnType(targetObj.getReturnType());
+                    if (targetObj.getReturnsColumns() != null && !targetObj.getReturnsColumns().isEmpty()) {
+                        node.setReturnsColumns(new ArrayList<>(targetObj.getReturnsColumns()));
+                    }
 
                     // Package-as-entry-point aggregation above concatenates the object's OWN
                     // members first and then subprogram by subprogram, which is NOT source order:

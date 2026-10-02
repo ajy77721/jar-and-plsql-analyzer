@@ -461,9 +461,16 @@ variadicKw
 // to a lexer keyword (same rationale as VARIADIC above); the predicate is on the left edge of the
 // optional prefix, so a function genuinely returning a type called "setof" is unaffected.
 // `RETURNS TABLE (col type, …)` reuses aliasColumnList, which already models exactly that shape.
+//
+// `TABLE aliasColumnList` is listed FIRST on purpose: TABLE is a keyword token that is also a
+// member of the permissive `id` rule (so it stays usable as a table/column name), which means
+// `dataType` alone can match the bare word `TABLE` and leave the column list to be swallowed by a
+// later permissive rule — the RETURNS TABLE shape was then invisible to the visitor. Ordered choice
+// tries aliasColumnList first; a plain `RETURNS TABLE` with no column list fails that alternative
+// (aliasColumnList requires the parens) and falls through to `dataType`, so both shapes parse.
 returnType
-    : setofKw? dataType
-    | TABLE aliasColumnList
+    : TABLE aliasColumnList
+    | setofKw? dataType
     ;
 
 setofKw
