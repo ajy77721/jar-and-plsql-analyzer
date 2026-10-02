@@ -252,6 +252,33 @@
 /* ==========================================================================
    Estate sections are now the last four sub-tabs of the Details tab. The
    Details tab row grew from 7 to 11 tabs; let it wrap instead of clipping
-   the newly added Views & MVs / Triggers / Globals / Scheduled tabs.
+   the newly added Views & MVs / Triggers / Globals / Scheduled tabs, and keep
+   the row in view when the tab content scrolls.
    ========================================================================== */
-#viewDetails .dt-subtabs { flex-wrap: wrap; }
+#viewDetails .dt-subtabs { flex-wrap: wrap; position: sticky; top: 0; z-index: 5; }
+
+/* ==========================================================================
+   Details-tab layout — the estate sub-views must size to their content.
+
+   The estate sections used to be a standalone full-height right-view: their
+   sub-views and PA.tf table wrappers were flex children of a viewport-tall
+   column, so `.dt-subview { flex: 1 }` (join-summary.css) and the containers'
+   inline `style="flex:1;overflow:auto"` stretched them to the viewport. Moved
+   inside Details that stretch left a full-screen empty card below a one-row
+   list — the Globals screenshot (one package row, then a giant void).
+
+   Let the Details tab itself scroll and make each sub-view content-sized.
+   Long lists still get a bounded inner scroll so the toolbar and pager stay
+   reachable — a max-height on the card, never a viewport-tall flex.
+   ========================================================================== */
+#viewDetails { overflow-y: auto; overflow-x: hidden; }
+#viewDetails .dt-subview {
+    flex: 0 0 auto;      /* content height — was flex:1 (fill the right-view) */
+    overflow: visible;   /* the tab scrolls; the sub-view itself does not */
+    min-height: 0;
+}
+#viewDetails .dt-subview .to-container {
+    flex: none !important;              /* beats the inline style="flex:1" on every table wrapper */
+    max-height: calc(100vh - 230px);    /* long lists (e.g. 476 cursors) scroll inside the card */
+    overflow: auto;
+}
