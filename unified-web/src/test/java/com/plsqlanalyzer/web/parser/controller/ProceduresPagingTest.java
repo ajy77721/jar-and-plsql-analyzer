@@ -134,6 +134,63 @@ class ProceduresPagingTest {
     }
 
     @Test
+    void returnsDataFilterColumnMatchesOnlyResultSetReturningProcedures() {
+        // Task #26: the procedures facet's own "returns data" surface. A hidden preset
+        // (`cf=10:Y`), same shape as cf=9:Y above, so a screen can ask for the routines that hand
+        // result sets back (SQL Server bare SELECTs, DB2 WITH RETURN, Oracle OUT REF CURSOR,
+        // Postgres refcursor/SETOF). Task #27's return shape rides the row itself.
+        var returns = mapper.createObjectNode()
+                .put("nodeId", "S$RETURNS").put("name", "RETURNS").put("schema", "S").put("depth", 1)
+                .put("returnsResultSet", true).put("resultSets", 2).put("returnType", "TABLE");
+        returns.putArray("returnsColumns").add("id").add("total");
+        var plain = mapper.createObjectNode()
+                .put("nodeId", "S$PLAIN").put("name", "PLAIN").put("schema", "S").put("depth", 1);
+
+        var arr = mapper.createArrayNode().add(returns).add(plain);
+        var responder = new com.plsqlanalyzer.web.page.FacetPageResponder(mapper, 10_000);
+        var res = responder.respond(arr, null, ParserFacetSpecs.PROCEDURES,
+                new com.plsqlanalyzer.web.page.FacetPageResponder.Params(
+                        null, null, null, null, null, List.of("10:Y"), "application/json"), null);
+
+        List<String> names = new ArrayList<>();
+        for (JsonNode item : res.getBody().path("items")) {
+            names.add(item.path("name").asText());
+            // The return shape must survive the facet unchanged so the UI can render it.
+            assertEquals("TABLE", item.path("returnType").asText(""));
+            assertEquals(List.of("id", "total"), mapper.convertValue(
+                    item.path("returnsColumns"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
+        }
+        assertEquals(List.of("RETURNS"), names,
+                "cf=10:Y must match only the procedure whose returnsResultSet is true");
+    }
+
+    @Test
+    void cursorsReturnsDataFilterMatchesOnlyRowsWhoseRoutineReturnsData() {
+        // Task #26: the cursors facet's "returns data" surface (cf=8:Y).
+        var cursorWithReturns = mapper.createObjectNode()
+                .put("cursorName", "C_RET").put("cursorType", "EXPLICIT")
+                .put("returnsData", true).put("resultSets", 1).put("accessCount", 1);
+        cursorWithReturns.putArray("accessDetails")
+                .add(mapper.createObjectNode().put("procedureId", "N1").put("lineNumber", 1));
+        var cursorWithout = mapper.createObjectNode()
+                .put("cursorName", "C_PLAIN").put("cursorType", "EXPLICIT")
+                .put("returnsData", false).put("resultSets", 0).put("accessCount", 1);
+        cursorWithout.putArray("accessDetails")
+                .add(mapper.createObjectNode().put("procedureId", "N2").put("lineNumber", 1));
+
+        var arr = mapper.createArrayNode().add(cursorWithReturns).add(cursorWithout);
+        var responder = new com.plsqlanalyzer.web.page.FacetPageResponder(mapper, 10_000);
+        var res = responder.respond(arr, null, ParserFacetSpecs.CURSORS,
+                new com.plsqlanalyzer.web.page.FacetPageResponder.Params(
+                        null, null, null, null, null, List.of("8:Y"), "application/json"), null);
+
+        List<String> names = new ArrayList<>();
+        for (JsonNode item : res.getBody().path("items")) names.add(item.path("cursorName").asText());
+        assertEquals(List.of("C_RET"), names,
+                "cf=8:Y must match only cursors whose routine returns data");
+    }
+
+    @Test
     void anUnpagedCallerStillGetsTheBareArray() {
         // Existing callers send no paging parameters and must be unaffected; conversion has to be
         // possible one screen at a time.

@@ -991,6 +991,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 si.getParameters().add(extractParameter(p));
             }
         }
+        markResultSet(si);   // Task #26: OUT REF CURSOR parameters = result-set hand-back
 
         ParsedObject po = currentObject();
         if (po != null) {
@@ -1086,6 +1087,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                     si.getParameters().add(extractParameter(p));
                 }
             }
+            markResultSet(si);   // Task #26: OUT REF CURSOR parameters = result-set hand-back
             po.getSubprograms().add(si);
         }
         return visitChildren(ctx);
@@ -1118,6 +1120,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                     si.getParameters().add(extractParameter(p));
                 }
             }
+            markResultSet(si);   // Task #26: OUT REF CURSOR parameters = result-set hand-back
             po.getSubprograms().add(si);
         }
         return visitChildren(ctx);
@@ -1151,6 +1154,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 si.getParameters().add(extractParameter(p));
             }
         }
+        markResultSet(si);   // Task #26: OUT REF CURSOR parameters = result-set hand-back
 
         ParsedObject po = currentObject();
         if (po != null) {
@@ -1188,6 +1192,46 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     }
 
     // ---------------------------------------------------------------
+    // ANONYMOUS BLOCK (task #25)
+    //
+    // A bare `DECLARE … BEGIN … END;` (or `BEGIN … END;`) script section. The grammar models it as
+    // `anonymous_block`, reachable ONLY from `unit_statement` (line 77) — never from a routine or
+    // trigger body (those use `body` / `trigger_block`), so this override fires exactly for a
+    // top-level anonymous block and cannot double-create objects for nested BEGIN…END blocks.
+    //
+    // Before this, the block parsed cleanly but produced no ParsedObject: every addStatement /
+    // addTableOperation helper was a no-op because the context stack was empty, so the whole section
+    // was silently dropped. It is typed ANON and named ANON_<line> (it has no name of its own; the
+    // line keeps several blocks in one script distinct). Its body is walked like any routine body,
+    // so table ops, calls, cursors and exception handlers are captured.
+    // ---------------------------------------------------------------
+    @Override
+    public Void visitAnonymous_block(PlSqlParser.Anonymous_blockContext ctx) {
+        ParsedObject po = new ParsedObject();
+        po.setType("ANON");
+        po.setName("ANON_" + getStartLine(ctx));
+        po.setLineStart(getStartLine(ctx));
+        po.setLineEnd(getStopLine(ctx));
+
+        // Fresh standalone scope, mirroring visitCreate_procedure_body.
+        currentPackageName = null;
+        currentPackageSubprograms.clear();
+        declaredTypeNames.clear();
+        subprogramSourceMap.clear();
+
+        results.add(po);
+        varValueStack.push(new LinkedHashMap<>());
+        int savedBranchDepth = branchDepth;
+        branchDepth = 0;
+        pushObject(po);
+        Void result = visitChildren(ctx);
+        popContext();
+        varValueStack.poll();
+        branchDepth = savedBranchDepth;
+        return result;
+    }
+
+    // ---------------------------------------------------------------
     // CREATE PROCEDURE (standalone)
     // ---------------------------------------------------------------
     @Override
@@ -1207,6 +1251,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 po.getParameters().add(extractParameter(p));
             }
         }
+        markResultSet(po);   // Task #26: OUT REF CURSOR parameters = result-set hand-back
 
         currentPackageName = null;
         currentPackageSubprograms.clear();
@@ -1368,6 +1413,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 po.getParameters().add(extractParameter(p));
             }
         }
+        markResultSet(po);   // Task #26: OUT REF CURSOR parameters = result-set hand-back
 
         currentPackageName = null;
         currentPackageSubprograms.clear();
@@ -2123,7 +2169,19 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         }
 
         if (ctx.type_spec() != null) {
-            pi.setDataType(getTypeSpecText(ctx.type_spec()));
+            String dataType = getTypeSpecText(ctx.type_spec());
+            pi.setDataType(dataType);
+            // Task #26: a REF CURSOR parameter is Oracle's result-set hand-back. SYS_REFCURSOR (and
+            // the literal `REF CURSOR` / `REF_CURSOR`) have no dedicated token — they survive only
+            // as the data-type text — so the flag is derived from that text. A cursor type declared
+            // locally as `TYPE t IS REF CURSOR` is not resolved here (honest degradation: the
+            // declared-type registry does not record its kind); SYS_REFCURSOR is the canonical form.
+            boolean refCursor = isRefCursorType(dataType);
+            pi.setRefCursor(refCursor);
+            if (refCursor && pi.getDirection() != null
+                    && pi.getDirection().toUpperCase().contains("OUT")) {
+                pi.setOutRefCursor(true);
+            }
             // Extract table references from %TYPE / %ROWTYPE parameter types
             extractTypeSpecTableRef(ctx.type_spec(), getStartLine(ctx));
         }
@@ -2133,6 +2191,31 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         }
 
         return pi;
+    }
+
+    /** True when a parameter/return data-type text names a REF CURSOR (SYS_REFCURSOR / REF CURSOR). */
+    private static boolean isRefCursorType(String dataType) {
+        if (dataType == null) return false;
+        return dataType.toUpperCase().replaceAll("[\\s_]", "").contains("REFCURSOR");
+    }
+
+    /**
+     * Task #26: mark an Oracle unit that hands a result set back through an OUT REF CURSOR
+     * parameter. Called once the parameter list is complete.
+     */
+    private void markResultSet(ParsedObject po) {
+        int n = 0;
+        for (ParameterInfo p : po.getParameters()) if (p.isOutRefCursor()) n++;
+        po.setResultSets(n);
+        po.setReturnsResultSet(n > 0);
+    }
+
+    /** Task #26: package-member counterpart of {@link #markResultSet(ParsedObject)}. */
+    private void markResultSet(SubprogramInfo si) {
+        int n = 0;
+        for (ParameterInfo p : si.getParameters()) if (p.isOutRefCursor()) n++;
+        si.setResultSets(n);
+        si.setReturnsResultSet(n > 0);
     }
 
     // ---------------------------------------------------------------

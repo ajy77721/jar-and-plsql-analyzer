@@ -630,10 +630,20 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
         Db2CursorInfo c = new Db2CursorInfo();
         c.setName(cleanId(ctx.id(0).getText()));
         boolean withHold = false;
+        boolean withReturn = false;
         for (Db2Parser.CursorOptionContext opt : ctx.cursorOption()) {
-            if (opt.HOLD() != null) { withHold = true; break; }
+            if (opt.HOLD() != null) withHold = true;
+            // Task #26: WITH RETURN [TO CALLER|TO CLIENT] — the cursor's result set is returned to
+            // the caller. HOLD and RETURN are alternatives on the same cursorOption rule, so read
+            // both in one pass instead of stopping at the first.
+            if (opt.RETURN() != null) withReturn = true;
         }
         c.setWithHold(withHold);
+        c.setWithReturn(withReturn);
+        if (withReturn) {
+            result.setResultSets(result.getResultSets() + 1);
+            result.setReturnsResultSet(true);
+        }
         if (ctx.selectStatement() != null) {
             // Bug 5 fix: ctx.getText() concatenates only visible-channel tokens with no
             // separators, squishing the SQL onto one run-on line. Reuse the same

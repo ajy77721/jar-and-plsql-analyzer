@@ -130,6 +130,12 @@ class NodeScanFacetReader {
                 String nodeId = textOrNull(node, "nodeId");
                 String nodeName = textOrNull(node, "name");
                 String sourceFile = textOrNull(node, "sourceFile");
+                // Task #26: the node-level "returns data" marker (a routine that hands result sets
+                // back — SQL Server bare SELECTs, DB2 WITH RETURN, Oracle OUT REF CURSOR, Postgres
+                // refcursor/SETOF). Carried onto every cursor row so the cursors facet can show it.
+                boolean nodeReturnsData = node.has("returnsResultSet")
+                        && node.get("returnsResultSet").asBoolean();
+                int nodeResultSets = node.has("resultSets") ? node.get("resultSets").asInt() : 0;
                 JsonNode cursors = node.get("cursors");
                 if (cursors == null || !cursors.isArray()) continue;
 
@@ -157,6 +163,8 @@ class NodeScanFacetReader {
                         entry.put("cursorName", cursorName);
                         entry.put("cursorType", cursorType);
                         entry.put("queryText", query != null ? query : "");
+                        entry.put("returnsData", nodeReturnsData);
+                        entry.put("resultSets", nodeResultSets);
                         entry.set("operations", mapper.createArrayNode());
                         entry.put("accessCount", 0);
                         entry.set("accessDetails", mapper.createArrayNode());

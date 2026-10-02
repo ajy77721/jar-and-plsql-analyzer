@@ -20,6 +20,9 @@ public class SubprogramInfo {
     private List<String> externalPackageVarRefs = new ArrayList<>();
     private List<PackageVarRefInfo> externalPackageVarRefDetails = new ArrayList<>();
     private String returnType;
+    // Task #26: set when this member hands result sets back (Oracle: an OUT REF CURSOR parameter).
+    private boolean returnsResultSet;
+    private int resultSets;
     private boolean pragmaAutonomousTransaction;
     /** True when the function has the PIPELINED keyword (table function). */
     private boolean pipelined;
@@ -56,6 +59,10 @@ public class SubprogramInfo {
     public void setExternalPackageVarRefDetails(List<PackageVarRefInfo> e) { this.externalPackageVarRefDetails = e; }
     public String getReturnType() { return returnType; }
     public void setReturnType(String r) { this.returnType = r; }
+    public boolean isReturnsResultSet() { return returnsResultSet; }
+    public void setReturnsResultSet(boolean v) { this.returnsResultSet = v; }
+    public int getResultSets() { return resultSets; }
+    public void setResultSets(int v) { this.resultSets = v; }
     public boolean isPragmaAutonomousTransaction() { return pragmaAutonomousTransaction; }
     public void setPragmaAutonomousTransaction(boolean p) { this.pragmaAutonomousTransaction = p; }
     public boolean isPipelined() { return pipelined; }

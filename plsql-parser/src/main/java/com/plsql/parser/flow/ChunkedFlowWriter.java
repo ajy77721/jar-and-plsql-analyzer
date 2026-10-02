@@ -828,6 +828,16 @@ public class ChunkedFlowWriter {
             idx.put("lineStart", node.getLineStart());
             idx.put("lineEnd", node.getLineEnd());
             idx.put("linesOfCode", node.getLinesOfCode());
+            // Tasks #26/#27: the procedures facet reads these off the index row (returnsResultSet /
+            // resultSets for the "returns data" filter; returnType/returnsColumns for the TVF shape).
+            if (node.isReturnsResultSet()) {
+                idx.put("returnsResultSet", true);
+                idx.put("resultSets", node.getResultSets());
+            }
+            if (node.getReturnType() != null) idx.put("returnType", node.getReturnType());
+            if (node.getReturnsColumns() != null && !node.getReturnsColumns().isEmpty()) {
+                idx.put("returnsColumns", node.getReturnsColumns());
+            }
             idx.put("readable", node.isReadable());
             if (node.getMessage() != null) idx.put("message", node.getMessage());
             idx.put("parentNodeId", firstCallerMap.get(nodeId));
@@ -1096,6 +1106,18 @@ public class ChunkedFlowWriter {
             detail.put("lineEnd", node.getLineEnd());
             detail.put("linesOfCode", node.getLinesOfCode());
 
+            // Tasks #26/#27 — result-set marker + TVF/SETOF return shape. Scalars ride Mongo's
+            // Splitter into the parent document automatically; returnsColumns[] becomes its own
+            // child collection there, the same way cursors[] does.
+            if (node.isReturnsResultSet()) {
+                detail.put("returnsResultSet", true);
+                detail.put("resultSets", node.getResultSets());
+            }
+            if (node.getReturnType() != null) detail.put("returnType", node.getReturnType());
+            if (node.getReturnsColumns() != null && !node.getReturnsColumns().isEmpty()) {
+                detail.put("returnsColumns", node.getReturnsColumns());
+            }
+
             // Trigger metadata (populated for TRIGGER nodes)
             if (node.getTriggerTable() != null)  detail.put("triggerTable", node.getTriggerTable());
             if (node.getTriggerEvent() != null)  detail.put("triggerEvent", node.getTriggerEvent());
@@ -1180,6 +1202,11 @@ public class ChunkedFlowWriter {
                     ci.put("lineEnd", c.getLineEnd());
                     ci.put("forLoop", c.isForLoop());
                     ci.put("refCursor", c.isRefCursor());
+                    // Task #26: the "returns data" marker the cursors facet surfaces. It is a
+                    // property of the owning node (a cursor lives in a routine that may return
+                    // result sets), emitted on each cursor row so the facet can show/filter it.
+                    ci.put("returnsData", node.isReturnsResultSet());
+                    ci.put("resultSets", node.getResultSets());
                     if (c.getQuery() != null) ci.put("query", c.getQuery());
                     if (c.getTables() != null) ci.put("tables", c.getTables());
                     // Attach post-DECLARE lifecycle operations (OPEN/FETCH/CLOSE/DEALLOCATE).

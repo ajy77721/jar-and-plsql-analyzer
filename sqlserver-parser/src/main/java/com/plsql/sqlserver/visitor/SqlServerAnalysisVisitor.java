@@ -368,6 +368,21 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
                 ? ctx.getStop().getLine()
                 : ctx.getStart().getLine());
 
+        // RETURNS clause (tasks #26 + #27). Grammar: `RETURNS AT_VAR? dataType`; the permissive
+        // dataType swallows a declared table shape — `RETURNS @result TABLE(id INT, name …)` — via
+        // its parenGroup, so a multi-statement TVF's column list is available here. An inline TVF
+        // (`RETURNS TABLE AS RETURN (SELECT …)`) declares no list: returnType is "TABLE" and
+        // returnsColumns stays empty rather than guessing the projection.
+        SqlServerParser.ReturnsClauseContext rc = ctx.returnsClause();
+        if (rc != null && rc.dataType() != null) {
+            result.setReturnType(originalText(rc.dataType()));
+            if (rc.dataType().parenGroup() != null) {
+                for (String col : extractDeclaredColumns(originalText(rc.dataType().parenGroup()))) {
+                    result.getReturnsColumns().add(col);
+                }
+            }
+        }
+
         collectCteNames(ctx.routineBody());
         Void r = visitChildren(ctx);
         extractQualifiedCalls(ctx.routineBody());
@@ -972,6 +987,17 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
                     result.getStatements().add(
                             new SqlServerStatementInfo(type, ctx.getStart().getLine()));
                 }
+                // Task #26: a statement-level bare SELECT is one result set handed to the client.
+                // Subqueries are a different grammar rule and never reach a `statement`, and
+                // `SELECT … INTO` fails selectList (INTO is excluded) so it lands in otherStatement.
+                // The one SELECT that is NOT a result set is the variable-assignment form
+                // (`SELECT @x = col FROM t`), which selectList accepts — exclude it by its leading
+                // `@var =` shape.
+                if (c0 instanceof SqlServerParser.SelectStatementContext
+                        && !isAssignmentSelect((SqlServerParser.SelectStatementContext) c0)) {
+                    result.setResultSets(result.getResultSets() + 1);
+                    result.setReturnsResultSet(true);
+                }
             }
         }
         return visitChildren(ctx);
@@ -1091,6 +1117,60 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         }
         return null;
     }
+
+    /**
+     * Task #26: distinguishes the variable-assignment SELECT ({@code SELECT @x = col FROM t}) from a
+     * genuine result-set SELECT. The grammar's permissive {@code selectList} accepts both, so the
+     * difference is read from the first two select-list tokens: an assignment starts with
+     * {@code AT_VAR} then {@code EQ}.
+     */
+    private boolean isAssignmentSelect(SqlServerParser.SelectStatementContext sel) {
+        // selectStatement is `SELECT stmtTail` with stmtTail opaque, so the select list is not a
+        // subtree to inspect; the statement's own text is. `SELECT @x = …` is the assignment form.
+        String tail = sel.stmtTail() != null ? originalText(sel.stmtTail()) : null;
+        return tail != null && ASSIGNMENT_SELECT.matcher(tail.trim()).find();
+    }
+
+    private static final Pattern ASSIGNMENT_SELECT =
+            Pattern.compile("^@[A-Za-z_][A-Za-z0-9_]*\\s*=");
+
+    /**
+     * Task #27: split a declared table shape's parenGroup text — e.g.
+     * {@code "(id INT, name VARCHAR(50), amount DECIMAL(18,2))"} — into its column names, in
+     * declaration order. Top-level commas separate columns; commas nested inside a type's own parens
+     * (DECIMAL(18,2)) do not. The parenGroup rule is deliberately opaque, so this reads the tokens
+     * the grammar already grouped rather than re-scanning the statement.
+     */
+    private static List<String> extractDeclaredColumns(String parenText) {
+        List<String> cols = new ArrayList<>();
+        if (parenText == null) return cols;
+        String inner = parenText.trim();
+        if (inner.startsWith("(")) inner = inner.substring(1);
+        if (inner.endsWith(")")) inner = inner.substring(0, inner.length() - 1);
+        List<String> parts = new ArrayList<>();
+        int depth = 0, start = 0;
+        for (int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 0) { parts.add(inner.substring(start, i)); start = i + 1; }
+        }
+        parts.add(inner.substring(start));
+        for (String part : parts) {
+            String p = part.trim();
+            if (p.isEmpty()) continue;
+            if (p.startsWith("[")) {
+                int end = p.indexOf(']');
+                if (end > 1) { cols.add(p.substring(1, end)); continue; }
+            }
+            Matcher m = DECLARED_COL_NAME.matcher(p);
+            if (m.find()) cols.add(m.group(1));
+        }
+        return cols;
+    }
+
+    private static final Pattern DECLARED_COL_NAME =
+            Pattern.compile("^([A-Za-z_][A-Za-z0-9_]*)");
 
     // ─────────────────────────────────────────────────────────────────────────
     // IF [NOT] EXISTS(SELECT ...) — the condition is an opaque `expr`/`parenGroup`, so no

@@ -185,4 +185,15 @@ public class Db2RoutineInfo {
 
     public List<Db2SequenceInfo> getSequences() { return sequences; }
     public List<Db2ExceptionHandlerInfo> getExceptionHandlers() { return exceptionHandlers; }
+
+    // ── Result-set metadata (task #26) ─────────────────────────────────────────
+    // A DB2 procedure returns a result set through a cursor declared WITH RETURN; resultSets counts
+    // those declarations, returnsResultSet is resultSets > 0.
+    private boolean returnsResultSet;
+    private int     resultSets;
+
+    public boolean isReturnsResultSet() { return returnsResultSet; }
+    public void    setReturnsResultSet(boolean v) { this.returnsResultSet = v; }
+    public int     getResultSets() { return resultSets; }
+    public void    setResultSets(int v) { this.resultSets = v; }
 }

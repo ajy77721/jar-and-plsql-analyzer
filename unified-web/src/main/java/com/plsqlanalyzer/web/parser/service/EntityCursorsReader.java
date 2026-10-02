@@ -140,15 +140,21 @@ public class EntityCursorsReader {
         // nodeRef -> {nodeId, name, sourceFile}, batched.
         Set<String> nodeRefs = new LinkedHashSet<>();
         for (CursorDecl d : decls) if (d.nodeRef() != null) nodeRefs.add(d.nodeRef());
-        record NodeInfo(String nodeId, String name, String sourceFile) {}
+        record NodeInfo(String nodeId, String name, String sourceFile, boolean returnsResultSet,
+                        int resultSets) {}
         Map<String, NodeInfo> nodes = new LinkedHashMap<>();
         try (MongoCursor<Document> cur = QueryBudget.request(db.getCollection("am_proc_node"))
                 .find(Filters.and(Filters.eq("runId", runId), Filters.in("entityKey", nodeRefs)))
                 .iterator()) {
             while (cur.hasNext()) {
                 Document d = cur.next();
+                // Task #26: the node's "returns data" marker is a scalar on the node detail, so
+                // Splitter copies it onto am_proc_node — read it back for row parity with the
+                // artifact-scan path.
                 nodes.put(d.getString("entityKey"),
-                        new NodeInfo(d.getString("nodeId"), d.getString("name"), d.getString("sourceFile")));
+                        new NodeInfo(d.getString("nodeId"), d.getString("name"), d.getString("sourceFile"),
+                                Boolean.TRUE.equals(d.getBoolean("returnsResultSet")),
+                                d.get("resultSets") == null ? 0 : ((Number) d.get("resultSets")).intValue()));
             }
         }
 
@@ -170,6 +176,8 @@ public class EntityCursorsReader {
                 n.put("cursorName", cursorName);
                 n.put("cursorType", d.refCursor() ? "REF_CURSOR" : d.forLoop() ? "FOR_LOOP" : "EXPLICIT");
                 n.put("queryText", d.query() == null ? "" : d.query());
+                n.put("returnsData", node != null && node.returnsResultSet());
+                n.put("resultSets", node == null ? 0 : node.resultSets());
                 n.set("operations", mapper.createArrayNode());
                 n.put("accessCount", 0);
                 n.set("accessDetails", mapper.createArrayNode());

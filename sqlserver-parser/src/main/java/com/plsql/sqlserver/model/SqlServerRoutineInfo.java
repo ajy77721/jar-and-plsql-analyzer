@@ -60,6 +60,19 @@ public class SqlServerRoutineInfo {
     // further constraint was lost. Empty for non-FK alterations.
     private List<SqlServerForeignKeyInfo> foreignKeys = new ArrayList<>();
 
+    // ── Result-set / return-shape metadata (tasks #26 + #27) ───────────────────
+    // returnsResultSet/resultSets (#26): resultSets counts the statement-level bare SELECTs in the
+    // body — each one is a result set a client receives; returnsResultSet is resultSets > 0.
+    private boolean      returnsResultSet;
+    private int          resultSets;
+    // returnType/returnsColumns (#27): the RETURNS clause as written — "TABLE" (inline TVF),
+    // "TABLE(id INT, name VARCHAR(50))" (multi-statement TVF's declared table variable) or a scalar
+    // type. returnsColumns holds the declared column names of a TABLE(...) shape, in order; it is
+    // empty for an inline TVF (whose columns come from the RETURN SELECT projection, not a declared
+    // list) — honest degradation rather than a guess.
+    private String       returnType;
+    private List<String> returnsColumns = new ArrayList<>();
+
     public String      getSchema()     { return schema; }
     public void        setSchema(String schema)              { this.schema = schema; }
     public String      getName()       { return name; }
@@ -134,4 +147,12 @@ public class SqlServerRoutineInfo {
     public String       getAlterConstraintName()         { return alterConstraintName; }
     public void         setAlterConstraintName(String v)      { this.alterConstraintName = v; }
     public List<SqlServerForeignKeyInfo> getForeignKeys() { return foreignKeys; }
+
+    public boolean      isReturnsResultSet() { return returnsResultSet; }
+    public void         setReturnsResultSet(boolean v) { this.returnsResultSet = v; }
+    public int          getResultSets()      { return resultSets; }
+    public void         setResultSets(int v) { this.resultSets = v; }
+    public String       getReturnType()      { return returnType; }
+    public void         setReturnType(String v) { this.returnType = v; }
+    public List<String> getReturnsColumns()  { return returnsColumns; }
 }

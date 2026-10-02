@@ -40,6 +40,29 @@ public class ParsedObject {
     private String viewQuery;
     /** True when this is a standalone PIPELINED FUNCTION (table function). */
     private boolean pipelined;
+
+    // ---- Result-set / return-shape fields (tasks #26 + #27) ----
+    /**
+     * Task #26: true when this unit hands one or more result sets back to its caller. Per dialect:
+     * SQL Server counts statement-level bare SELECTs; DB2 a cursor declared WITH RETURN; Oracle an
+     * OUT REF CURSOR parameter; Postgres a function returning refcursor or SETOF. False for a unit
+     * that only performs work, so "no result set" is distinguishable from "unknown".
+     */
+    private boolean returnsResultSet;
+    /** How many result sets the unit returns (SQL Server: bare SELECT count; DB2: WITH RETURN cursor count; Oracle: OUT ref-cursor param count; Postgres: 1 for refcursor/SETOF). */
+    private int resultSets;
+    /**
+     * Task #27: the declared return shape of a TVF / set-returning function, as written — e.g.
+     * "TABLE", "TABLE(id INT, name VARCHAR(50))", "SETOF integer", "refcursor". Null for a routine
+     * with no RETURNS clause (procedures) or a dialect that does not expose one.
+     */
+    private String returnType;
+    /**
+     * Task #27: the column names of a table-valued return shape, in declaration order. Empty when
+     * the shape has no named columns (scalar/SETOF return, or an inline TVF whose projection the
+     * dialect model does not decompose) — never null.
+     */
+    private List<String> returnsColumns = new ArrayList<>();
     /** SQL Server IDENTITY(seed, increment) columns (audit #8). Empty for every other dialect. */
     private List<IdentityColumnInfo> identityColumns = new ArrayList<>();
 
@@ -122,6 +145,15 @@ public class ParsedObject {
     public void setViewQuery(String v) { this.viewQuery = v; }
     public boolean isPipelined() { return pipelined; }
     public void setPipelined(boolean p) { this.pipelined = p; }
+
+    public boolean isReturnsResultSet() { return returnsResultSet; }
+    public void setReturnsResultSet(boolean v) { this.returnsResultSet = v; }
+    public int getResultSets() { return resultSets; }
+    public void setResultSets(int v) { this.resultSets = v; }
+    public String getReturnType() { return returnType; }
+    public void setReturnType(String v) { this.returnType = v; }
+    public List<String> getReturnsColumns() { return returnsColumns; }
+    public void setReturnsColumns(List<String> v) { this.returnsColumns = v != null ? v : new ArrayList<>(); }
     public List<IdentityColumnInfo> getIdentityColumns() { return identityColumns; }
     public void setIdentityColumns(List<IdentityColumnInfo> v) { this.identityColumns = v; }
 

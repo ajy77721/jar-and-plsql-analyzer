@@ -89,6 +89,36 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
                 ? ctx.getStop().getLine()
                 : ctx.getStart().getLine());
 
+        // RETURNS clause (tasks #26 + #27). The grammar already models all three shapes:
+        //   RETURNS SETOF <type>      -> setofKw? dataType
+        //   RETURNS TABLE (a int, …)  -> TABLE aliasColumnList
+        //   RETURNS <type>            -> setofKw? dataType (scalar, or the refcursor pseudo-type)
+        // Nothing here was read before, so a set-returning function was indistinguishable from a
+        // plain procedure. `refcursor` has no dedicated token (it lexes as a plain id), so it is
+        // recognised from the data-type text.
+        PostgresParser.ReturnTypeContext rt = ctx.returnType();
+        if (rt != null) {
+            if (rt.setofKw() != null && rt.dataType() != null) {
+                result.setReturnType("SETOF " + rt.dataType().getText());
+                result.setReturnsResultSet(true);
+                result.setResultSets(1);
+            } else if (rt.TABLE() != null && rt.aliasColumnList() != null) {
+                result.setReturnType("TABLE");
+                for (PostgresParser.IdContext col : rt.aliasColumnList().id()) {
+                    result.getReturnsColumns().add(cleanId(col.getText()));
+                }
+                result.setReturnsResultSet(true);
+                result.setResultSets(1);
+            } else if (rt.dataType() != null) {
+                String dt = rt.dataType().getText();
+                result.setReturnType(dt);
+                if (dt.toLowerCase(java.util.Locale.ROOT).contains("refcursor")) {
+                    result.setReturnsResultSet(true);
+                    result.setResultSets(1);
+                }
+            }
+        }
+
         return visitChildren(ctx);
     }
 
@@ -550,6 +580,11 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
 
     @Override
     public Void visitDoStatement(PostgresParser.DoStatementContext ctx) {
+        // Task #25: a DO block has no routine identity of its own (no name, no parameters, no
+        // catalog entry), so it is typed DO_BLOCK rather than masquerading as the PROCEDURE the
+        // constructor defaults to. The body is still walked below, so its table ops / calls /
+        // cursors / exception handlers are captured exactly like a routine body's.
+        result.setType(PostgresRoutineInfo.RoutineType.DO_BLOCK);
         result.setLineStart(ctx.getStart().getLine());
         result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
         return visitChildren(ctx);

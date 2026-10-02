@@ -64,6 +64,15 @@ public class PostgresProcedureParser implements StoredProcedureParser {
         obj.setStatements(toStatements(info.getStatements()));
         obj.setExceptionHandlers(toExceptionHandlers(info.getExceptionHandlers()));
         obj.setForeignKeys(toForeignKeys(info.getForeignKeys()));
+        // Tasks #26/#27: result-set marker + TVF/SETOF return shape. PostgresProcedureParser owns
+        // the only conversion into the shared ParsedObject that the artifact writer sees, so a
+        // field left here would be invisible downstream.
+        obj.setReturnsResultSet(info.isReturnsResultSet());
+        obj.setResultSets(info.getResultSets());
+        obj.setReturnType(info.getReturnType());
+        if (info.getReturnsColumns() != null && !info.getReturnsColumns().isEmpty()) {
+            obj.setReturnsColumns(new ArrayList<>(info.getReturnsColumns()));
+        }
 
         result.getObjects().add(obj);
         result.setParseTimeMs(System.currentTimeMillis() - start);
@@ -241,6 +250,8 @@ public class PostgresProcedureParser implements StoredProcedureParser {
             case FUNCTION: return "FUNCTION";
             case TRIGGER:  return "TRIGGER";
             case VIEW:     return "VIEW";
+            // Task #25: keep the DO block's own identity instead of folding it into PROCEDURE.
+            case DO_BLOCK: return "DO_BLOCK";
             default:       return "PROCEDURE";
         }
     }

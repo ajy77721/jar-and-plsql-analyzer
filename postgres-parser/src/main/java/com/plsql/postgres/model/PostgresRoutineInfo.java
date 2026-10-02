@@ -11,7 +11,12 @@ public class PostgresRoutineInfo {
     // break it; the table itself reaches the shared model as a CREATE table operation, which is
     // what downstream lineage actually consumes.
     public enum RoutineType { PROCEDURE, FUNCTION, TRIGGER, VIEW, SEQUENCE, INDEX, ALTER_TABLE,
-                              CREATE_TABLE, TYPE, DOMAIN }
+                              CREATE_TABLE, TYPE, DOMAIN,
+                              // Task #25: an anonymous DO $$ ... $$ block. PostgreSQL has no
+                              // catalog entry for a DO block (it is not a named routine), so it is
+                              // never DB-discoverable — it only becomes an analyzable unit when the
+                              // source is supplied to the parser (a migration script / source file).
+                              DO_BLOCK }
 
     private String       schema;
     private String       name;
@@ -28,6 +33,19 @@ public class PostgresRoutineInfo {
     private List<PostgresSequenceInfo>   sequences  = new ArrayList<>();
     private List<PostgresExceptionHandlerInfo> exceptionHandlers = new ArrayList<>();
     private List<String>            errors     = new ArrayList<>();
+
+    // ── Result-set / return-shape metadata (tasks #26 + #27) ───────────────────
+    // returnsResultSet/resultSets (#26): true when the function hands a result set back — a RETURNS
+    // refcursor or RETURNS SETOF function (resultSets = 1). A plain procedure or a scalar function
+    // leaves both false/0.
+    private boolean      returnsResultSet;
+    private int          resultSets;
+    // returnType/returnsColumns (#27): the declared RETURNS shape as written. returnType holds the
+    // data-type text ("SETOF integer", "refcursor", "integer") or the literal "TABLE" for a
+    // RETURNS TABLE(...) function; returnsColumns holds the column names of that TABLE shape in
+    // declaration order (empty for every other shape). Null returnType = no RETURNS clause.
+    private String       returnType;
+    private List<String> returnsColumns = new ArrayList<>();
 
     // Trigger metadata (populated for RoutineType.TRIGGER) — mirrors SqlServerRoutineInfo's
     // trigger fields. In PostgreSQL the trigger statement itself has no body, so
@@ -117,6 +135,14 @@ public class PostgresRoutineInfo {
     public List<PostgresSequenceInfo>   getSequences()  { return sequences; }
     public List<PostgresExceptionHandlerInfo> getExceptionHandlers() { return exceptionHandlers; }
     public List<String>            getErrors()     { return errors; }
+
+    public boolean      isReturnsResultSet() { return returnsResultSet; }
+    public void         setReturnsResultSet(boolean v) { this.returnsResultSet = v; }
+    public int          getResultSets()      { return resultSets; }
+    public void         setResultSets(int v) { this.resultSets = v; }
+    public String       getReturnType()      { return returnType; }
+    public void         setReturnType(String v) { this.returnType = v; }
+    public List<String> getReturnsColumns()  { return returnsColumns; }
 
     public String  getTriggerTable()    { return triggerTable; }
     public void    setTriggerTable(String v)    { this.triggerTable = v; }

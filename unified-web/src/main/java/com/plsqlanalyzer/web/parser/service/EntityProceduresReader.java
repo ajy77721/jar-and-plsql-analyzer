@@ -102,9 +102,15 @@ public class EntityProceduresReader {
         if (run == null) return null;
         String runId = run.getString("key");
 
+        // Tasks #26/#27: returnsResultSet/resultSets/returnType are scalars, so Splitter copies them
+        // onto am_proc_node and they are read here for parity with the artifact-scan path.
+        // returnsColumns is an ARRAY — Splitter puts it in a child collection — so it is NOT read
+        // here (the artifact-scan path is the one that carries it; this reader's other documented
+        // package gaps are the same shape of simplification).
         record ProcNode(String entityKey, String nodeId, String name, String schema,
                         String objectType, int depth, int linesOfCode, String sourceFile,
-                        int lineStart, int lineEnd) {}
+                        int lineStart, int lineEnd, boolean returnsResultSet, int resultSets,
+                        String returnType) {}
         List<ProcNode> nodes = new java.util.ArrayList<>();
         try (MongoCursor<Document> cur = QueryBudget.request(db.getCollection("am_proc_node"))
                 .find(Filters.eq("runId", runId))
@@ -121,7 +127,10 @@ public class EntityProceduresReader {
                         d.get("linesOfCode") == null ? 0 : ((Number) d.get("linesOfCode")).intValue(),
                         d.getString("sourceFile"),
                         d.get("lineStart") == null ? 0 : ((Number) d.get("lineStart")).intValue(),
-                        d.get("lineEnd") == null ? 0 : ((Number) d.get("lineEnd")).intValue()));
+                        d.get("lineEnd") == null ? 0 : ((Number) d.get("lineEnd")).intValue(),
+                        Boolean.TRUE.equals(d.getBoolean("returnsResultSet")),
+                        d.get("resultSets") == null ? 0 : ((Number) d.get("resultSets")).intValue(),
+                        d.getString("returnType")));
             }
         }
         // BUGFIX (§267): `null`, NOT an empty result. An empty result is an ANSWER — the caller
@@ -166,6 +175,13 @@ public class EntityProceduresReader {
             if (n.sourceFile() != null) row.put("sourceFile", n.sourceFile());
             if (n.lineStart() > 0) row.put("lineStart", n.lineStart());
             if (n.lineEnd() > 0) row.put("lineEnd", n.lineEnd());
+            // Tasks #26/#27: mirror the index-row fields the artifact path emits so the procedures
+            // facet's returns-data filter / return-shape column work identically on both sources.
+            if (n.returnsResultSet()) {
+                row.put("returnsResultSet", true);
+                row.put("resultSets", n.resultSets());
+            }
+            if (n.returnType() != null) row.put("returnType", n.returnType());
             // The real fix for the "clicking a procedure shows nothing" bug — see this class's own
             // doc comment. Standalone-entrypoint convention only; see the doc comment's own stated
             // package-analysis gap.
