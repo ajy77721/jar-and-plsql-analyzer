@@ -4,8 +4,7 @@ PA._updateDetailHeader = async function(detail) {
     var header = document.getElementById('detailHeader');
     if (!detail) {
         if (header) header.style.display = 'none';
-        var ac = document.getElementById('allCasesSection');
-        if (ac) ac.innerHTML = '';
+        if (PA.detailsTab && PA.detailsTab.updateLabels) PA.detailsTab.updateLabels(null);
         return;
     }
     header.style.display = '';
@@ -77,8 +76,9 @@ PA._updateDetailHeader = async function(detail) {
 
     PA._updateNavBar(detail);
 
-    // Per-procedure "All cases (N)" — every case captured on this node's own doc, with examples.
-    if (PA.allCases && PA.allCases.render) PA.allCases.render(detail);
+    // Per-procedure case counts in the Details sub-tab labels ("Cursors (43)", …). The retired
+    // "All cases" accordion panel used to render these counts; they live on the tab labels now.
+    if (PA.detailsTab && PA.detailsTab.updateLabels) PA.detailsTab.updateLabels(detail);
 };
 
 /**

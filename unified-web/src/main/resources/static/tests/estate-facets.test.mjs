@@ -290,3 +290,37 @@ export async function test_details_tab_lazily_loads_the_estate_sections() {
   includes(app, "sub === 'jobs' && !PA._detailsSubLoaded.jobs", 'jobs is not lazily loaded by detailsTab');
   includes(app, 'views: false, triggers: false, globals: false, jobs: false', 'the estate load guards are not part of _detailsSubLoaded');
 }
+
+export async function test_estate_sections_size_to_content_inside_details() {
+  const html = await read('parser/index.html');
+  // Every estate sub-view is marked content-sized (no full-screen void when the list is short).
+  for (const id of ['estViewViews', 'estViewTriggers', 'estViewGlobals', 'estViewJobs']) {
+    includes(html, `class="dt-subview fit-subview" id="${id}"`,
+      `${id} must be a content-sized Details sub-view`);
+  }
+  // The standalone-era inline height/flex styles are gone from the estate containers.
+  for (const cid of ['vwContainer', 'tgContainer', 'glContainer', 'jbContainer']) {
+    excludes(html, `id="${cid}" style="flex:1;overflow:auto"`,
+      `${cid} must not carry the standalone-era flex:1 container style`);
+  }
+  // The layout rules that make them compact live in the stylesheet.
+  const css = await read('parser/css/table-ops.css');
+  includes(css, '#viewDetails .dt-subview.fit-subview { flex: 0 0 auto; overflow: visible; }',
+    'the fit sub-views must not stretch');
+  includes(css, '#viewDetails .dt-subview.fit-subview .to-container { flex: none; max-height: 60vh; }',
+    'long estate tables must get a bounded inner scroll');
+  includes(css, '#viewDetails { overflow-y: auto; }',
+    'the Details pane must scroll instead of the sub-view stretching');
+}
+
+export async function test_transactions_sub_tab_uses_the_paginated_usage_table() {
+  const PA = await loadParser('parser/js/transactions.js');
+  ok(PA.transactions, 'the transactions module must load');
+  const src = await read('parser/js/transactions.js');
+  includes(src, 'PA.usageTable.render', 'the transactions list must render through the shared usage table');
+  includes(src, 'PA.usageTable.mount', 'the transactions usage table must be mounted (pager + filter)');
+  excludes(src, 'innerHTML = html', 'the transactions list must no longer be a flat table dump');
+  const html = await read('parser/index.html');
+  includes(html, 'class="dt-subview fit-subview" id="dtViewTransactions"',
+    'the transactions sub-view must be content-sized too');
+}

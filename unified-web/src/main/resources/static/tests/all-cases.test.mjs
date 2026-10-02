@@ -1,9 +1,12 @@
 /**
- * The per-procedure "All cases (N)" panel and the estate usage tables that share the component.
+ * The per-procedure case counts that now live in the Details sub-tab labels, and the estate usage
+ * tables that share the component.
  *
- * The node-doc group builder is pure (`PA.allCases._groups`), so it is asserted directly; the estate
- * detail renderers are asserted through their real output, including that a hostile object name in a
- * usage row is escaped.
+ * The retired "All cases (N)" accordion panel used to render these counts; the panel is gone and
+ * the counts moved into the sub-tab labels ("Cursors (43)", …). The node-doc group builder
+ * (`PA.allCases._groups`) and the label count map (`PA.allCases.counts`) are pure, so they are
+ * asserted directly; the estate detail renderers are asserted through their real output, including
+ * that a hostile object name in a usage row is escaped.
  */
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +40,10 @@ const NODE = {
            { schema: 'S', name: 'V', objectType: 'VIEW', operations: { SELECT: [30] } }],
   externalPackageVarRefDetails: [{ packageName: 'PKG', variableName: 'G_X', line: 40, accessType: 'WRITE' }],
   calls: [{ objectName: 'P2', target: 'S$PKG$P2', packageName: 'PKG', type: 'INTERNAL', lines: [50], count: 1 }],
-  sequences: [{ schema: 'S', name: 'SEQ1', operations: { NEXTVAL: [60] } }]
+  sequences: [{ schema: 'S', name: 'SEQ1', operations: { NEXTVAL: [60] } }],
+  statementSummary: { SELECT: 3, INSERT: 1 },
+  transactionScope: { statements: [{ type: 'COMMIT', line: 70 }, { type: 'ROLLBACK', line: 72 }] },
+  exceptionHandlers: [{ name: 'WHEN_OTHERS', line: 80 }]
 };
 
 export async function test_all_cases_groups_every_applicable_case() {
@@ -125,12 +131,56 @@ export async function test_globals_usage_leads_with_the_variable_name() {
     'the variable name must appear before the referencing procedure');
 }
 
+/* ------------------------- label counts (the moved panel) ------------------------- */
+
+export async function test_all_cases_counts_map_to_the_details_sub_tabs() {
+  const PA = await load('parser/js/allCases.js');
+  const c = PA.allCases.counts(NODE);
+  equal(c.cursors, 1, 'the Cursors count must be the node doc cursor count');
+  equal(c.dynamic, 1, 'the Dynamic SQL count must be the node doc dynamicSql count');
+  equal(c.joins, 1, 'the Join Summary count must be the node doc join count');
+  equal(c.globals, 1, 'the Globals count must be the node doc external package var count');
+  equal(c.sequences, 1, 'the Sequences count must be the node doc sequence count');
+  equal(c.views, 1, 'the Views count must be the node doc view count');
+  equal(c.statements, 4, 'the Statements count must total the statementSummary');
+  equal(c.transactions, 2, 'the Transactions count must come from transactionScope');
+  equal(c.exHandlers, 1, 'the Exceptions count must be the node doc exceptionHandlers length');
+  equal(c.triggers, 0, 'Triggers fired is async — it starts at 0, never a guess');
+}
+
+export async function test_all_cases_counts_are_applicable_only() {
+  const PA = await load('parser/js/allCases.js');
+  const c = PA.allCases.counts({ nodeId: 'X', tables: [] });
+  for (const k of Object.keys(c)) equal(c[k], 0, `a node with no cases must count 0 for ${k}`);
+}
+
 /* ------------------------------- wiring ------------------------------- */
 
-export async function test_all_cases_is_wired_into_the_page() {
+export async function test_all_cases_panel_is_retired() {
   const html = await read('parser/index.html');
   includes(html, 'usage-table.js', 'the shared usage-table component is not included');
-  includes(html, 'allCases.js', 'the All-cases module is not included');
+  includes(html, 'allCases.js', 'the counts helper module is not included');
+  // The accordion panel (its host element and title) must be gone from the page and the code.
+  excludes(html, 'allCasesSection', 'the All-cases accordion host must be removed');
+  const mod = await read('parser/js/allCases.js');
+  excludes(mod, 'PA.allCases.render', 'the All-cases panel renderer must be retired');
+  excludes(mod, 'ac-wrap', 'the All-cases panel styling must be retired');
   const header = await read('parser/js/detailHeader.js');
-  includes(header, 'PA.allCases.render(detail)', 'the procedure detail view must render the All-cases panel');
+  excludes(header, 'PA.allCases.render(detail)', 'the detail view must not render the retired panel');
+}
+
+export async function test_counts_are_wired_into_the_sub_tab_labels() {
+  const header = await read('parser/js/detailHeader.js');
+  includes(header, 'PA.detailsTab.updateLabels(detail)',
+    'loading a node detail must refresh the Details sub-tab label counts');
+  const app = await read('parser/js/app.js');
+  includes(app, 'updateLabels: function', 'detailsTab must expose the label-count updater');
+  includes(app, 'PA.allCases.counts', 'the labels must be built from the node-doc counts helper');
+  includes(app, "data-dtview", 'the updater must target the Details sub-tab buttons');
+  // The "Cursors (43)" suffix format and the async triggers count.
+  includes(app, "' (' + n + ')'", 'the count must render as a "(N)" suffix on the label');
+  includes(app, 'PA.allCases.triggerCount', 'the async Triggers-fired count must patch its label');
+  // Opened from the Details tab, not only on detail load.
+  includes(app, 'PA.detailsTab.updateLabels(PA.currentDetail)',
+    'opening the Details tab must compute the label counts');
 }

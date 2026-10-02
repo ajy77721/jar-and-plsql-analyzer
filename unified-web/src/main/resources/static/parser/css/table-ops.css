@@ -10,6 +10,21 @@
     border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-card);
 }
 
+/* ==========================================================================
+   Details sub-views that host a bounded list (estate facets: Views & MVs /
+   Triggers / Globals / Scheduled, plus Transactions) must size to their
+   content — NOT stretch to a full-screen empty panel.
+
+   When these were the standalone top-level Estate tab they relied on the
+   tab's own height/flex/absolute styles; embedded in Details those styles
+   leave a tall empty card under a short table. Here the sub-view is content-
+   sized and the Details pane scrolls; only a long table gets a bounded inner
+   scroll, so a 3-row Globals list is a compact 3-row table.
+   ========================================================================== */
+#viewDetails { overflow-y: auto; }
+#viewDetails .dt-subview.fit-subview { flex: 0 0 auto; overflow: visible; }
+#viewDetails .dt-subview.fit-subview .to-container { flex: none; max-height: 60vh; }
+
 .to-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .to-table thead { background: var(--bg-top-bar); position: sticky; top: 0; z-index: 1; }
 .to-table th {

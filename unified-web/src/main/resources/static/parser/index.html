@@ -443,15 +443,14 @@
                                 <div class="to-container" id="dynContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see dynamic SQL</div></div>
                             </div>
 
-                            <div class="dt-subview" id="dtViewTransactions">
+                            <div class="dt-subview fit-subview" id="dtViewTransactions">
                                 <div class="to-toolbar">
                                     <div class="to-filters">
-                                        <input type="text" id="txnSearch" class="form-input" placeholder="Search transactions..." oninput="PA.transactions.onSearch()" style="width:180px">
-                                        <span class="op-filter-clear" onclick="PA.transactions.clearFilter()">Clear</span>
+                                        <span style="font-size:11px;color:var(--text-muted)">Transaction-control statements (COMMIT / ROLLBACK / SAVEPOINT) — filter and page in the table below</span>
                                     </div>
                                     <div class="to-summary"><span id="txnTotalCount" class="badge">0 statements</span></div>
                                 </div>
-                                <div class="to-container" id="txnContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see transaction control</div></div>
+                                <div class="to-container" id="txnContainer"><div class="empty-msg">Run analysis to see transaction control</div></div>
                             </div>
 
                             <div class="dt-subview" id="dtViewCursors">
@@ -505,7 +504,7 @@
                             </div>
 
                             <!-- ===== Estate sections (formerly their own top-level Estate tab) ===== -->
-                            <div class="dt-subview" id="estViewViews">
+                            <div class="dt-subview fit-subview" id="estViewViews">
                                 <div class="to-toolbar">
                                     <div class="to-filters">
                                         <input type="text" id="vwSearch" class="form-input" placeholder="Search views..." oninput="PA.estateViews.onSearch()" style="width:180px">
@@ -516,11 +515,11 @@
                                         <span id="vwTotalCount" class="badge">0 views</span>
                                     </div>
                                 </div>
-                                <div class="to-container" id="vwContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see views</div></div>
+                                <div class="to-container" id="vwContainer"><div class="empty-msg">Select an analysis to see views</div></div>
                                 <div class="pagination-bar" id="vw-pager" style="display:none"></div>
                             </div>
 
-                            <div class="dt-subview" id="estViewTriggers">
+                            <div class="dt-subview fit-subview" id="estViewTriggers">
                                 <div class="to-toolbar">
                                     <div class="to-filters">
                                         <input type="text" id="tgSearch" class="form-input" placeholder="Search triggers..." oninput="PA.estateTriggers.onSearch()" style="width:180px">
@@ -531,11 +530,11 @@
                                         <span id="tgTotalCount" class="badge">0 triggers</span>
                                     </div>
                                 </div>
-                                <div class="to-container" id="tgContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see triggers</div></div>
+                                <div class="to-container" id="tgContainer"><div class="empty-msg">Select an analysis to see triggers</div></div>
                                 <div class="pagination-bar" id="tg-pager" style="display:none"></div>
                             </div>
 
-                            <div class="dt-subview" id="estViewGlobals">
+                            <div class="dt-subview fit-subview" id="estViewGlobals">
                                 <div class="to-toolbar">
                                     <div class="to-filters">
                                         <input type="text" id="glSearch" class="form-input" placeholder="Search packages..." oninput="PA.estateGlobals.onSearch()" style="width:180px">
@@ -545,11 +544,11 @@
                                         <span id="glTotalCount" class="badge">0 packages</span>
                                     </div>
                                 </div>
-                                <div class="to-container" id="glContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see package globals</div></div>
+                                <div class="to-container" id="glContainer"><div class="empty-msg">Select an analysis to see package globals</div></div>
                                 <div class="pagination-bar" id="gl-pager" style="display:none"></div>
                             </div>
 
-                            <div class="dt-subview" id="estViewJobs">
+                            <div class="dt-subview fit-subview" id="estViewJobs">
                                 <div class="to-toolbar">
                                     <div class="to-filters">
                                         <input type="text" id="jbSearch" class="form-input" placeholder="Search jobs..." oninput="PA.estateJobs.onSearch()" style="width:180px">
@@ -559,7 +558,7 @@
                                         <span id="jbTotalCount" class="badge">0 jobs</span>
                                     </div>
                                 </div>
-                                <div class="to-container" id="jbContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see scheduled jobs</div></div>
+                                <div class="to-container" id="jbContainer"><div class="empty-msg">Select an analysis to see scheduled jobs</div></div>
                                 <div class="pagination-bar" id="jb-pager" style="display:none"></div>
                             </div>
                         </div>
