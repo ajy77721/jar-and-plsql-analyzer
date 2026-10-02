@@ -301,14 +301,14 @@ PA.estateTriggers = {
         html += '<div class="est-section"><div class="est-section-title">Will fire this trigger ('
             + ((t.willFire || []).length) + ')</div>';
         html += PA.estateTriggers._firedByHtml(t.willFire, esc,
-            'No procedure in this analysis performs the trigger\'s event on its table.', idx);
+            'No procedure in this analysis performs the trigger\'s event on its table.', idx, 'willfire');
         html += '</div>';
 
         // Every procedure that writes the trigger's table (any DML), for completeness.
         html += '<div class="est-section"><div class="est-section-title">Writes the table — any DML ('
             + ((t.firedBy || []).length) + ')</div>';
         html += PA.estateTriggers._firedByHtml(t.firedBy, esc,
-            'No procedure in this analysis writes to the trigger\'s table.', idx);
+            'No procedure in this analysis writes to the trigger\'s table.', idx, 'firedby');
         html += '</div>';
 
         return html;
@@ -338,11 +338,11 @@ PA.estateTriggers = {
         });
     },
 
-    _firedByHtml: function(firedBy, esc, emptyMsg, idx) {
+    _firedByHtml: function(firedBy, esc, emptyMsg, idx, key) {
         if (!firedBy || !firedBy.length) {
             return '<div class="est-empty">' + (emptyMsg || 'No procedure in this analysis writes to the trigger\'s table.') + '</div>';
         }
-        return PA.usageTable.attach('ut-tg-firedby-' + idx, firedBy, {
+        return PA.usageTable.attach('ut-tg-' + (key || 'firedby') + '-' + idx, firedBy, {
             showTitle: false, nameLabel: 'Procedure', countLabel: 'procedures', showSnippet: false,
             name: function (u) { return u.nodeName || u.nodeId || ''; },
             nameLink: function (u) { return "PA.showProcedure('" + PA.escJs(u.nodeId || '') + "')"; },

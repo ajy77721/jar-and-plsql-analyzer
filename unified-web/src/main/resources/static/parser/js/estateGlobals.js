@@ -196,24 +196,19 @@ PA.estateGlobals = {
         var vars = d.variables || [];
         html += '<div class="est-section"><div class="est-section-title">Variables (' + vars.length + ')</div>';
         if (vars.length) {
-            html += '<table class="est-cols"><thead><tr><th>Name</th><th>Data Type</th><th>Default</th><th>Const</th><th>Reads</th><th>Writes</th></tr></thead><tbody>';
-            for (var i = 0; i < vars.length; i++) {
-                var v = vars[i];
-                var declared = v.declared !== false;
-                html += '<tr>'
-                    + '<td class="est-col-name est-var-name">' + esc(v.name || '') + '</td>'
-                    + '<td class="est-col-type">' + (v.dataType ? esc(v.dataType) : '<span style="color:var(--text-muted)">not recorded</span>') + '</td>'
-                    + '<td class="est-col-type">' + (v.defaultValue != null ? esc(v.defaultValue) : '<span style="color:var(--text-muted)">-</span>') + '</td>'
-                    + '<td>' + (v.constant ? 'YES' : 'NO') + '</td>'
-                    + '<td>' + (v.readCount || 0) + '</td>'
-                    + '<td>' + (v.writeCount || 0) + '</td>'
-                    + '</tr>';
-                if (!declared) {
-                    html += '<tr><td colspan="6" style="font-size:10px;color:var(--text-muted);padding-top:0">'
-                        + 'Reference-only — no declaration captured (analysis predates declaration persistence).</td></tr>';
-                }
-            }
-            html += '</tbody></table>';
+            // The VARIABLE name leads (bold, first column); type/default/const/read-write ride as badges.
+            html += PA.usageTable.attach('ut-gl-vars-' + idx, vars, {
+                showTitle: false, nameLabel: 'Variable', countLabel: 'variables', snippetLabel: 'Default',
+                nameClass: 'est-var-name',
+                name: function (v) { return v.name; },
+                snippet: function (v) { return v.defaultValue != null ? String(v.defaultValue) : ''; },
+                badges: function (v) {
+                    return [v.dataType || 'not recorded', v.constant ? 'CONST' : null,
+                            v.declared === false ? 'REFERENCE-ONLY' : null,
+                            (v.readCount || 0) + ' reads', (v.writeCount || 0) + ' writes'];
+                },
+                search: function (v) { return v.declared === false ? 'reference-only' : ''; }
+            });
         } else {
             html += '<div class="est-empty">No variables recorded for this package.</div>';
         }
@@ -262,10 +257,10 @@ PA.estateGlobals = {
             showTitle: false, nameLabel: 'Variable', countLabel: 'usages',
             nameClass: 'est-var-name',
             name: function (r) { return r.variable; },
-            sub: function (r) {
-                return { text: r.procedureName || r.procedureId || '',
-                         link: "PA.showProcedure('" + PA.escJs(r.procedureId || '') + "')" };
-            },
+            // Both names are visible at row level: the VARIABLE name leads; the procedure is the
+            // second, clickable column.
+            procedure: function (r) { return r.procedureName || r.procedureId || ''; },
+            procedureLink: function (r) { return "PA.showProcedure('" + PA.escJs(r.procedureId || '') + "')"; },
             badges: function (r) {
                 var m = (varMeta || {})[String(r.variable || '').toUpperCase()] || {};
                 return [r.accessType, m.dataType, m.constant ? 'CONST' : null,
@@ -287,10 +282,10 @@ PA.estateGlobals = {
             showTitle: false, nameLabel: 'Variable', countLabel: 'usages',
             nameClass: 'est-var-name',
             name: function (u) { return u.variable; },
-            sub: function (u) {
-                return { text: u.procedureName || u.procedureId || '',
-                         link: "PA.showProcedure('" + PA.escJs(u.procedureId || '') + "')" };
-            },
+            // Both names are visible at row level: the VARIABLE name leads; the procedure is the
+            // second, clickable column.
+            procedure: function (u) { return u.procedureName || u.procedureId || ''; },
+            procedureLink: function (u) { return "PA.showProcedure('" + PA.escJs(u.procedureId || '') + "')"; },
             badges: function (u) {
                 var m = (varMeta || {})[String(u.variable || '').toUpperCase()] || {};
                 return [u.accessType || 'READ', m.dataType, m.constant ? 'CONST' : null];

@@ -174,6 +174,7 @@ window.PA = window.PA || {};
 
     function rowSearchText(row, opts) {
         var parts = [nameOf(row, opts), snippetOf(row, opts)];
+        if (opts && opts.procedure) parts.push(String(opts.procedure(row) || ''));
         badgesOf(row, opts).forEach(function (b) { parts.push(b.text); });
         var ln = firstLine(row, opts);
         if (ln != null) parts.push('L' + ln);
@@ -213,8 +214,15 @@ window.PA = window.PA || {};
 
     function colLayout(opts) {
         var showSnippet = opts.showSnippet !== false;
-        return { showSnippet: showSnippet, nameCol: 0, lineCol: 1,
-                 snippetCol: showSnippet ? 2 : -1, kindCol: showSnippet ? 3 : 2 };
+        var hasProc = !!opts.procedure;
+        var c = 0;
+        var nameCol = c++;
+        var procCol = hasProc ? c++ : -1;
+        var lineCol = c++;
+        var snippetCol = showSnippet ? c++ : -1;
+        var kindCol = c;
+        return { showSnippet: showSnippet, hasProc: hasProc, nameCol: nameCol, procCol: procCol,
+                 lineCol: lineCol, snippetCol: snippetCol, kindCol: kindCol };
     }
 
     function lineHtml(ln, link) {
@@ -246,6 +254,16 @@ window.PA = window.PA || {};
                     + '</span>';
             }
             html += '</td>';
+            if (layout.hasProc) {
+                var proc = opts.procedure(row);
+                var plink = opts.procedureLink ? opts.procedureLink(row) : null;
+                proc = (proc == null || proc === '') ? '' : String(proc);
+                html += '<td class="ut-proc">';
+                html += proc
+                    ? (plink ? '<span class="ut-link" onclick="event.stopPropagation();' + plink + '">' + e(proc) + '</span>' : e(proc))
+                    : '<span class="ut-dim">—</span>';
+                html += '</td>';
+            }
             html += '<td class="ut-line">' + lineHtml(ln, lineLink) + '</td>';
             if (layout.showSnippet) html += '<td class="ut-sql">' + snippetHtml(snippetOf(row, opts), e, opts.snippetLimit) + '</td>';
             html += '<td class="ut-kind">' + badgesHtml(badgesOf(row, opts), e) + '</td>';
@@ -299,6 +317,10 @@ window.PA = window.PA || {};
         h += '<table class="to-table ut-table" id="' + e(id) + '"><thead><tr>';
         h += '<th data-sort-col="' + layout.nameCol + '" onclick="PA.usageTable.sort(\'' + escJs(id) + '\',' + layout.nameCol + ')">'
             + e(opts.nameLabel || 'Name') + '</th>';
+        if (layout.hasProc) {
+            h += '<th data-sort-col="' + layout.procCol + '" onclick="PA.usageTable.sort(\'' + escJs(id) + '\',' + layout.procCol + ')">'
+                + e(opts.procedureLabel || 'Procedure') + '</th>';
+        }
         h += '<th data-sort-col="' + layout.lineCol + '" onclick="PA.usageTable.sort(\'' + escJs(id) + '\',' + layout.lineCol + ')">Line</th>';
         if (layout.showSnippet) h += '<th>' + e(opts.snippetLabel || 'SQL') + '</th>';
         h += '<th>Kind</th>';
@@ -345,6 +367,9 @@ window.PA = window.PA || {};
         var sortKeys = {};
         sortKeys[layout.nameCol] = { fn: function (r) { return nameOf(r, opts).toUpperCase(); } };
         sortKeys[layout.lineCol] = { fn: function (r) { var l = firstLine(r, opts); return l == null ? 0 : l; } };
+        if (layout.hasProc) {
+            sortKeys[layout.procCol] = { fn: function (r) { return String(opts.procedure(r) || '').toUpperCase(); } };
+        }
 
         PA.tf.init(id, rows, opts.pageSize || DEFAULT_PAGE, makeRowRenderer(id, opts), {
             sortKeys: sortKeys,
@@ -472,13 +497,13 @@ window.PA = window.PA || {};
             '.ut-pill.active{opacity:1;border-color:var(--border-subtle)}',
             '.ut-pill-n{font-weight:400;opacity:.75}',
             '.ut-shown{font-size:10px;color:var(--text-muted);margin-left:auto}',
-            '.ut-table{width:100%;table-layout:fixed}',
+            '.ut-table{width:100%;table-layout:auto}',
             '.ut-table thead{position:static}',
             '.ut-table th{cursor:pointer;text-align:left;font-size:9px;text-transform:uppercase;',
             '  letter-spacing:.05em;color:var(--text-muted);font-weight:700;padding:3px 6px;border-bottom:1px solid var(--border-subtle)}',
             '.ut-table td{padding:3px 6px;vertical-align:top;font-size:11px;border-bottom:1px solid var(--border-subtle)}',
-            '.ut-table th:nth-child(1){width:30%}.ut-table th:nth-child(2){width:8%}',
-            '.ut-table th:nth-child(3){width:44%}.ut-table th:nth-child(4){width:18%}',
+            '.ut-table th:nth-child(1),.ut-table td:nth-child(1){width:26%}',
+            '.ut-proc{font-family:var(--font-mono);word-break:break-word}',
             '.ut-row:hover{background:var(--bg-hover,rgba(128,128,128,.08))}',
             '.ut-row.ut-expandable{cursor:pointer}',
             '.ut-name{font-family:var(--font-mono);font-weight:600;color:var(--text);word-break:break-word}',

@@ -128,6 +128,20 @@ export async function test_expandable_row_wires_toggle_detail() {
 
 /* ------------------------------ panel markup ------------------------------ */
 
+export async function test_optional_procedure_column_renders_second_and_is_searchable() {
+  const U = await loadUsageTable();
+  const opts = { name: (r) => r.variable, procedure: (r) => r.procedureName,
+                 procedureLink: (r) => "PA.showProcedure('" + r.procedureId + "')" };
+  const row = U.makeRowRenderer('ut-p', opts)({ variable: 'G_X', procedureName: 'P1', procedureId: 'ID1', lineNumber: 3 }, 0, (v) => Esc.html(v));
+  includes(row, 'ut-proc', 'the procedure cell is missing');
+  includes(row, "PA.showProcedure('ID1')", 'the procedure link is missing');
+  ok(row.indexOf('G_X') < row.indexOf('P1'), 'the variable name must lead and the procedure follow');
+  const html = U.render('ut-p', [{ variable: 'G_X', procedureName: 'P1' }], opts);
+  includes(html, '>Procedure<', 'the procedure column header is missing');
+  equal(U.filterRows([{ variable: 'G_X', procedureName: 'P1' }], 'p1', opts).length, 1,
+    'the procedure name must be searchable');
+}
+
 export async function test_render_emits_count_filter_pager_and_columns() {
   const U = await loadUsageTable();
   const html = U.render('ut-x', ROWS, { title: 'Used By', countLabel: 'usages' });

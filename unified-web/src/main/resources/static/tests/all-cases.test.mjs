@@ -131,6 +131,74 @@ export async function test_globals_usage_leads_with_the_variable_name() {
     'the variable name must appear before the referencing procedure');
 }
 
+/* ------------------- every estate table carries its own filter ------------------- */
+
+export async function test_every_estate_table_has_a_text_filter() {
+  const PA = await load('parser/js/estateViews.js');
+  const viewHtml = PA.estateViews._detailHtml({
+    name: 'V', schema: 'S', objectType: 'VIEW', definition: 'SELECT 1', columns: [],
+    baseTables: [], columnCount: 0, baseTableCount: 0, usedByCount: 1, chain: null,
+    usedBy: [{ nodeId: 'S$P1', nodeName: 'P1', operations: { SELECT: [1] } }],
+    joins: [{ joinType: 'INNER', leftTable: 'A', joinedTable: 'B', condition: 'a=b', line: 1 }],
+    indexes: [{ name: 'IX', unique: true, columns: ['X'] }],
+    baseTableIndexes: [{ table: 'A', tableSchema: 'S', name: 'IXA', unique: false, columns: ['ID'] }],
+    constraints: [{ name: 'CK', type: 'C', condition: 'X>0' }],
+    triggerBoundTables: [{ table: 'A', schema: 'S', triggers: [{ name: 'T', timing: 'AFTER', event: 'INSERT', status: 'ENABLED' }] }],
+    usedByViews: [{ name: 'V2', schema: 'S', operation: 'SELECT' }],
+    usedByTriggers: [{ name: 'T', schema: 'S', timing: 'AFTER', event: 'INSERT', operation: 'SELECT' }],
+    dynamicSqlRefs: [{ procedureId: 'S$P1', procedureName: 'P1', lineNumber: 7, type: 'EXECUTE_IMMEDIATE', sqlExpression: 'SELECT 1' }]
+  }, esc, 0);
+  for (const id of ['ut-vw-usedby-0', 'ut-vw-usedbyviews-0', 'ut-vw-usedbytriggers-0', 'ut-vw-dynsql-0',
+                    'ut-vw-triggerbound-0', 'ut-vw-joins-0', 'ut-vw-indexes-0', 'ut-vw-btindexes-0', 'ut-vw-constraints-0']) {
+    includes(viewHtml, id + '-q', `table ${id} must render a text filter`);
+  }
+
+  const T = await load('parser/js/estateTriggers.js');
+  const trigHtml = T.estateTriggers._detailHtml({
+    name: 'T', table: 'A', event: 'INSERT', timing: 'AFTER',
+    touches: [{ name: 'A', schema: 'S', operation: 'INSERT' }], touchesCount: 1, chain: null,
+    bodyCalls: [{ objectName: 'P', type: 'INTERNAL', lines: [1], count: 1 }],
+    willFire: [{ nodeId: 'S$P1', nodeName: 'P1', matchingOperations: { INSERT: [1] } }],
+    firedBy: [{ nodeId: 'S$P2', nodeName: 'P2', operations: { UPDATE: [2] } }]
+  }, esc, 0);
+  for (const id of ['ut-tg-bodycalls-0', 'ut-tg-touches-0', 'ut-tg-willfire-0', 'ut-tg-firedby-0']) {
+    includes(trigHtml, id + '-q', `table ${id} must render a text filter`);
+  }
+  // willFire and firedBy are distinct tables with distinct ids (they used to collide).
+  equal(trigHtml.split('ut-tg-willfire-0-q').length - 1, 1, 'the will-fire table filter must appear once');
+  equal(trigHtml.split('ut-tg-firedby-0-q').length - 1, 1, 'the any-DML table filter must appear once');
+
+  const G = await load('parser/js/estateGlobals.js');
+  const globHtml = G.estateGlobals._detailHtml({
+    package: 'PKG', variableCount: 1, readCount: 1, writeCount: 1,
+    variables: [{ name: 'G_X', dataType: 'NUMBER', defaultValue: '0', constant: false, declared: true, readCount: 1, writeCount: 1 }],
+    usedBy: [{ variable: 'G_X', accessType: 'READ', procedureName: 'P1', procedureId: 'S$P1', lineNumber: 3, sourceFile: 'f.sql' }],
+    byProcedure: [{ procedureId: 'S$P1', procedureName: 'P1', sourceFile: 'f.sql',
+                    reads: [{ variable: 'G_X', lineNumber: 3 }], writes: [], readCount: 1, writeCount: 0 }]
+  }, esc, 0);
+  for (const id of ['ut-gl-vars-0', 'ut-gl-usedby-0', 'ut-gl-footprint-0']) {
+    includes(globHtml, id + '-q', `table ${id} must render a text filter`);
+  }
+}
+
+export async function test_globals_rows_show_both_variable_and_procedure() {
+  const G = await load('parser/js/estateGlobals.js');
+  const html = G.estateGlobals._detailHtml({
+    package: 'PKG', variableCount: 1, readCount: 1, writeCount: 0,
+    variables: [{ name: 'G_X', dataType: 'NUMBER', defaultValue: null, constant: false, declared: true }],
+    usedBy: [{ variable: 'G_X', accessType: 'READ', procedureName: 'P.READER', procedureId: 'ID1', lineNumber: 3, sourceFile: 'f.sql' }],
+    byProcedure: [{ procedureId: 'S$P1', procedureName: 'P1', sourceFile: 'f.sql',
+                    reads: [{ variable: 'G_X', lineNumber: 10 }], writes: [], readCount: 1, writeCount: 0 }]
+  }, esc, 0);
+  includes(html, 'ut-proc', 'the procedure must be its own row-level column');
+  includes(html, "PA.showProcedure('ID1')", 'the procedure name must be clickable in the used-by row');
+  includes(html, "PA.showProcedure('S$P1')", 'the procedure name must be clickable in the footprint row');
+  ok(html.indexOf('G_X') !== -1 && html.indexOf('G_X') < html.indexOf('P.READER'),
+    'the variable name must precede the procedure in the used-by row');
+  ok(html.indexOf('G_X') !== -1 && html.indexOf('G_X') < html.indexOf('P1'),
+    'the variable name must precede the procedure in the footprint row');
+}
+
 /* ------------------------- label counts (the moved panel) ------------------------- */
 
 export async function test_all_cases_counts_map_to_the_details_sub_tabs() {
