@@ -39,7 +39,10 @@ PA.loadAnalysis = async function(name, opts) {
         if (PA.joins) PA.joins.data = [];
         if (PA.tableOps) { PA.tableOps.data = []; PA.tableOps._loaded = false; }
         // Estate facets are per-analysis: drop their cached details and reload guards.
-        PA._estateSubLoaded = { views: false, triggers: false, globals: false, jobs: false };
+        PA._detailsSubLoaded.views = false;
+        PA._detailsSubLoaded.triggers = false;
+        PA._detailsSubLoaded.globals = false;
+        PA._detailsSubLoaded.jobs = false;
         if (PA.estateViews) PA.estateViews.reset();
         if (PA.estateTriggers) PA.estateTriggers.reset();
         if (PA.estateGlobals) PA.estateGlobals.reset();
@@ -443,18 +446,21 @@ PA._clearTabContents = function() {
     var ids = ['toContainer', 'joinContainer', 'jsContainer', 'curContainer', 'seqContainer',
                'stmtContainer', 'exhContainer', 'summaryContainer', 'claudeInsightsContainer',
                'claudeCorrectionsContainer', 'graphContainer',
-               'vwContainer', 'tgContainer', 'glContainer'];
+               'vwContainer', 'tgContainer', 'glContainer', 'jbContainer'];
     for (var i = 0; i < ids.length; i++) {
         var el = document.getElementById(ids[i]);
         if (el) el.innerHTML = '';
     }
     if (PA.tf && PA.tf._state) {
-        var tabKeys = ['to', 'join', 'js', 'cur', 'seq', 'stmt', 'exh', 'vw', 'tg', 'gl'];
+        var tabKeys = ['to', 'join', 'js', 'cur', 'seq', 'stmt', 'exh', 'vw', 'tg', 'gl', 'jb'];
         for (var j = 0; j < tabKeys.length; j++) {
             delete PA.tf._state[tabKeys[j]];
         }
     }
-    PA._estateSubLoaded = { views: false, triggers: false, globals: false, jobs: false };
+    PA._detailsSubLoaded.views = false;
+    PA._detailsSubLoaded.triggers = false;
+    PA._detailsSubLoaded.globals = false;
+    PA._detailsSubLoaded.jobs = false;
     PA.summaryTab.teardown();
 };
 
@@ -692,13 +698,11 @@ PA._heavyTabs = { tableOps: 'toContainer',
 PA._heavyTabTfKeys = { tableOps: 'to', complexity: 'cx' };
 
 PA._detailsSubLoaded = { sequences: false, joinQuery: false, dynamic: false,
-    transactions: false, cursors: false, statements: false, exHandlers: false };
+    transactions: false, cursors: false, statements: false, exHandlers: false,
+    /* Estate facets (views/MVs, triggers, package globals, scheduled jobs) now live as the last
+       four Details sub-tabs — analysis-wide, not node-scoped, loaded once per visit. */
+    views: false, triggers: false, globals: false, jobs: false };
 PA._detailsCurrentSub = 'sequences';
-
-/* Estate facets (views/MVs, triggers, package globals) — analysis-wide, not node-scoped, so the
-   sub-tabs load once per visit exactly like detailsTab's. */
-PA._estateSubLoaded = { views: false, triggers: false, globals: false, jobs: false };
-PA._estateCurrentSub = 'views';
 
 PA._exploreCurrentSub = 'hierarchy';
 
@@ -802,7 +806,9 @@ PA.detailsTab = {
         document.querySelectorAll('#viewDetails .dt-subview').forEach(function(v) { v.classList.remove('active'); });
         var viewMap = { sequences: 'dtViewSequences', joinQuery: 'dtViewJoinQuery', dynamic: 'dtViewDynamic',
             transactions: 'dtViewTransactions', cursors: 'dtViewCursors', statements: 'dtViewStatements',
-            exHandlers: 'dtViewExHandlers' };
+            exHandlers: 'dtViewExHandlers',
+            /* Estate sections hosted inside Details (were the top-level Estate tab). */
+            views: 'estViewViews', triggers: 'estViewTriggers', globals: 'estViewGlobals', jobs: 'estViewJobs' };
         var el = document.getElementById(viewMap[sub]);
         if (el) el.classList.add('active');
         PA.detailsTab._loadSub(sub);
@@ -836,6 +842,23 @@ PA.detailsTab = {
             PA._detailsSubLoaded.exHandlers = true;
             if (PA.exHandlers && PA.exHandlers.load) PA.exHandlers.load();
         }
+        /* Estate sections (lazy-load once per analysis, same as the other detail facets). */
+        if (sub === 'views' && !PA._detailsSubLoaded.views) {
+            PA._detailsSubLoaded.views = true;
+            if (PA.estateViews && PA.estateViews.load) PA.estateViews.load();
+        }
+        if (sub === 'triggers' && !PA._detailsSubLoaded.triggers) {
+            PA._detailsSubLoaded.triggers = true;
+            if (PA.estateTriggers && PA.estateTriggers.load) PA.estateTriggers.load();
+        }
+        if (sub === 'globals' && !PA._detailsSubLoaded.globals) {
+            PA._detailsSubLoaded.globals = true;
+            if (PA.estateGlobals && PA.estateGlobals.load) PA.estateGlobals.load();
+        }
+        if (sub === 'jobs' && !PA._detailsSubLoaded.jobs) {
+            PA._detailsSubLoaded.jobs = true;
+            if (PA.estateJobs && PA.estateJobs.load) PA.estateJobs.load();
+        }
     },
     teardown: function() {
         var subs = [
@@ -845,7 +868,11 @@ PA.detailsTab = {
             { key: 'transactions', container: 'txnContainer', tfKey: null },
             { key: 'cursors', container: 'curContainer', tfKey: 'cur' },
             { key: 'statements', container: 'stmtContainer', tfKey: 'stmt' },
-            { key: 'exHandlers', container: 'exhContainer', tfKey: 'exh' }
+            { key: 'exHandlers', container: 'exhContainer', tfKey: 'exh' },
+            { key: 'views', container: 'vwContainer', tfKey: 'vw' },
+            { key: 'triggers', container: 'tgContainer', tfKey: 'tg' },
+            { key: 'globals', container: 'glContainer', tfKey: 'gl' },
+            { key: 'jobs', container: 'jbContainer', tfKey: 'jb' }
         ];
         for (var i = 0; i < subs.length; i++) {
             var s = subs[i];
@@ -869,66 +896,26 @@ PA.detailsTab = {
 };
 
 /**
- * Estate sub-tabs — Views & MVs / Triggers / Globals. Same shape as detailsTab: a switchSub that
- * flips the sub-tab and sub-view, and a _loadSub that lazily loads each facet once. These facets
- * are analysis-wide (they have no Direct/Subtree/SubFlow scope), so there is no applyScope here.
+ * Estate cross-link router — the estate facets (Views & MVs / Triggers / Globals / Scheduled jobs)
+ * are no longer a top-level tab; they are the last four sub-tabs of the Details tab. This object is
+ * kept as a thin shim so the estate screens' cross-links (PA.estateViews.showView, etc.) and any
+ * external callers can still say "open the estate view for X" without knowing the host changed.
  */
 PA.estateTab = {
     switchSub: function(sub) {
-        PA._estateCurrentSub = sub;
-        document.querySelectorAll('#viewEstate .dt-subtab').forEach(function(b) {
-            b.classList.toggle('active', b.dataset.estview === sub);
-        });
-        document.querySelectorAll('#viewEstate .dt-subview').forEach(function(v) { v.classList.remove('active'); });
-        var viewMap = { views: 'estViewViews', triggers: 'estViewTriggers', globals: 'estViewGlobals', jobs: 'estViewJobs' };
-        var el = document.getElementById(viewMap[sub]);
-        if (el) el.classList.add('active');
-        PA.estateTab._loadSub(sub);
-    },
-    _loadSub: function(sub) {
-        if (sub === 'views' && !PA._estateSubLoaded.views) {
-            PA._estateSubLoaded.views = true;
-            if (PA.estateViews && PA.estateViews.load) PA.estateViews.load();
-        }
-        if (sub === 'triggers' && !PA._estateSubLoaded.triggers) {
-            PA._estateSubLoaded.triggers = true;
-            if (PA.estateTriggers && PA.estateTriggers.load) PA.estateTriggers.load();
-        }
-        if (sub === 'globals' && !PA._estateSubLoaded.globals) {
-            PA._estateSubLoaded.globals = true;
-            if (PA.estateGlobals && PA.estateGlobals.load) PA.estateGlobals.load();
-        }
-        if (sub === 'jobs' && !PA._estateSubLoaded.jobs) {
-            PA._estateSubLoaded.jobs = true;
-            if (PA.estateJobs && PA.estateJobs.load) PA.estateJobs.load();
-        }
-    },
-    teardown: function() {
-        var subs = [
-            { key: 'views', container: 'vwContainer', tfKey: 'vw' },
-            { key: 'triggers', container: 'tgContainer', tfKey: 'tg' },
-            { key: 'globals', container: 'glContainer', tfKey: 'gl' },
-            { key: 'jobs', container: 'jbContainer', tfKey: 'jb' }
-        ];
-        for (var i = 0; i < subs.length; i++) {
-            var s = subs[i];
-            if (PA._estateSubLoaded[s.key]) {
-                var cel = document.getElementById(s.container);
-                if (cel) cel.innerHTML = '';
-                if (s.tfKey && PA.tf && PA.tf._state) delete PA.tf._state[s.tfKey];
-                PA._estateSubLoaded[s.key] = false;
-            }
-        }
+        if (PA.switchRightTab) PA.switchRightTab('details');
+        if (PA.detailsTab && PA.detailsTab.switchSub) PA.detailsTab.switchSub(sub);
     }
 };
 
 PA.switchRightTab = function(view) {
+    /* Legacy deep-link alias: the Estate top-level tab was removed; its sections are now Details
+       sub-tabs. Keep '#estate' style callers working by redirecting to the Details tab. */
+    if (view === 'estate') view = 'details';
     var prev = PA._currentRightTab;
     if (prev && prev !== view) {
         if (prev === 'details') {
             PA.detailsTab.teardown();
-        } else if (prev === 'estate') {
-            PA.estateTab.teardown();
         } else if (prev === 'summary') {
             PA.summaryTab.teardown();
         // BUG-FIX (§259, real-audit §258 finding #3): Table Ops is excluded from this teardown.
@@ -957,7 +944,6 @@ PA.switchRightTab = function(view) {
     var viewId = {
         explore: 'viewExplore', tableOps: 'viewTableOps',
         /* callTrace: 'viewCallTrace', trace: 'viewTrace', refs: 'viewRefs', */
-        estate: 'viewEstate',
         details: 'viewDetails',
         summary: 'viewSummary', complexity: 'viewComplexity', callGraphViz: 'viewCallGraphViz', source: 'viewSource'
     }[view];
@@ -971,9 +957,6 @@ PA.switchRightTab = function(view) {
     }
     if (view === 'details') {
         PA.detailsTab._loadSub(PA._detailsCurrentSub);
-    }
-    if (view === 'estate') {
-        PA.estateTab._loadSub(PA._estateCurrentSub);
     }
     if (view === 'summary') {
         if (!PA._rightTabLoaded.summary) {
@@ -1291,12 +1274,6 @@ PA.refreshTab = function() {
         PA.detailsTab.teardown();
         PA.detailsTab._loadSub(PA._detailsCurrentSub);
         PA.toast('Refreshed: Details/' + PA._detailsCurrentSub, 'success');
-        return;
-    }
-    if (tab === 'estate') {
-        PA.estateTab.teardown();
-        PA.estateTab._loadSub(PA._estateCurrentSub);
-        PA.toast('Refreshed: Estate/' + PA._estateCurrentSub, 'success');
         return;
     }
     if (tab === 'explore') {

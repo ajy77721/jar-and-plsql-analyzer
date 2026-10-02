@@ -25,10 +25,10 @@ PA.estateJobs = {
         PA.estateJobs.data = [];
     },
 
-    /** Cross-estate link target: open Estate → Scheduled and filter to this job. */
+    /** Cross-estate link target: open Details → Scheduled and filter to this job. */
     showJob: function(job) {
         if (!job) return;
-        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.switchRightTab) PA.switchRightTab('details');
         if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('jobs');
         var el = document.getElementById('jbSearch');
         if (el) el.value = job;

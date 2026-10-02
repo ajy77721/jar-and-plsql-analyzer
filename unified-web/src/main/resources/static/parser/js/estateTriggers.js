@@ -31,12 +31,12 @@ PA.estateTriggers = {
     },
 
     /**
-     * Cross-estate link target: switch to the Estate → Triggers screen, filter to this trigger and
+     * Cross-estate link target: switch to the Details → Triggers sub-tab, filter to this trigger and
      * open its detail row. Used by view base-table trigger links and trigger-chain nodes.
      */
     showTrigger: function(name) {
         if (!name) return;
-        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.switchRightTab) PA.switchRightTab('details');
         if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('triggers');
         var el = document.getElementById('tgSearch');
         if (el) el.value = name;

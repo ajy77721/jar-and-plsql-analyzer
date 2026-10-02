@@ -231,18 +231,37 @@ export async function test_estate_modules_expose_cross_link_router() {
   const views = await read('parser/js/estateViews.js');
   includes(views, 'showView: function', 'estateViews must expose a showView cross-link target');
   includes(views, "PA.estateTab.switchSub('views')", 'showView must switch to the views sub-tab');
+  includes(views, "PA.switchRightTab('details')", 'showView must open the Details tab (estate sections live there now)');
+  excludes(views, "PA.switchRightTab('estate')", 'showView must not target the removed top-level Estate tab');
   const triggers = await read('parser/js/estateTriggers.js');
   includes(triggers, 'showTrigger: function', 'estateTriggers must expose a showTrigger cross-link target');
   includes(triggers, "PA.estateTab.switchSub('triggers')", 'showTrigger must switch to the triggers sub-tab');
+  includes(triggers, "PA.switchRightTab('details')", 'showTrigger must open the Details tab');
   const globals = await read('parser/js/estateGlobals.js');
   includes(globals, 'showPackage: function', 'estateGlobals must expose a showPackage cross-link target');
   includes(globals, "PA.estateTab.switchSub('globals')", 'showPackage must switch to the globals sub-tab');
+  includes(globals, "PA.switchRightTab('details')", 'showPackage must open the Details tab');
 }
 
-export async function test_estate_screens_are_wired_into_navigation() {
+export async function test_estate_sections_live_inside_the_details_tab() {
   const html = await read('parser/index.html');
-  includes(html, "PA.switchRightTab('estate')", 'the Estate tab button is not wired');
-  includes(html, 'id="viewEstate"', 'the Estate view container is missing');
+  // The Estate top-level tab must be gone.
+  excludes(html, 'data-view="estate"', 'the top-level Estate tab button must be removed');
+  excludes(html, "PA.switchRightTab('estate')", 'no control should target a top-level Estate tab');
+  excludes(html, 'id="viewEstate"', 'the standalone Estate view container must be removed');
+  // Its four sections are now Details sub-tabs (data-dtview, handled by PA.detailsTab).
+  includes(html, 'data-dtview="views"', 'the Views & MVs sub-tab is not in the Details tab');
+  includes(html, 'data-dtview="triggers"', 'the Triggers sub-tab is not in the Details tab');
+  includes(html, 'data-dtview="globals"', 'the Globals sub-tab is not in the Details tab');
+  includes(html, 'data-dtview="jobs"', 'the Scheduled sub-tab is not in the Details tab');
+  includes(html, "PA.detailsTab.switchSub('views')", 'the Views sub-tab is not wired to detailsTab');
+  includes(html, "PA.detailsTab.switchSub('jobs')", 'the Scheduled sub-tab is not wired to detailsTab');
+  // …and their sub-view containers moved with them.
+  includes(html, 'id="estViewViews"', 'the views sub-view is missing');
+  includes(html, 'id="estViewTriggers"', 'the triggers sub-view is missing');
+  includes(html, 'id="estViewGlobals"', 'the globals sub-view is missing');
+  includes(html, 'id="estViewJobs"', 'the scheduled-jobs sub-view is missing');
+
   includes(html, 'estateViews.js', 'the views module is not included');
   includes(html, 'estateTriggers.js', 'the triggers module is not included');
   includes(html, 'estateGlobals.js', 'the globals module is not included');
@@ -252,4 +271,14 @@ export async function test_estate_screens_are_wired_into_navigation() {
   includes(jarHtml, 'data-tab="dbcalls"', 'the Database Calls tab button is missing');
   includes(jarHtml, 'id="tab-dbcalls"', 'the Database Calls tab content is missing');
   includes(jarHtml, 'db-calls.js', 'the Database Calls module is not included');
+}
+
+export async function test_details_tab_lazily_loads_the_estate_sections() {
+  const app = await read('parser/js/app.js');
+  // The four estate facets are lazy-loaded by detailsTab on first open, like the other sections.
+  includes(app, "sub === 'views' && !PA._detailsSubLoaded.views", 'views is not lazily loaded by detailsTab');
+  includes(app, "sub === 'triggers' && !PA._detailsSubLoaded.triggers", 'triggers is not lazily loaded by detailsTab');
+  includes(app, "sub === 'globals' && !PA._detailsSubLoaded.globals", 'globals is not lazily loaded by detailsTab');
+  includes(app, "sub === 'jobs' && !PA._detailsSubLoaded.jobs", 'jobs is not lazily loaded by detailsTab');
+  includes(app, 'views: false, triggers: false, globals: false, jobs: false', 'the estate load guards are not part of _detailsSubLoaded');
 }

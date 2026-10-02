@@ -34,12 +34,12 @@ PA.estateViews = {
     },
 
     /**
-     * Cross-estate link target: switch to the Estate → Views screen, filter to this view and open
-     * its detail row. Used by the chain/base-table/used-by links on the other estate screens.
+     * Cross-estate link target: switch to the Details → Views & MVs sub-tab, filter to this view and
+     * open its detail row. Used by the chain/base-table/used-by links on the other estate screens.
      */
     showView: function(name) {
         if (!name) return;
-        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.switchRightTab) PA.switchRightTab('details');
         if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('views');
         var el = document.getElementById('vwSearch');
         if (el) el.value = name;
@@ -228,7 +228,7 @@ PA.estateViews = {
             return '<div class="est-detail"><div class="est-loading">Loading view detail…</div></div>';
         }
         if (!cached) return '<div class="est-detail">' + PA.estateViews._notAnalyzed(v.name) + '</div>';
-        return '<div class="est-detail">' + PA.estateViews._detailHtml(cached, esc) + '</div>';
+        return '<div class="est-detail">' + PA.estateViews._detailHtml(cached, esc, idx) + '</div>';
     },
 
     _fetchDetail: function(v, idx) {
@@ -252,7 +252,7 @@ PA.estateViews = {
             + 'Re-run the analysis to populate the view definition, columns and chain.</div>';
     },
 
-    _detailHtml: function(d, esc) {
+    _detailHtml: function(d, esc, idx) {
         var isMv = d.objectType === 'MATERIALIZED_VIEW' || d.isMaterialized;
         var html = '';
 
@@ -302,35 +302,35 @@ PA.estateViews = {
         // Joins inside the view definition (catalog/grammar-captured).
         if (d.joins && d.joins.length) {
             html += '<div class="est-section"><div class="est-section-title">Joins (' + d.joins.length + ')</div>';
-            html += PA.estateViews._joinsHtml(d.joins, esc);
+            html += PA.estateViews._joinsHtml(d.joins, esc, idx);
             html += '</div>';
         }
 
         // Indexes on the view itself (e.g. an MV's snapshot index).
         if (d.indexes && d.indexes.length) {
             html += '<div class="est-section"><div class="est-section-title">Indexes on this view (' + d.indexes.length + ')</div>';
-            html += PA.estateViews._indexesHtml(d.indexes, esc);
+            html += PA.estateViews._indexesHtml(d.indexes, esc, idx);
             html += '</div>';
         }
 
         // Indexes on the view's base tables.
         if (d.baseTableIndexes && d.baseTableIndexes.length) {
             html += '<div class="est-section"><div class="est-section-title">Indexes on base tables (' + d.baseTableIndexes.length + ')</div>';
-            html += PA.estateViews._baseTableIndexesHtml(d.baseTableIndexes, esc);
+            html += PA.estateViews._baseTableIndexesHtml(d.baseTableIndexes, esc, idx);
             html += '</div>';
         }
 
         // Constraints on the view's own columns.
         if (d.constraints && d.constraints.length) {
             html += '<div class="est-section"><div class="est-section-title">Constraints (' + d.constraints.length + ')</div>';
-            html += PA.estateViews._constraintsHtml(d.constraints, esc);
+            html += PA.estateViews._constraintsHtml(d.constraints, esc, idx);
             html += '</div>';
         }
 
         // Cross-estate: base tables in the chain that carry triggers.
         if (d.triggerBoundTables && d.triggerBoundTables.length) {
             html += '<div class="est-section"><div class="est-section-title">Triggers on base tables</div>';
-            html += PA.estateViews._triggerBoundHtml(d.triggerBoundTables, esc);
+            html += PA.estateViews._triggerBoundHtml(d.triggerBoundTables, esc, idx);
             html += '</div>';
         }
 
@@ -341,25 +341,25 @@ PA.estateViews = {
 
         // Used by — procedures, other views and triggers.
         html += '<div class="est-section"><div class="est-section-title">Used By (' + (d.usedByCount || 0) + ')</div>';
-        html += PA.estateViews._usedByHtml(d.usedBy, esc);
+        html += PA.estateViews._usedByHtml(d.usedBy, esc, idx);
         html += '</div>';
 
         // Reverse estate edges: other views reading this view, and triggers whose body touches it.
         if (d.usedByViews && d.usedByViews.length) {
             html += '<div class="est-section"><div class="est-section-title">Used by other views (' + d.usedByViews.length + ')</div>';
-            html += PA.estateViews._usedByViewsHtml(d.usedByViews, esc);
+            html += PA.estateViews._usedByViewsHtml(d.usedByViews, esc, idx);
             html += '</div>';
         }
         if (d.usedByTriggers && d.usedByTriggers.length) {
             html += '<div class="est-section"><div class="est-section-title">Referenced by triggers (' + d.usedByTriggers.length + ')</div>';
-            html += PA.estateViews._usedByTriggersHtml(d.usedByTriggers, esc);
+            html += PA.estateViews._usedByTriggersHtml(d.usedByTriggers, esc, idx);
             html += '</div>';
         }
 
         // Dynamic SQL statements naming this view.
         if (d.dynamicSqlRefs && d.dynamicSqlRefs.length) {
             html += '<div class="est-section"><div class="est-section-title">Dynamic SQL references (' + d.dynamicSqlRefs.length + ')</div>';
-            html += PA.estateViews._dynamicSqlHtml(d.dynamicSqlRefs, esc);
+            html += PA.estateViews._dynamicSqlHtml(d.dynamicSqlRefs, esc, idx);
             html += '</div>';
         }
 
@@ -384,169 +384,132 @@ PA.estateViews = {
     },
 
     /** Joins inside the view definition: type, both tables, the ON condition, and the source line. */
-    _joinsHtml: function(joins, esc) {
-        var html = '<table class="est-cols"><thead><tr><th>Type</th><th>Left</th><th>Joined</th>'
-            + '<th>Condition</th><th>Line</th></tr></thead><tbody>';
-        for (var i = 0; i < joins.length; i++) {
-            var j = joins[i];
-            html += '<tr>'
-                + '<td>' + esc(j.joinType || 'JOIN') + '</td>'
-                + '<td class="est-col-name">' + esc((j.leftTableAlias ? j.leftTableAlias + '.' : '') + (j.leftTable || '')) + '</td>'
-                + '<td class="est-col-name">' + esc((j.joinedTableAlias ? j.joinedTableAlias + '.' : '') + (j.joinedTable || '')) + '</td>'
-                + '<td class="est-col-type">' + esc(j.condition || '') + '</td>'
-                + '<td>' + (j.line ? 'L' + j.line : '') + '</td>'
-                + '</tr>';
-        }
-        html += '</tbody></table>';
-        return html;
+    _joinsHtml: function(joins, esc, idx) {
+        return PA.usageTable.attach('ut-vw-joins-' + idx, joins || [], {
+            showTitle: false, nameLabel: 'Join', snippetLabel: 'Condition', countLabel: 'joins',
+            nameClass: 'est-col-name',
+            name: function (j) {
+                var l = (j.leftTableAlias ? j.leftTableAlias + '.' : '') + (j.leftTable || '');
+                var r = (j.joinedTableAlias ? j.joinedTableAlias + '.' : '') + (j.joinedTable || '');
+                return l + ' → ' + r;
+            },
+            line: function (j) { return j.line; },
+            snippet: function (j) { return j.condition; },
+            badges: function (j) { return [j.joinType || 'JOIN']; }
+        });
     },
 
     /** One row per index: name, unique flag, and its columns. */
-    _indexesHtml: function(indexes, esc) {
-        var html = '<table class="est-cols"><thead><tr><th>Index</th><th>Unique</th><th>Columns</th></tr></thead><tbody>';
-        for (var i = 0; i < indexes.length; i++) {
-            var ix = indexes[i];
-            var cols = (ix.columns || []).join(', ');
-            html += '<tr>'
-                + '<td class="est-col-name">' + esc(ix.name || '') + '</td>'
-                + '<td>' + (ix.unique ? 'YES' : 'NO') + '</td>'
-                + '<td class="est-col-type">' + esc(cols) + '</td>'
-                + '</tr>';
-        }
-        html += '</tbody></table>';
-        return html;
+    _indexesHtml: function(indexes, esc, idx) {
+        return PA.usageTable.attach('ut-vw-indexes-' + idx, indexes || [], {
+            showTitle: false, nameLabel: 'Index', snippetLabel: 'Columns', countLabel: 'indexes',
+            nameClass: 'est-col-name',
+            name: function (ix) { return ix.name; },
+            snippet: function (ix) { return (ix.columns || []).join(', '); },
+            badges: function (ix) { return [ix.unique ? 'UNIQUE' : 'INDEX']; }
+        });
     },
 
     /** Indexes grouped under their base table, each base table a clickable table link. */
-    _baseTableIndexesHtml: function(rows, esc) {
-        var html = '<table class="est-cols"><thead><tr><th>Base Table</th><th>Index</th><th>Unique</th><th>Columns</th></tr></thead><tbody>';
-        for (var i = 0; i < rows.length; i++) {
-            var r = rows[i];
-            html += '<tr>'
-                + '<td><span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
-                + PA.escJs(r.table || '') + '\',\'' + PA.escJs(r.tableSchema || '') + '\')">' + esc(r.table || '') + '</span></td>'
-                + '<td class="est-col-name">' + esc(r.name || '') + '</td>'
-                + '<td>' + (r.unique ? 'YES' : 'NO') + '</td>'
-                + '<td class="est-col-type">' + esc((r.columns || []).join(', ')) + '</td>'
-                + '</tr>';
-        }
-        html += '</tbody></table>';
-        return html;
+    _baseTableIndexesHtml: function(rows, esc, idx) {
+        return PA.usageTable.attach('ut-vw-btindexes-' + idx, rows || [], {
+            showTitle: false, nameLabel: 'Index', snippetLabel: 'Columns', countLabel: 'indexes',
+            nameClass: 'est-col-name',
+            name: function (r) { return r.name; },
+            sub: function (r) {
+                return { text: r.table || '', link: "PA.tableDetail.open('" + PA.escJs(r.table || '') + "','" + PA.escJs(r.tableSchema || '') + "')" };
+            },
+            snippet: function (r) { return (r.columns || []).join(', '); },
+            badges: function (r) { return [r.unique ? 'UNIQUE' : 'INDEX']; },
+            search: function (r) { return r.table || ''; }
+        });
     },
 
-    _constraintsHtml: function(constraints, esc) {
-        var html = '<table class="est-cols"><thead><tr><th>Name</th><th>Type</th><th>Condition</th></tr></thead><tbody>';
-        for (var i = 0; i < constraints.length; i++) {
-            var c = constraints[i];
-            html += '<tr>'
-                + '<td class="est-col-name">' + esc(c.name || '') + '</td>'
-                + '<td>' + esc(c.type || '') + '</td>'
-                + '<td class="est-col-type">' + esc(c.condition || '') + '</td>'
-                + '</tr>';
-        }
-        html += '</tbody></table>';
-        return html;
+    _constraintsHtml: function(constraints, esc, idx) {
+        return PA.usageTable.attach('ut-vw-constraints-' + idx, constraints || [], {
+            showTitle: false, nameLabel: 'Constraint', snippetLabel: 'Condition', countLabel: 'constraints',
+            nameClass: 'est-col-name',
+            name: function (c) { return c.name; },
+            snippet: function (c) { return c.condition; },
+            badges: function (c) { return [c.type || 'CONSTRAINT']; }
+        });
     },
 
     /** Base tables that carry triggers — each trigger a clickable link into the triggers screen. */
-    _triggerBoundHtml: function(tables, esc) {
-        var html = '';
-        for (var i = 0; i < tables.length; i++) {
+    _triggerBoundHtml: function(tables, esc, idx) {
+        var rows = [];
+        for (var i = 0; i < (tables || []).length; i++) {
             var t = tables[i];
-            html += '<div class="est-var-group"><div class="est-var-name">'
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
-                + PA.escJs(t.table || '') + '\',\'' + PA.escJs(t.schema || '') + '\')">' + esc(t.table || '') + '</span></div>';
-            html += '<div class="est-chips">';
             var trs = t.triggers || [];
             for (var j = 0; j < trs.length; j++) {
-                var tr = trs[j];
-                html += '<span class="est-chip">'
-                    + '<span class="est-op-badge ' + String(tr.event || '').toLowerCase().split(' ')[0] + '">' + esc(tr.timing || '') + ' ' + esc(tr.event || '') + '</span>'
-                    + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.estateTriggers.showTrigger(\''
-                    + PA.escJs(tr.name || '') + '\')">' + esc(tr.name || '') + '</span>'
-                    + (tr.status ? '<span class="est-chip-sub">' + esc(tr.status) + '</span>' : '')
-                    + '</span>';
+                rows.push({ table: t.table, schema: t.schema, trigger: trs[j] });
             }
-            html += '</div></div>';
         }
-        return html;
+        return PA.usageTable.attach('ut-vw-triggerbound-' + idx, rows, {
+            showTitle: false, nameLabel: 'Trigger', countLabel: 'triggers', showSnippet: false,
+            name: function (r) { return r.trigger.name; },
+            nameLink: function (r) { return "PA.estateTriggers.showTrigger('" + PA.escJs(r.trigger.name || '') + "')"; },
+            sub: function (r) {
+                return { text: (r.schema ? r.schema + '.' : '') + (r.table || ''),
+                         link: "PA.tableDetail.open('" + PA.escJs(r.table || '') + "','" + PA.escJs(r.schema || '') + "')" };
+            },
+            badges: function (r) { return [r.trigger.timing, r.trigger.event, r.trigger.status]; },
+            search: function (r) { return r.table || ''; }
+        });
     },
 
-    _usedByViewsHtml: function(views, esc) {
-        var html = '<div class="est-usedby">';
-        for (var i = 0; i < views.length; i++) {
-            var v = views[i];
-            html += '<div class="est-usedby-item">'
-                + '<span class="est-op-badge ' + String(v.operation || 'SELECT').toLowerCase() + '">' + esc(v.operation || 'SELECT') + '</span>'
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.estateViews.showView(\''
-                + PA.escJs(v.name || '') + '\')">' + esc(v.name || '') + '</span>'
-                + (v.schema ? '<span class="est-usedby-line">' + esc(v.schema) + '</span>' : '')
-                + '</div>';
-        }
-        html += '</div>';
-        return html;
+    _usedByViewsHtml: function(views, esc, idx) {
+        return PA.usageTable.attach('ut-vw-usedbyviews-' + idx, views || [], {
+            showTitle: false, nameLabel: 'View', countLabel: 'views', showSnippet: false,
+            name: function (v) { return v.name; },
+            nameLink: function (v) { return "PA.estateViews.showView('" + PA.escJs(v.name || '') + "')"; },
+            sub: function (v) { return { text: v.schema || '' }; },
+            badges: function (v) { return [v.operation || 'SELECT']; }
+        });
     },
 
-    _usedByTriggersHtml: function(triggers, esc) {
-        var html = '<div class="est-usedby">';
-        for (var i = 0; i < triggers.length; i++) {
-            var t = triggers[i];
-            html += '<div class="est-usedby-item">'
-                + '<span class="est-op-badge ' + String(t.operation || 'SELECT').toLowerCase() + '">' + esc(t.operation || 'SELECT') + '</span>'
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.estateTriggers.showTrigger(\''
-                + PA.escJs(t.name || '') + '\')">' + esc(t.name || '') + '</span>'
-                + '<span class="est-usedby-line">' + esc((t.timing || '') + ' ' + (t.event || '')) + '</span>'
-                + '</div>';
-        }
-        html += '</div>';
-        return html;
+    _usedByTriggersHtml: function(triggers, esc, idx) {
+        return PA.usageTable.attach('ut-vw-usedbytriggers-' + idx, triggers || [], {
+            showTitle: false, nameLabel: 'Trigger', countLabel: 'triggers', showSnippet: false,
+            name: function (t) { return t.name; },
+            nameLink: function (t) { return "PA.estateTriggers.showTrigger('" + PA.escJs(t.name || '') + "')"; },
+            sub: function (t) { return { text: t.schema || '' }; },
+            badges: function (t) { return [t.operation || 'SELECT', t.timing, t.event]; }
+        });
     },
 
     /** Dynamic SQL statements naming the view — each procedure a clickable link. */
-    _dynamicSqlHtml: function(refs, esc) {
-        var html = '<div class="est-usedby">';
-        for (var i = 0; i < refs.length; i++) {
-            var r = refs[i];
-            html += '<div class="est-usedby-item">'
-                + '<span class="est-op-badge select">' + esc(r.type || 'DYNAMIC') + '</span>'
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
-                + PA.escJs(r.procedureId || '') + '\')">' + esc(r.procedureName || r.procedureId || '') + '</span>'
-                + (r.lineNumber ? '<span class="est-usedby-line">L' + r.lineNumber + '</span>' : '')
-                + '<span class="est-chip-sub" style="font-family:var(--font-mono)">' + esc(r.sqlExpression || '') + '</span>'
-                + '</div>';
-        }
-        html += '</div>';
-        return html;
+    _dynamicSqlHtml: function(refs, esc, idx) {
+        return PA.usageTable.attach('ut-vw-dynsql-' + idx, refs || [], {
+            showTitle: false, nameLabel: 'Procedure', countLabel: 'references',
+            name: function (r) { return r.procedureName || r.procedureId; },
+            nameLink: function (r) { return "PA.showProcedure('" + PA.escJs(r.procedureId || '') + "')"; },
+            line: function (r) { return r.lineNumber; },
+            snippet: function (r) { return r.sqlExpression; },
+            badges: function (r) { return [r.type || 'DYNAMIC']; },
+            source: PA.usageTable.nodeSource
+        });
     },
 
-    _usedByHtml: function(usedBy, esc) {
+    _usedByHtml: function(usedBy, esc, idx) {
         if (!usedBy || !usedBy.length) return '<div class="est-empty">Nothing in this analysis reads this view.</div>';
-        var html = '<div class="est-usedby">';
-        for (var i = 0; i < usedBy.length; i++) {
-            var u = usedBy[i];
-            html += '<div class="est-usedby-item">';
-            if (u.nodeType) html += '<span class="est-badge">' + esc(u.nodeType) + '</span>';
-            html += '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\'' + PA.escJs(u.nodeId || '') + '\')">' + esc(u.nodeName || u.nodeId || '') + '</span>';
-            html += PA.estateViews._opsHtml(u.operations, esc);
-            if (u.nodeDepth != null) html += '<span class="est-usedby-line">depth ' + u.nodeDepth + '</span>';
-            html += '</div>';
-        }
-        html += '</div>';
-        return html;
+        return PA.usageTable.attach('ut-vw-usedby-' + idx, usedBy, {
+            showTitle: false, nameLabel: 'Procedure', countLabel: 'usages',
+            name: function (u) { return u.nodeName || u.nodeId; },
+            nameLink: function (u) { return "PA.showProcedure('" + PA.escJs(u.nodeId || '') + "')"; },
+            sub: function (u) { return { text: u.nodeType || '' }; },
+            badges: function (u) { return Object.keys(u.operations || {}); },
+            line: function (u) { return PA.usageTable.firstLine(u); },
+            source: PA.usageTable.nodeSource,
+            full: function (u) {
+                var ops = u.operations || {};
+                var parts = Object.keys(ops).map(function (op) {
+                    return op + ' L' + (ops[op] || []).join(', L');
+                });
+                return '<pre>' + esc(parts.join('\n')) + '</pre>';
+            }
+        });
     },
-
-    /** `operations` is `{OP: [line, ...]}`; render one badge per op, with the first line. */
-    _opsHtml: function(operations, esc) {
-        if (!operations || typeof operations !== 'object') return '';
-        var html = '<span class="est-usedby-ops">';
-        for (var op in operations) {
-            if (!Object.prototype.hasOwnProperty.call(operations, op)) continue;
-            var lines = operations[op] || [];
-            html += '<span class="est-op-badge ' + String(op).toLowerCase() + '">' + esc(op) + '</span>';
-            if (lines.length) html += '<span class="est-usedby-line">L' + lines[0] + '</span>';
-        }
-        html += '</span>';
-        return html;
     },
 
     /**

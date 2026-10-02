@@ -281,8 +281,7 @@
                     <div class="right-tabs">
                         <button class="rtab active" data-view="explore" onclick="PA.switchRightTab('explore')" title="Hierarchy, trace, and references">Explore</button>
                         <button class="rtab" data-view="tableOps" onclick="PA.switchRightTab('tableOps')" title="Table operations — SELECT, INSERT, UPDATE, DELETE across procedures">Table Ops</button>
-                        <button class="rtab" data-view="estate" onclick="PA.switchRightTab('estate')" title="Estate objects — views &amp; materialized views, triggers, package global variables">Estate</button>
-                        <button class="rtab" data-view="details" onclick="PA.switchRightTab('details')" title="Sequences, joins, dynamic SQL, transactions, cursors, statements and exception handlers">Details</button>
+                        <button class="rtab" data-view="details" onclick="PA.switchRightTab('details')" title="Sequences, joins, dynamic SQL, transactions, cursors, statements, exception handlers and estate objects (views/MVs, triggers, globals, scheduled jobs)">Details</button>
                         <button class="rtab" data-view="summary" onclick="PA.switchRightTab('summary')" title="Aggregated statistics dashboard for the entire analysis">Summary</button>
                         <button class="rtab" data-view="complexity" onclick="PA.switchRightTab('complexity')" title="Procedure complexity analysis — LOC, tables, calls, risk ratings">Complexity</button>
                         <button class="rtab" data-view="callGraphViz" onclick="PA.switchRightTab('callGraphViz')" title="Visual call graph diagram showing procedure dependencies">Graph</button>
@@ -384,74 +383,6 @@
                             <div class="pagination-bar" id="to-pager" style="display:none"></div>
                         </div>
 
-                        <!-- ============ ESTATE: views/MVs, triggers, package globals ============ -->
-                        <div class="right-view" id="viewEstate">
-                            <div class="dt-subtabs">
-                                <button class="dt-subtab active" data-estview="views" onclick="PA.estateTab.switchSub('views')" title="Views and materialized views with their definition, columns, base tables and dependency chain">Views &amp; MVs</button>
-                                <button class="dt-subtab" data-estview="triggers" onclick="PA.estateTab.switchSub('triggers')" title="Triggers with their binding, timing, events, level, body and chain">Triggers</button>
-                                <button class="dt-subtab" data-estview="globals" onclick="PA.estateTab.switchSub('globals')" title="Package global variables and who reads/writes them">Globals</button>
-                                <button class="dt-subtab" data-estview="jobs" onclick="PA.estateTab.switchSub('jobs')" title="Scheduled jobs (DBMS_SCHEDULER / SQL Agent / pg_cron / MySQL EVENT) and the procedures they run">Scheduled</button>
-                            </div>
-
-                            <div class="dt-subview active" id="estViewViews">
-                                <div class="to-toolbar">
-                                    <div class="to-filters">
-                                        <input type="text" id="vwSearch" class="form-input" placeholder="Search views..." oninput="PA.estateViews.onSearch()" style="width:180px">
-                                        <div class="op-filter-pills" id="vwTypePills"></div>
-                                        <span class="op-filter-clear" onclick="PA.estateViews.clearFilters()">Clear</span>
-                                    </div>
-                                    <div class="to-summary">
-                                        <span id="vwTotalCount" class="badge">0 views</span>
-                                    </div>
-                                </div>
-                                <div class="to-container" id="vwContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see views</div></div>
-                                <div class="pagination-bar" id="vw-pager" style="display:none"></div>
-                            </div>
-
-                            <div class="dt-subview" id="estViewTriggers">
-                                <div class="to-toolbar">
-                                    <div class="to-filters">
-                                        <input type="text" id="tgSearch" class="form-input" placeholder="Search triggers..." oninput="PA.estateTriggers.onSearch()" style="width:180px">
-                                        <div class="op-filter-pills" id="tgEventPills"></div>
-                                        <span class="op-filter-clear" onclick="PA.estateTriggers.clearFilters()">Clear</span>
-                                    </div>
-                                    <div class="to-summary">
-                                        <span id="tgTotalCount" class="badge">0 triggers</span>
-                                    </div>
-                                </div>
-                                <div class="to-container" id="tgContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see triggers</div></div>
-                                <div class="pagination-bar" id="tg-pager" style="display:none"></div>
-                            </div>
-
-                            <div class="dt-subview" id="estViewGlobals">
-                                <div class="to-toolbar">
-                                    <div class="to-filters">
-                                        <input type="text" id="glSearch" class="form-input" placeholder="Search packages..." oninput="PA.estateGlobals.onSearch()" style="width:180px">
-                                        <span class="op-filter-clear" onclick="PA.estateGlobals.clearFilters()">Clear</span>
-                                    </div>
-                                    <div class="to-summary">
-                                        <span id="glTotalCount" class="badge">0 packages</span>
-                                    </div>
-                                </div>
-                                <div class="to-container" id="glContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see package globals</div></div>
-                                <div class="pagination-bar" id="gl-pager" style="display:none"></div>
-                            </div>
-
-                            <div class="dt-subview" id="estViewJobs">
-                                <div class="to-toolbar">
-                                    <div class="to-filters">
-                                        <input type="text" id="jbSearch" class="form-input" placeholder="Search jobs..." oninput="PA.estateJobs.onSearch()" style="width:180px">
-                                        <span class="op-filter-clear" onclick="PA.estateJobs.clearFilters()">Clear</span>
-                                    </div>
-                                    <div class="to-summary">
-                                        <span id="jbTotalCount" class="badge">0 jobs</span>
-                                    </div>
-                                </div>
-                                <div class="to-container" id="jbContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see scheduled jobs</div></div>
-                                <div class="pagination-bar" id="jb-pager" style="display:none"></div>
-                            </div>
-                        </div>
-
                         <div class="right-view" id="viewDetails">
                             <div class="dt-subtabs">
                                 <button class="dt-subtab active" data-dtview="sequences" onclick="PA.detailsTab.switchSub('sequences')">Sequences</button>
@@ -461,6 +392,10 @@
                                 <button class="dt-subtab" data-dtview="cursors" onclick="PA.detailsTab.switchSub('cursors')">Cursors</button>
                                 <button class="dt-subtab" data-dtview="statements" onclick="PA.detailsTab.switchSub('statements')">Statements</button>
                                 <button class="dt-subtab" data-dtview="exHandlers" onclick="PA.detailsTab.switchSub('exHandlers')">Exceptions</button>
+                                <button class="dt-subtab" data-dtview="views" onclick="PA.detailsTab.switchSub('views')" title="Views and materialized views with their definition, columns, base tables and dependency chain">Views &amp; MVs</button>
+                                <button class="dt-subtab" data-dtview="triggers" onclick="PA.detailsTab.switchSub('triggers')" title="Triggers with their binding, timing, events, level, body and chain">Triggers</button>
+                                <button class="dt-subtab" data-dtview="globals" onclick="PA.detailsTab.switchSub('globals')" title="Package global variables and who reads/writes them">Globals</button>
+                                <button class="dt-subtab" data-dtview="jobs" onclick="PA.detailsTab.switchSub('jobs')" title="Scheduled jobs (DBMS_SCHEDULER / SQL Agent / pg_cron / MySQL EVENT) and the procedures they run">Scheduled</button>
                             </div>
 
                             <div class="dt-subview active" id="dtViewSequences">
@@ -567,6 +502,65 @@
                                 </div>
                                 <div class="to-container" id="exhContainer" style="flex:1;overflow:auto"><div class="empty-msg">Run analysis to see exception handlers</div></div>
                                 <div class="pagination-bar" id="exh-pager" style="display:none"></div>
+                            </div>
+
+                            <!-- ===== Estate sections (formerly their own top-level Estate tab) ===== -->
+                            <div class="dt-subview" id="estViewViews">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="vwSearch" class="form-input" placeholder="Search views..." oninput="PA.estateViews.onSearch()" style="width:180px">
+                                        <div class="op-filter-pills" id="vwTypePills"></div>
+                                        <span class="op-filter-clear" onclick="PA.estateViews.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="vwTotalCount" class="badge">0 views</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="vwContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see views</div></div>
+                                <div class="pagination-bar" id="vw-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="estViewTriggers">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="tgSearch" class="form-input" placeholder="Search triggers..." oninput="PA.estateTriggers.onSearch()" style="width:180px">
+                                        <div class="op-filter-pills" id="tgEventPills"></div>
+                                        <span class="op-filter-clear" onclick="PA.estateTriggers.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="tgTotalCount" class="badge">0 triggers</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="tgContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see triggers</div></div>
+                                <div class="pagination-bar" id="tg-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="estViewGlobals">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="glSearch" class="form-input" placeholder="Search packages..." oninput="PA.estateGlobals.onSearch()" style="width:180px">
+                                        <span class="op-filter-clear" onclick="PA.estateGlobals.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="glTotalCount" class="badge">0 packages</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="glContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see package globals</div></div>
+                                <div class="pagination-bar" id="gl-pager" style="display:none"></div>
+                            </div>
+
+                            <div class="dt-subview" id="estViewJobs">
+                                <div class="to-toolbar">
+                                    <div class="to-filters">
+                                        <input type="text" id="jbSearch" class="form-input" placeholder="Search jobs..." oninput="PA.estateJobs.onSearch()" style="width:180px">
+                                        <span class="op-filter-clear" onclick="PA.estateJobs.clearFilters()">Clear</span>
+                                    </div>
+                                    <div class="to-summary">
+                                        <span id="jbTotalCount" class="badge">0 jobs</span>
+                                    </div>
+                                </div>
+                                <div class="to-container" id="jbContainer" style="flex:1;overflow:auto"><div class="empty-msg">Select an analysis to see scheduled jobs</div></div>
+                                <div class="pagination-bar" id="jb-pager" style="display:none"></div>
                             </div>
                         </div>
 

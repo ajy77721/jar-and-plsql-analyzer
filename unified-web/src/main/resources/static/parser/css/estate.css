@@ -248,3 +248,10 @@
     font-size: 11px;
 }
 .est-notanalyzed b { color: var(--text); display: block; margin-bottom: 3px; font-style: normal; }
+
+/* ==========================================================================
+   Estate sections are now the last four sub-tabs of the Details tab. The
+   Details tab row grew from 7 to 11 tabs; let it wrap instead of clipping
+   the newly added Views & MVs / Triggers / Globals / Scheduled tabs.
+   ========================================================================== */
+#viewDetails .dt-subtabs { flex-wrap: wrap; }

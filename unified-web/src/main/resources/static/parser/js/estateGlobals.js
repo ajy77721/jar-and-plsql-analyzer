@@ -28,12 +28,12 @@ PA.estateGlobals = {
     },
 
     /**
-     * Cross-estate link target: switch to the Estate → Globals screen, filter to this package and
+     * Cross-estate link target: switch to the Details → Globals sub-tab, filter to this package and
      * open its detail row. Used by the per-procedure footprint and by any package link.
      */
     showPackage: function(pkg) {
         if (!pkg) return;
-        if (PA.switchRightTab) PA.switchRightTab('estate');
+        if (PA.switchRightTab) PA.switchRightTab('details');
         if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('globals');
         var el = document.getElementById('glSearch');
         if (el) el.value = pkg;

@@ -26,11 +26,17 @@ PA.goHome = function() {
     PA.sourceModal._historyFwd = [];
 
     PA._updateDetailHeader(null);
-    PA._estateSubLoaded = { views: false, triggers: false, globals: false };
+    // Estate sections now live in the Details tab; reset their lazy-load guards alongside it.
+    if (PA._detailsSubLoaded) {
+        PA._detailsSubLoaded.views = false;
+        PA._detailsSubLoaded.triggers = false;
+        PA._detailsSubLoaded.globals = false;
+        PA._detailsSubLoaded.jobs = false;
+    }
     var clearIds = ['ctContainer', 'traceContainer', 'refsContainer', 'srcContainer',
         'toContainer', 'joinContainer', 'curContainer', 'stmtContainer',
         'exhContainer', 'summaryContainer', 'graphContainer',
-        'vwContainer', 'tgContainer', 'glContainer'];
+        'vwContainer', 'tgContainer', 'glContainer', 'jbContainer'];
     for (var i = 0; i < clearIds.length; i++) {
         var el = document.getElementById(clearIds[i]);
         if (el) el.innerHTML = '';
