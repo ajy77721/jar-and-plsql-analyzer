@@ -109,6 +109,99 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // MODULES (task #28) — DB2's package analog
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * {@code CREATE MODULE m [; declarations] [END MODULE]} — records the module identity and
+     * descends so any {@code CREATE VARIABLE} declarations inside are captured as module globals.
+     * If the module also contains inline routines, {@link #visitRoutineDefinition} overwrites the
+     * identity for the last one (the common published-member form is a separate ALTER MODULE).
+     */
+    @Override
+    public Void visitCreateModule(Db2Parser.CreateModuleContext ctx) {
+        result.setType(Db2RoutineInfo.RoutineType.MODULE);
+        Db2Parser.RoutineNameContext rn = ctx.moduleName;
+        if (rn != null) {
+            String module = lastIdText(rn);
+            result.setName(module);
+            result.setModuleName(module);
+            if (rn.id().size() == 2) result.setSchema(cleanId(rn.id(0).getText()));
+        }
+        result.setLineStart(ctx.getStart().getLine());
+        result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
+        return visitChildren(ctx);
+    }
+
+    /**
+     * {@code ALTER MODULE m PUBLISH FUNCTION|PROCEDURE f(...) ... body} — the published member's
+     * identity, with {@code moduleName=m} so the shared model keys it as MODULE.SUB. The body is
+     * visited so calls/table ops inside the member are captured.
+     */
+    @Override
+    public Void visitAlterModule(Db2Parser.AlterModuleContext ctx) {
+        Db2Parser.RoutineNameContext moduleRn = ctx.moduleName;
+        if (moduleRn != null) result.setModuleName(lastIdText(moduleRn));
+
+        Db2Parser.AlterModuleActionContext action = ctx.alterModuleAction();
+        if (action != null) {
+            Db2Parser.RoutineNameContext member = action.memberName;
+            if (action.VARIABLE() != null && member != null) {
+                // ALTER MODULE … PUBLISH|ADD VARIABLE v type — a module-scoped variable (a module
+                // global), not a routine: capture it for the globals facet.
+                result.setType(Db2RoutineInfo.RoutineType.MODULE);
+                Db2VariableInfo v = new Db2VariableInfo();
+                v.setName(lastIdText(member));
+                if (action.dataType() != null) v.setDataType(action.dataType().getText());
+                if (action.defaultVal() != null) v.setDefaultValue(action.defaultVal().getText());
+                v.setLine(ctx.getStart().getLine());
+                result.getModuleVariables().add(v);
+            } else {
+                if (action.FUNCTION() != null) {
+                    result.setType(Db2RoutineInfo.RoutineType.FUNCTION);
+                } else if (action.PROCEDURE() != null) {
+                    result.setType(Db2RoutineInfo.RoutineType.PROCEDURE);
+                }
+                if (member != null) {
+                    String memberName = lastIdText(member);
+                    result.setName(memberName);
+                    // A member may be schema-qualified as module.member; the module is the qualifier.
+                    if (member.id().size() == 2) result.setSchema(cleanId(member.id(0).getText()));
+                }
+            }
+            result.setLineStart(ctx.getStart().getLine());
+            result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
+        }
+        return visitChildren(ctx);
+    }
+
+    /**
+     * {@code CREATE VARIABLE [schema.]name type [DEFAULT ...]} (top-level or module-scoped) —
+     * DB2's global/module variable. Captured as a module global so the shared model surfaces it in
+     * the globals facet (the Oracle package-globals shape).
+     */
+    @Override
+    public Void visitCreateVariable(Db2Parser.CreateVariableContext ctx) {
+        Db2VariableInfo v = new Db2VariableInfo();
+        Db2Parser.RoutineNameContext rn = ctx.routineName();
+        if (rn != null) {
+            v.setName(lastIdText(rn));
+            if (rn.id().size() == 2) result.setSchema(cleanId(rn.id(0).getText()));
+        }
+        if (ctx.dataType() != null) v.setDataType(ctx.dataType().getText());
+        if (ctx.defaultVal() != null) v.setDefaultValue(ctx.defaultVal().getText());
+        v.setLine(ctx.getStart().getLine());
+        result.getModuleVariables().add(v);
+        return visitChildren(ctx);
+    }
+
+    /** The final identifier of a (schema-qualified) routine name. */
+    private String lastIdText(Db2Parser.RoutineNameContext rn) {
+        if (rn == null || rn.id().isEmpty()) return null;
+        return cleanId(rn.id(rn.id().size() - 1).getText());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // CREATE TRIGGER
     //
     // Captures the trigger identity/metadata, then descends into the SAME

@@ -79,9 +79,22 @@ public class FlowNode {
      * without a separate crawl/output folder per procedure. Empty for every other node.
      */
     private List<SubprogramSummaryInfo> members = new ArrayList<>();
+    /**
+     * Task #29: true when THIS node is a nested/local subprogram (declared inside another
+     * subprogram's body). Persisted to the node detail and the index projection so the
+     * procedures facet can show a "nested" badge. Additive metadata only — it never participates
+     * in {@link #buildShortId()}, so ids of non-nested nodes stay byte-identical.
+     */
+    private boolean nested;
+    /** Task #29: nesting level (0 = top-level/package member, 1 = one body deep, …). */
+    private int scopeDepth;
 
     public List<SubprogramSummaryInfo> getMembers() { return members; }
     public void setMembers(List<SubprogramSummaryInfo> members) { this.members = members; }
+    public boolean isNested() { return nested; }
+    public void setNested(boolean nested) { this.nested = nested; }
+    public int getScopeDepth() { return scopeDepth; }
+    public void setScopeDepth(int scopeDepth) { this.scopeDepth = scopeDepth; }
 
     public int getOverloadParamCount() { return overloadParamCount; }
     public void setOverloadParamCount(int overloadParamCount) { this.overloadParamCount = overloadParamCount; }

@@ -817,6 +817,10 @@ public class ChunkedFlowWriter {
             idx.put("objectName", obj);
             idx.put("name", fullName);
             idx.put("objectType", node.getObjectType());
+            // Task #29: nested/local subprogram badge for the procedures facet. Additive — only
+            // emitted for nested nodes, so existing (non-nested) index.json is byte-identical.
+            if (node.isNested()) idx.put("nested", true);
+            if (node.getScopeDepth() > 0) idx.put("scopeDepth", node.getScopeDepth());
             // Trigger metadata in the index summary so the UI can associate a trigger with its
             // OWN table (otherwise every trigger node shows under every table/view).
             if (node.getTriggerTable() != null)  idx.put("triggerTable", node.getTriggerTable());
@@ -1091,6 +1095,10 @@ public class ChunkedFlowWriter {
             detail.put("objectName", obj);
             detail.put("schema", node.getSchema());
             detail.put("objectType", node.getObjectType());
+            // Task #29: nested/local subprogram marker on the node detail too (additive; omitted
+            // for ordinary nodes so existing node JSON is byte-identical).
+            if (node.isNested()) detail.put("nested", true);
+            if (node.getScopeDepth() > 0) detail.put("scopeDepth", node.getScopeDepth());
             detail.put("depth", node.getDepth());
             detail.put("lineStart", node.getLineStart());
             detail.put("lineEnd", node.getLineEnd());
@@ -1361,6 +1369,9 @@ public class ChunkedFlowWriter {
                     mm.put("type", m.getType());
                     mm.put("lineStart", m.getLineStart());
                     mm.put("lineEnd", m.getLineEnd());
+                    // Task #29: nested member marker (omitted for ordinary members).
+                    if (m.isNested()) mm.put("nested", true);
+                    if (m.getScopeDepth() > 0) mm.put("scopeDepth", m.getScopeDepth());
                     members.add(mm);
                 }
                 detail.put("members", members);

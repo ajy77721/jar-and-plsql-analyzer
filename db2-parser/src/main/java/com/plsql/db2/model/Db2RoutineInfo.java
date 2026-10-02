@@ -5,10 +5,21 @@ import java.util.List;
 
 public class Db2RoutineInfo {
 
-    public enum RoutineType { PROCEDURE, FUNCTION, TRIGGER, VIEW, SEQUENCE, INDEX, ALTER_TABLE, TYPE }
+    public enum RoutineType { PROCEDURE, FUNCTION, TRIGGER, VIEW, SEQUENCE, INDEX, ALTER_TABLE, TYPE, MODULE }
 
     private String       schema;
     private String       name;
+    /**
+     * Task #28: the owning DB2 module name when this routine is a module member (catalog
+     * {@code SYSCAT.ROUTINES.ROUTINEMODULENAME}), else null. The shared model uses it as the
+     * package slot so the member's key becomes MODULE.SUB (the Oracle PACKAGE.SUB analog).
+     */
+    private String       moduleName;
+    /**
+     * Task #28: module-level variable declarations (CREATE VARIABLE, or an ALTER MODULE … PUBLISH
+     * VARIABLE), reported by the shared model as package globals → the globals facet.
+     */
+    private List<Db2VariableInfo> moduleVariables = new ArrayList<>();
     private RoutineType  type = RoutineType.PROCEDURE;
     private int          lineStart;
     private int          lineEnd;
@@ -36,6 +47,9 @@ public class Db2RoutineInfo {
     public void        setSchema(String schema)         { this.schema = schema; }
     public String      getName()       { return name; }
     public void        setName(String name)             { this.name = name; }
+    public String      getModuleName() { return moduleName; }
+    public void        setModuleName(String moduleName) { this.moduleName = moduleName; }
+    public List<Db2VariableInfo> getModuleVariables() { return moduleVariables; }
     public RoutineType getType()       { return type; }
     public void        setType(RoutineType type)        { this.type = type; }
     public int         getLineStart()  { return lineStart; }

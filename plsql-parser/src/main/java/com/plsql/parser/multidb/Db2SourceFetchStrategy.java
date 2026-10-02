@@ -30,8 +30,10 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
     @Override
     public String fetchSource(Connection conn, String objectName, String objectType,
                               String schema) throws SQLException {
+        // ROUTINEMODULENAME is selected so a module member's owning module is available to callers
+        // that key it as MODULE.SUB (task #28); it is null for a non-module routine.
         String sql =
-                "SELECT TEXT FROM SYSCAT.ROUTINES " +
+                "SELECT TEXT, ROUTINEMODULENAME FROM SYSCAT.ROUTINES " +
                 "WHERE ROUTINENAME = ? " +
                 (schema != null ? "AND ROUTINESCHEMA = ? " : "") +
                 "AND ROUTINETYPE IN ('P', 'F') " +
@@ -65,7 +67,7 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
     public String fetchSourceBySpecificName(Connection conn, String specificName, String schema)
             throws SQLException {
         if (specificName == null || specificName.isBlank()) return null;
-        String sql = "SELECT TEXT FROM SYSCAT.ROUTINES WHERE SPECIFICNAME = ? "
+        String sql = "SELECT TEXT, ROUTINEMODULENAME FROM SYSCAT.ROUTINES WHERE SPECIFICNAME = ? "
                 + (schema != null ? "AND ROUTINESCHEMA = ? " : "")
                 + "FETCH FIRST 1 ROWS ONLY";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -88,12 +90,15 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
     public List<ObjectRef> listObjects(Connection conn, String schema) throws SQLException {
         // SPECIFICNAME comes back with each row so the crawler can key every overload distinctly
         // (it is unique per routine; ROUTINENAME is not) and fetch it by specific name.
+        // ROUTINEMODULENAME (task #28) identifies a module member's owning module; the crawler
+        // uses it as the package slot so the member keys as MODULE.SUB. It is null for a
+        // non-module routine, so the key stays the historical standalone one.
         String sql = schema != null
-                ? "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA, SPECIFICNAME " +
+                ? "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA, SPECIFICNAME, ROUTINEMODULENAME " +
                   "FROM SYSCAT.ROUTINES " +
                   "WHERE ROUTINESCHEMA = ? AND ROUTINETYPE IN ('P', 'F') " +
                   "ORDER BY ROUTINESCHEMA, ROUTINENAME, SPECIFICNAME"
-                : "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA, SPECIFICNAME " +
+                : "SELECT ROUTINENAME, ROUTINETYPE, ROUTINESCHEMA, SPECIFICNAME, ROUTINEMODULENAME " +
                   "FROM SYSCAT.ROUTINES " +
                   "WHERE ROUTINETYPE IN ('P', 'F') " +
                   "ORDER BY ROUTINESCHEMA, ROUTINENAME, SPECIFICNAME";
@@ -111,7 +116,8 @@ public class Db2SourceFetchStrategy implements SourceFetchStrategy {
                             rs.getString("ROUTINESCHEMA"),
                             null,
                             null,
-                            rs.getString("SPECIFICNAME")));
+                            rs.getString("SPECIFICNAME"),
+                            rs.getString("ROUTINEMODULENAME")));
                 }
             }
         }

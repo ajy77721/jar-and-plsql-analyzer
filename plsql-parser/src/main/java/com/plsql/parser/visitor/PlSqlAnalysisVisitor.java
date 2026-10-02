@@ -222,6 +222,23 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         return currentSubprogram() != null;
     }
 
+    /**
+     * Task #29: stamp nesting metadata on a subprogram as it is created. Called BEFORE
+     * {@link #pushSubprogram(SubprogramInfo)}, so {@link #currentSubprogram()} is the ENCLOSING
+     * subprogram (null for a package member or standalone routine). A nested subprogram gets
+     * {@code nested=true} and a scopeDepth one greater than its enclosing body's.
+     */
+    private void markNesting(SubprogramInfo si) {
+        SubprogramInfo enclosing = currentSubprogram();
+        if (enclosing != null) {
+            si.setNested(true);
+            si.setScopeDepth(enclosing.getScopeDepth() + 1);
+        } else {
+            si.setNested(false);
+            si.setScopeDepth(0);
+        }
+    }
+
     private void addStatement(StatementInfo si) {
         SubprogramInfo sub = currentSubprogram();
         if (sub != null) {
@@ -985,6 +1002,9 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             si.setName(getIdentifierText(ctx.identifier()));
         }
 
+        // Task #29: record nesting (must run before pushSubprogram below).
+        markNesting(si);
+
         // Parameters
         if (ctx.parameter() != null) {
             for (PlSqlParser.ParameterContext p : ctx.parameter()) {
@@ -1145,6 +1165,9 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         if (!ctx.PIPELINED().isEmpty()) {
             si.setPipelined(true);
         }
+
+        // Task #29: record nesting (must run before pushSubprogram below).
+        markNesting(si);
 
         if (ctx.parameter() != null) {
             for (PlSqlParser.ParameterContext p : ctx.parameter()) {
@@ -1745,6 +1768,8 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
      */
     private Void visitTypeMemberBody(ParserRuleContext ctx, SubprogramInfo si,
                                      PlSqlParser.Seq_of_declare_specsContext declSpecs) {
+        // Task #29: record nesting (must run before pushSubprogram below).
+        markNesting(si);
         ParsedObject po = currentObject();
         if (po != null) {
             po.getSubprograms().add(si);

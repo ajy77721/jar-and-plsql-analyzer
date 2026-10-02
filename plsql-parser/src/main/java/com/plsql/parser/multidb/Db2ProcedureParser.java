@@ -41,6 +41,18 @@ public class Db2ProcedureParser implements StoredProcedureParser {
         obj.setName(info.getName());
         obj.setSchema(info.getSchema());
         obj.setType(mapType(info.getType()));
+        // Task #28: a module member carries its module as the package slot → node key MODULE.SUB
+        // (mirroring Oracle's PACKAGE.SUB). The module container itself (type MODULE) is NOT
+        // re-qualified: its own name already is the module.
+        if (info.getModuleName() != null && !info.getModuleName().isBlank()
+                && info.getType() != Db2RoutineInfo.RoutineType.MODULE) {
+            obj.setPackageName(info.getModuleName());
+        }
+        // Task #28: module/global variable declarations → packageVariables → the globals facet
+        // (the Oracle package-globals shape).
+        if (info.getModuleVariables() != null && !info.getModuleVariables().isEmpty()) {
+            obj.setPackageVariables(toVars(info.getModuleVariables(), java.util.Collections.emptyList()));
+        }
         obj.setLineStart(info.getLineStart());
         obj.setLineEnd(info.getLineEnd() > 0 ? info.getLineEnd() : countLines(source));
         obj.setParameters(toParams(info.getParams()));
@@ -244,6 +256,7 @@ public class Db2ProcedureParser implements StoredProcedureParser {
             case FUNCTION: return "FUNCTION";
             case TRIGGER:  return "TRIGGER";
             case VIEW:     return "VIEW";
+            case MODULE:   return "MODULE";
             default:       return "PROCEDURE";
         }
     }
