@@ -126,28 +126,20 @@ PA.exHandlers = {
 
         html += '<div class="to-detail-section">';
         html += '<div class="to-detail-section-title" style="color:var(--badge-orange)">Exception Handlers (' + handlers.length + ')</div>';
-
-        for (var i = 0; i < handlers.length; i++) {
-            var h = handlers[i];
-            var exName = h.exception || 'UNKNOWN';
-            var isOthers = exName === 'OTHERS';
-            var color = isOthers ? 'var(--badge-red)' : 'var(--badge-orange)';
-
-            html += '<div class="to-detail-item">';
-            html += '<span class="exh-badge" style="color:' + color + ';border-color:' + color + '">' + esc(exName) + '</span>';
-            if (h.line) {
-                var lineLabel = h.lineEnd && h.lineEnd !== h.line ? 'L' + h.line + '-' + h.lineEnd : 'L' + h.line;
-                var sf = e.sourceFile || '';
-                if (sf) {
-                    html += '<span class="to-detail-line" data-tip="Open source at line" onclick="event.stopPropagation(); PA.sourceView.openAtLine(\'' + PA.escJs(sf) + '\', ' + h.line + ')">' + lineLabel + '</span>';
-                } else {
-                    html += '<span style="font-size:10px;color:var(--text-muted)">' + lineLabel + '</span>';
-                }
-            }
-            html += '<span style="font-size:10px;color:var(--text-muted)">' + (h.statementsCount || 0) + ' stmts</span>';
-            html += '</div>';
-        }
-
+        var sf = e.sourceFile || '';
+        html += PA.usageTable.attach('ut-exh-detail-' + idx, handlers, {
+            showTitle: false, nameLabel: 'Exception', countLabel: 'handlers', showSnippet: false,
+            name: function (h) { return h.exception || 'UNKNOWN'; },
+            line: function (h) { return h.line; },
+            lineLink: function (h) {
+                return (sf && h.line) ? "PA.sourceView.openAtLine('" + PA.escJs(sf) + "'," + h.line + ")" : null;
+            },
+            sub: function (h) {
+                var label = (h.lineEnd && h.lineEnd !== h.line) ? 'L' + h.line + '-' + h.lineEnd : (h.line ? 'L' + h.line : '');
+                return { text: label + ' · ' + (h.statementsCount || 0) + ' stmts' };
+            },
+            badges: function (h) { return [h.exception === 'OTHERS' ? 'OTHERS' : 'HANDLER']; }
+        });
         html += '</div></div>';
         return html;
     },

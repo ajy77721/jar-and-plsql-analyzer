@@ -265,24 +265,19 @@ PA.cursors = {
         if (details.length > 0) {
             html += '<div class="to-detail-section">';
             html += '<div class="to-detail-section-title">Usage Details (' + details.length + ')</div>';
-            for (var i = 0; i < details.length; i++) {
-                var d = details[i];
-                var opColor = d.operation === 'DECLARE' ? 'var(--purple)' :
-                              d.operation === 'OPEN' ? 'var(--green)' :
-                              d.operation === 'FETCH' || d.operation === 'FETCH_BULK' ? 'var(--blue)' :
-                              d.operation === 'CLOSE' ? 'var(--red)' :
-                              d.operation === 'FOR_LOOP' ? 'var(--teal)' : 'var(--text-muted)';
-                html += '<div class="to-detail-item">';
-                html += '<span class="op-badge" style="background:color-mix(in srgb, ' + opColor + ' 15%, transparent);color:' + opColor + '">' + (d.operation || '?') + '</span>';
-                html += '<span class="to-detail-proc" onclick="event.stopPropagation(); PA.showProcedure(\'' + PA.escJs(d.procedureId || d.procedureName || '') + '\')">' + esc(d.procedureName || '') + '</span>';
-                if (d.lineNumber) {
-                    html += '<span class="to-detail-line" data-tip="Open source at line" onclick="event.stopPropagation(); PA.sourceView.openAtLine(\'' + PA.escJs(d.sourceFile || '') + '\', ' + d.lineNumber + ')">L' + d.lineNumber + '</span>';
-                }
-                if (d.queryText && d.operation !== 'DECLARE') {
-                    html += '<div class="to-join-predicate">' + esc(d.queryText.substring(0, 120)) + (d.queryText.length > 120 ? '...' : '') + '</div>';
-                }
-                html += '</div>';
-            }
+            html += PA.usageTable.attach('ut-cur-detail-' + idx, details, {
+                showTitle: false, nameLabel: 'Procedure', countLabel: 'usages',
+                name: function (d) { return d.procedureName; },
+                nameLink: function (d) { return "PA.showProcedure('" + PA.escJs(d.procedureId || d.procedureName || '') + "')"; },
+                line: function (d) { return d.lineNumber; },
+                lineLink: function (d) {
+                    return d.lineNumber
+                        ? "PA.sourceView.openAtLine('" + PA.escJs(d.sourceFile || '') + "'," + d.lineNumber + ")"
+                        : null;
+                },
+                snippet: function (d) { return d.operation === 'DECLARE' ? '' : d.queryText; },
+                badges: function (d) { return [d.operation]; }
+            });
             html += '</div>';
         }
 

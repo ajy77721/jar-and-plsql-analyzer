@@ -342,14 +342,14 @@ PA.tableOps = {
         if (_trigTableOps.length > 0) {
             html += '<div class="to-detail-section">';
             html += '<div class="to-detail-section-title">Tables via Triggers (' + _trigTableOps.length + ')</div>';
-            for (var tti = 0; tti < _trigTableOps.length; tti++) {
-                var tto = _trigTableOps[tti];
-                html += '<div class="to-detail-item">';
-                html += '<span class="op-badge ' + esc(tto.operation) + '">' + esc(tto.operation || '?') + '</span>';
-                html += '<span class="to-detail-proc" onclick="event.stopPropagation(); PA.tableDetail.open(\'' + PA.escJs(tto.tableName) + '\',\'' + PA.escJs(tto.schema) + '\')">' + esc((tto.schema ? tto.schema + '.' : '') + tto.tableName) + '</span>';
-                html += '<span style="font-size:9px;color:var(--text-muted);margin-left:4px">via ' + esc(tto.triggerName) + '</span>';
-                html += '</div>';
-            }
+            html += PA.usageTable.attach('ut-to-triggers-' + idx, _trigTableOps, {
+                showTitle: false, nameLabel: 'Table', countLabel: 'tables', showSnippet: false,
+                name: function (tto) { return (tto.schema ? tto.schema + '.' : '') + tto.tableName; },
+                nameLink: function (tto) { return "PA.tableDetail.open('" + PA.escJs(tto.tableName) + "','" + PA.escJs(tto.schema) + "')"; },
+                sub: function (tto) { return { text: 'via ' + (tto.triggerName || '') }; },
+                badges: function (tto) { return [tto.operation, tto.objectType]; },
+                search: function (tto) { return tto.triggerName || ''; }
+            });
             html += '</div>';
         }
 

@@ -214,7 +214,7 @@ PA.estateTriggers = {
             return '<div class="est-detail"><div class="est-loading">Loading trigger detail…</div></div>';
         }
         if (!cached) return '<div class="est-detail">' + PA.estateTriggers._notAnalyzed(t.name) + '</div>';
-        return '<div class="est-detail">' + PA.estateTriggers._detailHtml(cached, esc) + '</div>';
+        return '<div class="est-detail">' + PA.estateTriggers._detailHtml(cached, esc, idx) + '</div>';
     },
 
     _fetchDetail: function(t, idx) {
@@ -238,7 +238,7 @@ PA.estateTriggers = {
             + 'Re-run the analysis to populate its WHEN clause, body and chain.</div>';
     },
 
-    _detailHtml: function(t, esc) {
+    _detailHtml: function(t, esc, idx) {
         var html = '';
 
         html += '<div class="est-meta">';
@@ -285,12 +285,12 @@ PA.estateTriggers = {
         // The procedures the trigger body calls (when the crawl captured them on the trigger node).
         if (t.bodyCalls && t.bodyCalls.length) {
             html += '<div class="est-section"><div class="est-section-title">Calls from the body (' + t.bodyCalls.length + ')</div>';
-            html += PA.estateTriggers._callsHtml(t.bodyCalls, esc);
+            html += PA.estateTriggers._callsHtml(t.bodyCalls, esc, idx);
             html += '</div>';
         }
 
         html += '<div class="est-section"><div class="est-section-title">Touches (' + (t.touchesCount || 0) + ')</div>';
-        html += PA.estateTriggers._touchesHtml(t.touches, esc);
+        html += PA.estateTriggers._touchesHtml(t.touches, esc, idx);
         html += '</div>';
 
         if (t.chain) {
@@ -301,87 +301,59 @@ PA.estateTriggers = {
         html += '<div class="est-section"><div class="est-section-title">Will fire this trigger ('
             + ((t.willFire || []).length) + ')</div>';
         html += PA.estateTriggers._firedByHtml(t.willFire, esc,
-            'No procedure in this analysis performs the trigger\'s event on its table.');
+            'No procedure in this analysis performs the trigger\'s event on its table.', idx);
         html += '</div>';
 
         // Every procedure that writes the trigger's table (any DML), for completeness.
         html += '<div class="est-section"><div class="est-section-title">Writes the table — any DML ('
             + ((t.firedBy || []).length) + ')</div>';
         html += PA.estateTriggers._firedByHtml(t.firedBy, esc,
-            'No procedure in this analysis writes to the trigger\'s table.');
+            'No procedure in this analysis writes to the trigger\'s table.', idx);
         html += '</div>';
 
         return html;
     },
 
     /** Procedures the trigger body calls — each a clickable link into the procedure explorer. */
-    _callsHtml: function(calls, esc) {
-        var html = '<div class="est-usedby">';
-        for (var i = 0; i < calls.length; i++) {
-            var c = calls[i];
-            var name = c.objectName || c.target || c.name || '';
-            html += '<div class="est-usedby-item">'
-                + (c.type ? '<span class="est-badge">' + esc(c.type) + '</span>' : '')
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
-                + PA.escJs(name) + '\')">' + esc(name) + '</span>'
-                + (c.lines && c.lines.length ? '<span class="est-usedby-line">L' + c.lines[0] + '</span>' : '')
-                + (c.count ? '<span class="est-usedby-line">' + c.count + 'x</span>' : '')
-                + '</div>';
-        }
-        html += '</div>';
-        return html;
+    _callsHtml: function(calls, esc, idx) {
+        return PA.usageTable.attach('ut-tg-bodycalls-' + idx, calls || [], {
+            showTitle: false, nameLabel: 'Called procedure', countLabel: 'calls',
+            name: function (c) { return c.objectName || c.target || c.name || ''; },
+            nameLink: function (c) { return "PA.showProcedure('" + PA.escJs(c.objectName || c.target || c.name || '') + "')"; },
+            line: function (c) { return (c.lines && c.lines.length) ? c.lines[0] : null; },
+            sub: function (c) { return c.count ? { text: c.count + 'x' } : null; },
+            badges: function (c) { return [c.type]; },
+            source: PA.usageTable.nodeSource
+        });
     },
 
-    _touchesHtml: function(touches, esc) {
+    _touchesHtml: function(touches, esc, idx) {
         if (!touches || !touches.length) return '<div class="est-empty">This trigger body does not touch any table.</div>';
-        var html = '<div class="est-chips">';
-        for (var i = 0; i < touches.length; i++) {
-            var b = touches[i];
-            var op = (b.operation || 'SELECT').toUpperCase();
-            var cls = op === 'INSERT' ? 'insert' : op === 'UPDATE' ? 'update' : op === 'DELETE' ? 'delete' : 'select';
-            html += '<span class="est-chip">'
-                + '<span class="est-op-badge ' + cls + '">' + esc(op) + '</span>'
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.tableDetail.open(\''
-                + PA.escJs(b.name || '') + '\',\'' + PA.escJs(b.schema || '') + '\')">' + esc(b.name || '') + '</span>'
-                + (b.schema ? '<span class="est-chip-sub">' + esc(b.schema) + '</span>' : '')
-                + (b.objectType && b.objectType !== 'TABLE' ? '<span class="est-chip-sub">' + esc(b.objectType.replace('_', ' ')) + '</span>' : '')
-                + '</span>';
-        }
-        html += '</div>';
-        return html;
+        return PA.usageTable.attach('ut-tg-touches-' + idx, touches, {
+            showTitle: false, nameLabel: 'Table', countLabel: 'tables', showSnippet: false,
+            name: function (b) { return b.name; },
+            nameLink: function (b) { return "PA.tableDetail.open('" + PA.escJs(b.name || '') + "','" + PA.escJs(b.schema || '') + "')"; },
+            sub: function (b) { return { text: b.schema || '' }; },
+            badges: function (b) { return [b.operation || 'SELECT', (b.objectType && b.objectType !== 'TABLE') ? b.objectType.replace('_', ' ') : null]; }
+        });
     },
 
-    _firedByHtml: function(firedBy, esc, emptyMsg) {
+    _firedByHtml: function(firedBy, esc, emptyMsg, idx) {
         if (!firedBy || !firedBy.length) {
             return '<div class="est-empty">' + (emptyMsg || 'No procedure in this analysis writes to the trigger\'s table.') + '</div>';
         }
-        var html = '<div class="est-usedby">';
-        for (var i = 0; i < firedBy.length; i++) {
-            var u = firedBy[i];
-            html += '<div class="est-usedby-item">';
-            html += '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\'' + PA.escJs(u.nodeId || '') + '\')">' + esc(u.nodeName || u.nodeId || '') + '</span>';
-            // When the row carries the event-matched subset, show it; else fall back to all ops.
-            var ops = (u.matchingOperations && Object.keys(u.matchingOperations).length) ? u.matchingOperations : u.operations;
-            html += PA.estateTriggers._opsHtml(ops, esc);
-            if (u.nodeDepth != null) html += '<span class="est-usedby-line">depth ' + u.nodeDepth + '</span>';
-            html += '</div>';
-        }
-        html += '</div>';
-        return html;
-    },
-
-    _opsHtml: function(operations, esc) {
-        if (!operations || typeof operations !== 'object') return '';
-        var html = '<span class="est-usedby-ops">';
-        for (var op in operations) {
-            if (!Object.prototype.hasOwnProperty.call(operations, op)) continue;
-            var lines = operations[op] || [];
-            var cls = op === 'INSERT' ? 'insert' : op === 'UPDATE' ? 'update' : op === 'DELETE' ? 'delete' : op === 'SELECT' ? 'select' : '';
-            html += '<span class="est-op-badge ' + cls + '">' + esc(op) + '</span>';
-            if (lines.length) html += '<span class="est-usedby-line">L' + lines[0] + '</span>';
-        }
-        html += '</span>';
-        return html;
+        return PA.usageTable.attach('ut-tg-firedby-' + idx, firedBy, {
+            showTitle: false, nameLabel: 'Procedure', countLabel: 'procedures', showSnippet: false,
+            name: function (u) { return u.nodeName || u.nodeId || ''; },
+            nameLink: function (u) { return "PA.showProcedure('" + PA.escJs(u.nodeId || '') + "')"; },
+            // The event-matched subset when present; else every operation.
+            badges: function (u) {
+                var ops = (u.matchingOperations && Object.keys(u.matchingOperations).length) ? u.matchingOperations : u.operations;
+                return Object.keys(ops || {});
+            },
+            line: function (u) { return PA.usageTable.firstLine(u); },
+            source: PA.usageTable.nodeSource
+        });
     },
 
     /**

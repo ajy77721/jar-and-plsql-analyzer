@@ -20,10 +20,18 @@ const esc = (v) => String(v == null ? '' : v)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-/** Load one of the real screen files into a shared PA namespace. */
+/**
+ * Load one of the real screen files into a shared PA namespace, with the real escaper and the real
+ * usage-table component behind it — the estate detail lists are rendered through PA.usageTable now,
+ * so the escaping under test is the escaping the app actually runs.
+ */
 async function loadParser(rel) {
   globalThis.window = globalThis;
   globalThis.PA = globalThis.PA || {};
+  if (!globalThis.Esc) new Function(await read('shared/escape.js'))();
+  PA.esc = function (s) { return Esc.html(s); };
+  PA.escJs = function (s) { return Esc.js(s); };
+  if (!PA.usageTable) new Function(await read('shared/usage-table.js'))();
   new Function(await read(rel))();
   return globalThis.PA;
 }

@@ -520,23 +520,12 @@ PA.joinSummary = {
 
         html += '<div class="to-detail-section">';
         html += '<div class="to-detail-section-title">Joins in this Query (' + item.joinCount + ')</div>';
-        for (var i = 0; i < item.joins.length; i++) {
-            var j = item.joins[i];
-            var jtColor = j.joinType === 'INNER' ? 'var(--blue)' :
-                j.joinType.includes('LEFT') ? 'var(--green)' :
-                j.joinType.includes('RIGHT') ? 'var(--orange)' :
-                j.joinType === 'CROSS' ? 'var(--red)' :
-                j.joinType.includes('FULL') ? 'var(--purple)' : 'var(--text-muted)';
-            html += '<div class="js-pred-item">';
-            html += '<span class="op-badge" style="background:color-mix(in srgb, ' + jtColor + ' 15%, transparent);color:' + jtColor + ';font-size:9px;flex-shrink:0">' + esc(j.joinType) + '</span>';
-            html += '<span style="font-weight:600;color:var(--teal);font-size:10px">' + esc(j.leftTable) + '</span>';
-            html += '<span style="color:var(--text-muted);font-size:9px">&harr;</span>';
-            html += '<span style="font-weight:600;color:var(--teal);font-size:10px">' + esc(j.rightTable) + '</span>';
-            if (j.predicate) {
-                html += '<code style="font-size:9px;color:var(--text-muted);margin-left:6px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">' + esc(j.predicate.substring(0, 120)) + '</code>';
-            }
-            html += '</div>';
-        }
+        html += PA.usageTable.attach('ut-jq-detail-' + idx, item.joins || [], {
+            showTitle: false, nameLabel: 'Tables', countLabel: 'joins', snippetLabel: 'Predicate',
+            name: function (j) { return (j.leftTable || '') + ' ↔ ' + (j.rightTable || ''); },
+            snippet: function (j) { return j.predicate; },
+            badges: function (j) { return [j.joinType || 'JOIN']; }
+        });
         html += '</div>';
 
         html += '<div class="to-detail-section" id="jqSql-' + idx + '">';

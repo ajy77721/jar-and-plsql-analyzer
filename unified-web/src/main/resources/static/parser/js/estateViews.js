@@ -510,7 +510,6 @@ PA.estateViews = {
             }
         });
     },
-    },
 
     /**
      * The chain visualiser: one row per level (level 0 is the view itself), an arrow between

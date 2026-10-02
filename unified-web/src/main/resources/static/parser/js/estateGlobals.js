@@ -158,7 +158,7 @@ PA.estateGlobals = {
             return '<div class="est-detail"><div class="est-loading">Loading package detail…</div></div>';
         }
         if (!cached) return '<div class="est-detail">' + PA.estateGlobals._notAnalyzed(p.package) + '</div>';
-        return '<div class="est-detail">' + PA.estateGlobals._detailHtml(cached, esc) + '</div>';
+        return '<div class="est-detail">' + PA.estateGlobals._detailHtml(cached, esc, idx) + '</div>';
     },
 
     _fetchDetail: function(p, idx) {
@@ -182,7 +182,7 @@ PA.estateGlobals = {
             + 'Re-run the analysis to populate its variable types and defaults.</div>';
     },
 
-    _detailHtml: function(d, esc) {
+    _detailHtml: function(d, esc, idx) {
         var html = '';
 
         html += '<div class="est-meta">';
@@ -201,7 +201,7 @@ PA.estateGlobals = {
                 var v = vars[i];
                 var declared = v.declared !== false;
                 html += '<tr>'
-                    + '<td class="est-col-name">' + esc(v.name || '') + '</td>'
+                    + '<td class="est-col-name est-var-name">' + esc(v.name || '') + '</td>'
                     + '<td class="est-col-type">' + (v.dataType ? esc(v.dataType) : '<span style="color:var(--text-muted)">not recorded</span>') + '</td>'
                     + '<td class="est-col-type">' + (v.defaultValue != null ? esc(v.defaultValue) : '<span style="color:var(--text-muted)">-</span>') + '</td>'
                     + '<td>' + (v.constant ? 'YES' : 'NO') + '</td>'
@@ -219,14 +219,20 @@ PA.estateGlobals = {
         }
         html += '</div>';
 
+        // Variable-name metadata, so each usage row can show its type/default/const badges.
+        var varMeta = {};
+        for (var vi = 0; vi < vars.length; vi++) {
+            if (vars[vi] && vars[vi].name) varMeta[String(vars[vi].name).toUpperCase()] = vars[vi];
+        }
+
         html += '<div class="est-section"><div class="est-section-title">Readers &amp; Writers (' + ((d.usedBy || []).length) + ')</div>';
-        html += PA.estateGlobals._usedByHtml(d, esc);
+        html += PA.estateGlobals._usedByHtml(d, esc, idx, varMeta);
         html += '</div>';
 
         // The reverse view: each procedure's footprint on this package's globals.
         if (d.byProcedure && d.byProcedure.length) {
             html += '<div class="est-section"><div class="est-section-title">Per-procedure footprint (' + d.byProcedure.length + ')</div>';
-            html += PA.estateGlobals._byProcedureHtml(d.byProcedure, esc);
+            html += PA.estateGlobals._byProcedureHtml(d.byProcedure, esc, idx, varMeta);
             html += '</div>';
         }
 
@@ -234,73 +240,68 @@ PA.estateGlobals = {
     },
 
     /**
-     * One block per procedure: a clickable procedure link plus the variables it reads and writes,
-     * each with its line — the per-procedure globals summary, the reverse of the readers/writers list.
+     * The per-procedure footprint, one usage row per variable read/written. Per the UX standard the
+     * VARIABLE name leads (bold, first column); the referencing procedure is the secondary link and
+     * the variable's type/default/const ride along as badges.
      */
-    _byProcedureHtml: function(byProc, esc) {
-        var html = '';
-        for (var i = 0; i < byProc.length; i++) {
+    _byProcedureHtml: function(byProc, esc, idx, varMeta) {
+        var rows = [];
+        for (var i = 0; i < (byProc || []).length; i++) {
             var p = byProc[i];
-            html += '<div class="est-var-group"><div class="est-var-name">'
-                + '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
-                + PA.escJs(p.procedureId || '') + '\')">' + esc(p.procedureName || p.procedureId || '') + '</span>'
-                + ' <span style="color:var(--text-muted);font-weight:400">' + (p.readCount || 0) + 'r / ' + (p.writeCount || 0) + 'w</span></div>';
-            html += '<div class="est-usedby">';
-            html += PA.estateGlobals._accessListHtml('READ', p.reads, esc);
-            html += PA.estateGlobals._accessListHtml('WRITE', p.writes, esc);
-            html += '</div></div>';
+            ['reads', 'writes'].forEach(function (side) {
+                var kind = side === 'writes' ? 'WRITE' : 'READ';
+                (p[side] || []).forEach(function (r) {
+                    rows.push({
+                        variable: r.variable, lineNumber: r.lineNumber, accessType: kind,
+                        procedureId: p.procedureId, procedureName: p.procedureName, sourceFile: p.sourceFile
+                    });
+                });
+            });
         }
-        return html;
+        return PA.usageTable.attach('ut-gl-footprint-' + idx, rows, {
+            showTitle: false, nameLabel: 'Variable', countLabel: 'usages',
+            nameClass: 'est-var-name',
+            name: function (r) { return r.variable; },
+            sub: function (r) {
+                return { text: r.procedureName || r.procedureId || '',
+                         link: "PA.showProcedure('" + PA.escJs(r.procedureId || '') + "')" };
+            },
+            badges: function (r) {
+                var m = (varMeta || {})[String(r.variable || '').toUpperCase()] || {};
+                return [r.accessType, m.dataType, m.constant ? 'CONST' : null,
+                        m.defaultValue != null ? 'DEFAULT ' + m.defaultValue : null];
+            },
+            line: function (r) { return r.lineNumber; },
+            source: PA.usageTable.nodeSource
+        });
     },
 
-    _accessListHtml: function(kind, list, esc) {
-        var html = '';
-        list = list || [];
-        for (var i = 0; i < list.length; i++) {
-            var e = list[i];
-            html += '<div class="est-usedby-item">'
-                + '<span class="est-op-badge ' + (kind === 'WRITE' ? 'write' : 'read') + '">' + kind + '</span>'
-                + '<span class="est-col-name">' + esc(e.variable || '') + '</span>'
-                + (e.lineNumber ? '<span class="est-usedby-line">L' + e.lineNumber + '</span>' : '')
-                + '</div>';
-        }
-        return html;
-    },
-
-    /** Group the package's usedBy entries by variable, so each variable shows its own readers/writers. */
-    _usedByHtml: function(d, esc) {
+    /**
+     * The package's readers & writers, one row per usage. The VARIABLE name leads (bold, first
+     * column); the referencing procedure is the secondary link.
+     */
+    _usedByHtml: function(d, esc, idx, varMeta) {
         var usedBy = d.usedBy || [];
         if (!usedBy.length) return '<div class="est-empty">No reads or writes of this package\'s variables in this analysis.</div>';
-
-        var byVar = {};
-        var order = [];
-        for (var i = 0; i < usedBy.length; i++) {
-            var u = usedBy[i];
-            var key = u.variable || '(unknown)';
-            if (!byVar[key]) { byVar[key] = []; order.push(key); }
-            byVar[key].push(u);
-        }
-
-        var html = '';
-        for (var oi = 0; oi < order.length; oi++) {
-            var name = order[oi];
-            var list = byVar[name];
-            html += '<div class="est-var-group">';
-            html += '<div class="est-var-name">' + esc(name) + '</div>';
-            html += '<div class="est-usedby">';
-            for (var j = 0; j < list.length; j++) {
-                var e = list[j];
-                var isWrite = String(e.accessType || '').toUpperCase() === 'WRITE';
-                html += '<div class="est-usedby-item">';
-                html += '<span class="est-op-badge ' + (isWrite ? 'write' : 'read') + '">' + esc(e.accessType || 'READ') + '</span>';
-                html += '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\'' + PA.escJs(e.procedureId || '') + '\')">' + esc(e.procedureName || e.procedureId || '') + '</span>';
-                if (e.lineNumber) {
-                    html += '<span class="est-usedby-line" onclick="event.stopPropagation();PA.sourceView.openAtLine(\'' + PA.escJs(e.sourceFile || '') + '\',' + e.lineNumber + ')">L' + e.lineNumber + '</span>';
-                }
-                html += '</div>';
-            }
-            html += '</div></div>';
-        }
-        return html;
+        return PA.usageTable.attach('ut-gl-usedby-' + idx, usedBy, {
+            showTitle: false, nameLabel: 'Variable', countLabel: 'usages',
+            nameClass: 'est-var-name',
+            name: function (u) { return u.variable; },
+            sub: function (u) {
+                return { text: u.procedureName || u.procedureId || '',
+                         link: "PA.showProcedure('" + PA.escJs(u.procedureId || '') + "')" };
+            },
+            badges: function (u) {
+                var m = (varMeta || {})[String(u.variable || '').toUpperCase()] || {};
+                return [u.accessType || 'READ', m.dataType, m.constant ? 'CONST' : null];
+            },
+            line: function (u) { return u.lineNumber; },
+            lineLink: function (u) {
+                return u.lineNumber
+                    ? "PA.sourceView.openAtLine('" + PA.escJs(u.sourceFile || '') + "'," + u.lineNumber + ")"
+                    : null;
+            },
+            source: PA.usageTable.nodeSource
+        });
     }
 };

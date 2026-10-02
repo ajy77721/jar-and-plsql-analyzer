@@ -2,7 +2,12 @@ window.PA = window.PA || {};
 
 PA._updateDetailHeader = async function(detail) {
     var header = document.getElementById('detailHeader');
-    if (!detail) { if (header) header.style.display = 'none'; return; }
+    if (!detail) {
+        if (header) header.style.display = 'none';
+        var ac = document.getElementById('allCasesSection');
+        if (ac) ac.innerHTML = '';
+        return;
+    }
     header.style.display = '';
 
     var schema = detail.schema || '';
@@ -71,6 +76,9 @@ PA._updateDetailHeader = async function(detail) {
     }
 
     PA._updateNavBar(detail);
+
+    // Per-procedure "All cases (N)" — every case captured on this node's own doc, with examples.
+    if (PA.allCases && PA.allCases.render) PA.allCases.render(detail);
 };
 
 /**

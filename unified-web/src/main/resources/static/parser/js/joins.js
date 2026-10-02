@@ -207,24 +207,23 @@ PA.joins = {
         if (details.length > 0) {
             html += '<div class="to-detail-section">';
             html += '<div class="to-detail-section-title">Join Occurrences (' + details.length + ')</div>';
-            for (var i = 0; i < details.length; i++) {
-                var d = details[i];
-                var jtColor = d.joinType === 'INNER' ? 'var(--blue)' : d.joinType === 'LEFT' ? 'var(--green)' :
-                              d.joinType === 'RIGHT' ? 'var(--orange)' : d.joinType === 'CROSS' ? 'var(--red)' :
-                              d.joinType === 'FULL' ? 'var(--purple)' : 'var(--text-muted)';
-                html += '<div class="to-detail-item">';
-                html += '<span class="op-badge" style="background:color-mix(in srgb, ' + jtColor + ' 15%, transparent);color:' + jtColor + '">' + (d.joinType || '?') + ' JOIN</span>';
-                html += '<span class="to-detail-proc" onclick="event.stopPropagation(); PA.showProcedure(\'' + PA.escJs(d.procedureId || d.procedureName || '') + '\')">' + esc(d.procedureName || '') + '</span>';
-                if (d.lineNumber) {
-                    html += '<span class="to-detail-line" data-tip="Open source at line" onclick="event.stopPropagation(); PA.sourceView.openAtLine(\'' + PA.escJs(d.sourceFile || '') + '\', ' + d.lineNumber + ')">L' + d.lineNumber + '</span>';
+            html += PA.usageTable.attach('ut-join-detail-' + idx, details, {
+                showTitle: false, nameLabel: 'Procedure', countLabel: 'occurrences', snippetLabel: 'ON condition',
+                name: function (d) { return d.procedureName; },
+                nameLink: function (d) { return "PA.showProcedure('" + PA.escJs(d.procedureId || d.procedureName || '') + "')"; },
+                line: function (d) { return d.lineNumber; },
+                lineLink: function (d) {
+                    return d.lineNumber
+                        ? "PA.sourceView.openAtLine('" + PA.escJs(d.sourceFile || '') + "'," + d.lineNumber + ")"
+                        : null;
+                },
+                snippet: function (d) { return d.onPredicate; },
+                badges: function (d) { return [(d.joinType || 'JOIN') + ' JOIN']; },
+                source: PA.usageTable.nodeSource,
+                full: function (d) {
+                    return d.onPredicate ? '<pre>' + esc(d.onPredicate) + '</pre>' : '';
                 }
-                html += '<button class="join-sql-toggle" onclick="event.stopPropagation(); PA.joins.toggleSql(' + idx + ',' + i + ')">Show SQL</button>';
-                if (d.onPredicate) {
-                    html += '<div class="to-join-predicate">' + esc(d.onPredicate.substring(0, 200)) + (d.onPredicate.length > 200 ? '...' : '') + '</div>';
-                }
-                html += '</div>';
-                html += '<div class="join-sql-block" id="join-sql-' + idx + '-' + i + '" style="display:none"><div class="join-sql-loading">Loading...</div></div>';
-            }
+            });
             html += '</div>';
         }
 

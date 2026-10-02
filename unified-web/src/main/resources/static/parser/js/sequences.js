@@ -235,19 +235,19 @@ PA.sequences = {
 
         html += '<div class="to-detail-section">';
         html += '<div class="to-detail-section-title" style="color:var(--seq-nextval)">Usage Details (' + details.length + ')</div>';
-
-        for (var i = 0; i < details.length; i++) {
-            var d = details[i];
-            var opColor = d.operation === 'NEXTVAL' ? 'var(--seq-nextval)' : 'var(--seq-currval)';
-            html += '<div class="to-detail-item">';
-            html += '<span class="op-badge" style="background:color-mix(in srgb, ' + opColor + ' 15%, transparent);color:' + opColor + '">' + (d.operation || '?') + '</span>';
-            html += '<span class="to-detail-proc" onclick="event.stopPropagation(); PA.showProcedure(\'' + PA.escJs(d.procedureId || d.procedureName || '') + '\')">' + esc(d.procedureName || '') + '</span>';
-            if (d.lineNumber) {
-                html += '<span class="to-detail-line" data-tip="Open source at line" onclick="event.stopPropagation(); PA.sourceView.openAtLine(\'' + PA.escJs(d.sourceFile || '') + '\', ' + d.lineNumber + ')">L' + d.lineNumber + '</span>';
-            }
-            html += '</div>';
-        }
-
+        html += PA.usageTable.attach('ut-seq-detail-' + idx, details, {
+            showTitle: false, nameLabel: 'Procedure', countLabel: 'usages',
+            name: function (d) { return d.procedureName; },
+            nameLink: function (d) { return "PA.showProcedure('" + PA.escJs(d.procedureId || d.procedureName || '') + "')"; },
+            line: function (d) { return d.lineNumber; },
+            lineLink: function (d) {
+                return d.lineNumber
+                    ? "PA.sourceView.openAtLine('" + PA.escJs(d.sourceFile || '') + "'," + d.lineNumber + ")"
+                    : null;
+            },
+            badges: function (d) { return [d.operation]; },
+            source: PA.usageTable.nodeSource
+        });
         html += '</div></div>';
         return html;
     },
