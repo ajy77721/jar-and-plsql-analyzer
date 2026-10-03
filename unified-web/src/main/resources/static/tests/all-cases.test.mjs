@@ -199,6 +199,39 @@ export async function test_globals_rows_show_both_variable_and_procedure() {
     'the variable name must precede the procedure in the footprint row');
 }
 
+export async function test_globals_main_table_is_variable_level() {
+  const PA = await load('parser/js/estateGlobals.js');
+  PA.api = {
+    getGlobalDetail: async (pkg) => ({
+      package: pkg,
+      variables: [{ name: 'G_A', dataType: 'NUMBER', readCount: 1, writeCount: 0 },
+                  { name: 'G_B', dataType: 'VARCHAR2', readCount: 0, writeCount: 1 }],
+      usedBy: [
+        { variable: 'G_A', accessType: 'READ', procedureName: 'P1', procedureId: 'S$P1', lineNumber: 3, sourceFile: 'f' },
+        { variable: 'G_A', accessType: 'READ', procedureName: 'P2', procedureId: 'S$P2', lineNumber: 4, sourceFile: 'f' },
+        { variable: 'G_B', accessType: 'WRITE', procedureName: 'P1', procedureId: 'S$P1', lineNumber: 9, sourceFile: 'f' }
+      ]
+    })
+  };
+  const rows = await PA.estateGlobals._buildVarRows([{ package: 'PKG' }]);
+  equal(rows.length, 2, 'the main table must have one row per variable');
+  const a = rows.find((r) => r.variable === 'G_A');
+  equal(a.package, 'PKG', 'the row must carry its package');
+  equal(a.procCount, 2, 'the used-by count must be distinct procedures');
+  equal(a.usage, 2, 'the usage total must be reads + writes');
+
+  const html = PA.estateGlobals._renderRow(a, 0, esc);
+  includes(html, 'G_A', 'the variable name is missing from the main row');
+  includes(html, 'PKG', 'the package is missing from the main row');
+  includes(html, "PA.showProcedure('S$P1')", 'the used-by procedure must be clickable');
+  ok(html.indexOf('G_A') < html.indexOf('PKG'), 'the variable name must lead the row');
+
+  const det = PA.estateGlobals._renderDetail(a, 0, esc);
+  includes(det, 'per-procedure footprint', 'the expand row must be the per-variable footprint');
+  includes(det, 'ut-gl-var-0-q', 'the footprint table must have a text filter');
+  includes(det, "PA.showProcedure('S$P1')", 'the footprint procedure must be clickable');
+}
+
 /* ------------------------- label counts (the moved panel) ------------------------- */
 
 export async function test_all_cases_counts_map_to_the_details_sub_tabs() {

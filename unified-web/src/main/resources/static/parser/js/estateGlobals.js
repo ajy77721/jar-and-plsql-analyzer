@@ -3,33 +3,117 @@ window.PA = window.PA || {};
 /*
  * Package Globals — the estate facet's third screen.
  *
- * One row per package (server-paged over `/globals`, search `q`). Expanding a package lazily
- * fetches `/globals/{pkg}`, whose `usedBy[]` carries every read/write of a variable of that
- * package with the referencing procedure and line. The detail groups that list by variable, so the
- * "who reads/writes it" question is answered per variable, not just per package.
+ * One row PER VARIABLE (not per package): the package aggregate hid the variable name, which is the
+ * thing a reader is looking for. `/globals` lists packages, so the variable rows are built by
+ * fetching each package's own `/globals/{pkg}` detail (variables[] with per-variable read/write
+ * counts + the estate-wide usedBy[]) and flattening it. The table is then client-paged/filtered by
+ * `PA.tf`; the expand row keeps the per-procedure footprint for that one variable.
  *
  * Oracle-only by nature: the other four dialects report an empty facet, which the empty state says.
  */
 PA.estateGlobals = {
     data: [],
-    _src: null,
+    _vars: [],
     _details: {},
+
+    /** Upper bound on package detail fetches, so a huge estate cannot fan out unboundedly. */
+    _MAX_PACKAGES: 200,
 
     async load() {
         PA.estateGlobals._details = {};
-        PA.estateGlobals._src = PA.api.globalsPageSource({});
-        PA.estateGlobals._src.setParam('sort', 'PACKAGE_ASC');
+        PA.estateGlobals._vars = [];
+        var container = document.getElementById('glContainer');
+        if (container) container.innerHTML = '<div class="empty-msg">Loading globals…</div>';
+        var rows = [];
+        var err = null;
+        try {
+            var src = PA.api.globalsPageSource({});
+            src.setParam('sort', 'PACKAGE_ASC');
+            var packages = [], env;
+            do {
+                env = await src.fetchPage(500);
+                packages = packages.concat((env && env.items) || []);
+            } while (env && env.page && env.page.hasMore && packages.length < PA.estateGlobals._MAX_PACKAGES);
+            rows = await PA.estateGlobals._buildVarRows(packages);
+        } catch (e) {
+            err = (e && e.message) ? e.message : String(e);
+        }
+        PA.estateGlobals._vars = rows;
         PA.estateGlobals._initTable();
+        if (err) PA.tf.setLoadError('gl', err, function () { PA.estateGlobals.load(); });
+        else { PA.tf.setData('gl', rows); }
+        PA.estateGlobals._updateCounts();
+        PA.estateGlobals._maybeEmpty();
+    },
+
+    /**
+     * Flattens the package list into one row per variable. Fetches each package's detail once
+     * (cached), then reads its declared `variables[]` plus any usedBy variable not declared
+     * (reference-only) so nothing silently disappears.
+     */
+    _buildVarRows: async function(packages) {
+        var details = {};
+        var results = await Promise.all((packages || []).map(function (p) {
+            return PA.api.getGlobalDetail(p.package).then(function (d) {
+                details[p.package] = (d && !(PA.failed && PA.failed(d))) ? d : null;
+            }).catch(function () { details[p.package] = null; });
+        }));
+        PA.estateGlobals._details = details;
+
+        var rows = [];
+        (packages || []).forEach(function (p) {
+            var d = details[p.package];
+            var byVar = {};
+            var order = [];
+            function ensure(name) {
+                var k = String(name || '').toUpperCase();
+                if (!k) return null;
+                if (!byVar[k]) {
+                    byVar[k] = { variable: name, package: p.package, reads: 0, writes: 0, procedures: {}, sourceFile: '' };
+                    order.push(k);
+                }
+                return byVar[k];
+            }
+            ((d && d.variables) || []).forEach(function (v) {
+                var r = ensure(v.name);
+                if (!r) return;
+                r.dataType = v.dataType;
+                r.constant = v.constant;
+                r.defaultValue = v.defaultValue;
+                r.declared = v.declared !== false;
+            });
+            ((d && d.usedBy) || []).forEach(function (u) {
+                var r = ensure(u.variable);
+                if (!r) return;
+                var key = String(u.procedureId || u.procedureName || '').toUpperCase();
+                if (key) r.procedures[key] = { procedureId: u.procedureId, procedureName: u.procedureName };
+                if (u.sourceFile) r.sourceFile = r.sourceFile || u.sourceFile;
+                // Counts come from the per-usage list itself, so declared and reference-only
+                // variables are counted the same way and can never disagree with the rows shown.
+                if (String(u.accessType || '').toUpperCase() === 'WRITE') r.writes++;
+                else r.reads++;
+            });
+            order.forEach(function (k) {
+                var r = byVar[k];
+                r.procedures = Object.keys(r.procedures).map(function (pk) { return r.procedures[pk]; });
+                r.procCount = r.procedures.length;
+                r.usage = (r.reads || 0) + (r.writes || 0);
+                rows.push(r);
+            });
+        });
+        rows.sort(function (a, b) { return String(a.variable).localeCompare(String(b.variable)); });
+        return rows;
     },
 
     reset() {
         PA.estateGlobals._details = {};
+        PA.estateGlobals._vars = [];
         PA.estateGlobals.data = [];
     },
 
     /**
      * Cross-estate link target: switch to the Details → Globals sub-tab, filter to this package and
-     * open its detail row. Used by the per-procedure footprint and by any package link.
+     * open its first variable row. Used by the per-procedure footprint and by any package link.
      */
     showPackage: function(pkg) {
         if (!pkg) return;
@@ -37,11 +121,7 @@ PA.estateGlobals = {
         if (PA.estateTab && PA.estateTab.switchSub) PA.estateTab.switchSub('globals');
         var el = document.getElementById('glSearch');
         if (el) el.value = pkg;
-        var src = PA.estateGlobals._src;
-        if (src && PA.tf) {
-            src.setParam('q', pkg);
-            PA.tf._restart('gl');
-        }
+        if (PA.tf) { PA.tf.setSearch('gl', pkg); PA.tf.filter('gl'); }
         PA.estateGlobals._focus('gl', pkg, 'package');
     },
 
@@ -73,19 +153,29 @@ PA.estateGlobals = {
         if (!container) return;
 
         var html = '<table class="to-table"><thead><tr>';
-        html += '<th data-sort-col="0" onclick="PA.tf.sort(\'gl\',0)">Package</th>';
-        html += '<th data-sort-col="1" onclick="PA.tf.sort(\'gl\',1)">Variables</th>';
-        html += '<th data-sort-col="2" onclick="PA.tf.sort(\'gl\',2)">Usage</th>';
-        html += '<th>Reads</th>';
-        html += '<th>Writes</th>';
+        html += '<th data-sort-col="0" onclick="PA.tf.sort(\'gl\',0)">Variable</th>';
+        html += '<th data-sort-col="1" onclick="PA.tf.sort(\'gl\',1)">Package</th>';
+        html += '<th data-sort-col="2" onclick="PA.tf.sort(\'gl\',2)">Used By</th>';
+        html += '<th data-sort-col="3" onclick="PA.tf.sort(\'gl\',3)">Usage</th>';
+        html += '<th data-sort-col="4" onclick="PA.tf.sort(\'gl\',4)">Reads</th>';
+        html += '<th data-sort-col="5" onclick="PA.tf.sort(\'gl\',5)">Writes</th>';
         html += '</tr></thead><tbody id="gl-tbody"></tbody></table>';
         container.innerHTML = html;
 
-        PA.tf.init('gl', PA.estateGlobals._src, 50, PA.estateGlobals._renderRow, {
-            serverSorts: {
-                0: { asc: 'PACKAGE_ASC', desc: 'PACKAGE_DESC' },
-                1: { asc: 'VARIABLES_ASC', desc: 'VARIABLES_DESC' },
-                2: { asc: 'USAGES_ASC', desc: 'USAGES_DESC' }
+        // Array-backed (client paged/filtered): the rows are one-per-variable, built in load().
+        PA.tf.init('gl', [], 50, PA.estateGlobals._renderRow, {
+            sortKeys: {
+                0: { fn: function (r) { return String(r.variable || '').toUpperCase(); } },
+                1: { fn: function (r) { return String(r.package || '').toUpperCase(); } },
+                2: { fn: function (r) { return r.procCount || 0; } },
+                3: { fn: function (r) { return r.usage || 0; } },
+                4: { fn: function (r) { return r.reads || 0; } },
+                5: { fn: function (r) { return r.writes || 0; } }
+            },
+            searchFn: function (r, q) {
+                var text = (r.variable + ' ' + r.package + ' ' + (r.dataType || '') + ' ' +
+                    (r.procedures || []).map(function (p) { return p.procedureName || ''; }).join(' ')).toUpperCase();
+                return text.indexOf(q) !== -1;
             },
             renderDetail: PA.estateGlobals._renderDetail,
             onFilter: function() {
@@ -100,80 +190,104 @@ PA.estateGlobals = {
 
     onSearch: function() {
         var el = document.getElementById('glSearch');
-        PA.estateGlobals._src.setParam('q', el ? el.value : '');
-        PA.tf._restart('gl');
+        PA.tf.setSearch('gl', el ? el.value : '');
+        PA.tf.filter('gl');
     },
 
     clearFilters: function() {
         var el = document.getElementById('glSearch');
         if (el) el.value = '';
-        var src = PA.estateGlobals._src;
-        if (src) src.setParam('q', '');
-        PA.tf._restart('gl');
+        PA.tf.setSearch('gl', '');
+        PA.tf.filter('gl');
     },
 
     _isFiltered: function() {
-        var src = PA.estateGlobals._src;
-        return !!(src && src.param('q'));
+        var st = PA.tf.state('gl');
+        return !!(st && st.searchQuery);
     },
 
     _updateCounts: function() {
         var st = PA.tf.state('gl');
         var totalEl = document.getElementById('glTotalCount');
         if (!totalEl || !st) return;
-        var total = st.totalIsExact ? st.serverTotal : -1;
-        totalEl.textContent = (total >= 0 ? total : (st.filtered ? st.filtered.length : 0))
-            + (PA.estateGlobals._isFiltered() ? ' matched' : ' packages');
+        var total = (PA.estateGlobals._vars || []).length;
+        var shown = st.filtered ? st.filtered.length : total;
+        totalEl.textContent = (shown === total ? total + ' variables' : shown + ' of ' + total + ' variables');
     },
 
     _maybeEmpty: function() {
         var st = PA.tf.state('gl');
         var tb = document.getElementById('gl-tbody');
-        if (!st || !tb) return;
-        if (st.loading || st.loadError) return;
-        if (st.totalIsExact && st.serverTotal === 0) {
+        if (!st || !tb || st.loading || st.loadError) return;
+        if (!(PA.estateGlobals._vars || []).length) {
             tb.innerHTML = '<tr><td colspan="20" class="empty-msg" style="padding:24px;text-align:center">'
-                + (PA.estateGlobals._isFiltered()
-                    ? 'No packages match the current filter.'
-                    : 'No package global variables in this analysis (package globals are Oracle PL/SQL only).')
-                + '</td></tr>';
+                + 'No package global variables in this analysis (package globals are Oracle PL/SQL only).</td></tr>';
         }
     },
 
-    _renderRow: function(p, idx, esc) {
+    /** One row PER VARIABLE — the variable name leads; the package and its users follow. */
+    _renderRow: function(v, idx, esc) {
         var html = '<tr class="to-row" onclick="PA.tf.toggleDetail(\'gl\',' + idx + ')">';
-        html += '<td><span style="font-weight:600;color:var(--badge-purple);font-family:var(--font-mono)">' + esc(p.package || '') + '</span></td>';
-        html += '<td>' + (p.variableCount || 0) + '</td>';
-        html += '<td>' + (p.usageCount || 0) + '</td>';
-        html += '<td>' + (p.readCount || 0) + '</td>';
-        html += '<td>' + (p.writeCount || 0) + '</td>';
+        html += '<td><span class="est-var-name" style="font-weight:700;font-family:var(--font-mono)">' + esc(v.variable || '') + '</span></td>';
+        html += '<td><span style="font-family:var(--font-mono);color:var(--text-muted)">' + esc(v.package || '') + '</span></td>';
+        html += '<td>' + PA.estateGlobals._procsCell(v, esc) + '</td>';
+        html += '<td style="font-weight:700">' + (v.usage || 0) + '</td>';
+        html += '<td>' + (v.reads || 0) + '</td>';
+        html += '<td>' + (v.writes || 0) + '</td>';
         html += '</tr>';
         return html;
     },
 
-    _renderDetail: function(p, idx, esc) {
-        var cached = PA.estateGlobals._details[p.package];
-        if (cached === undefined) {
-            PA.estateGlobals._fetchDetail(p, idx);
-            return '<div class="est-detail"><div class="est-loading">Loading package detail…</div></div>';
+    /** The used-by cell: the distinct-procedure count, then up to three clickable names. */
+    _procsCell: function(v, esc) {
+        var procs = v.procedures || [];
+        if (!procs.length) return '<span style="color:var(--text-muted)">—</span>';
+        var html = '<span class="to-usage-count">' + procs.length + '</span> ';
+        var max = Math.min(procs.length, 3);
+        for (var i = 0; i < max; i++) {
+            var p = procs[i];
+            var id = p.procedureId || p.procedureName || '';
+            html += '<span class="est-usedby-proc" onclick="event.stopPropagation();PA.showProcedure(\''
+                + PA.escJs(id) + '\')">' + esc(p.procedureName || p.procedureId || '') + '</span>';
         }
-        if (!cached) return '<div class="est-detail">' + PA.estateGlobals._notAnalyzed(p.package) + '</div>';
-        return '<div class="est-detail">' + PA.estateGlobals._detailHtml(cached, esc, idx) + '</div>';
+        if (procs.length > max) html += ' <span style="color:var(--text-muted)">+' + (procs.length - max) + ' more</span>';
+        return html;
     },
 
-    _fetchDetail: function(p, idx) {
-        var rowEl = document.getElementById('gl-detail-' + idx);
-        var fill = function(detail) {
-            PA.estateGlobals._details[p.package] = detail;
-            if (rowEl && rowEl.isConnected) {
-                rowEl.innerHTML = '<td colspan="20">' + PA.estateGlobals._renderDetail(p, idx, PA.esc) + '</td>';
-            }
-        };
-        PA.api.getGlobalDetail(p.package).then(function(d) {
-            fill((d && !(PA.failed && PA.failed(d))) ? d : null);
-        }).catch(function() {
-            fill(null);
-        });
+    /**
+     * The expand row: this variable's per-procedure footprint (who reads/writes it, and where).
+     * The package detail is already in memory from load(); a missing one is "not analyzed".
+     */
+    _renderDetail: function(v, idx, esc) {
+        var d = PA.estateGlobals._details[v.package];
+        if (d === undefined || d === null) {
+            return '<div class="est-detail">' + PA.estateGlobals._notAnalyzed(v.package) + '</div>';
+        }
+        var key = String(v.variable || '').toUpperCase();
+        var usedBy = (d.usedBy || []).filter(function (u) { return String(u.variable || '').toUpperCase() === key; });
+        var html = '<div class="est-detail"><div class="est-section">';
+        html += '<div class="est-section-title">' + esc(v.variable) + ' — per-procedure footprint (' + usedBy.length + ')</div>';
+        if (!usedBy.length) {
+            html += '<div class="est-empty">No procedure in this analysis reads or writes this variable.</div>';
+        } else {
+            html += PA.usageTable.attach('ut-gl-var-' + idx, usedBy, {
+                showTitle: false, nameLabel: 'Variable', countLabel: 'usages',
+                nameClass: 'est-var-name',
+                name: function (u) { return u.variable; },
+                procedure: function (u) { return u.procedureName || u.procedureId || ''; },
+                procedureLink: function (u) { return "PA.showProcedure('" + PA.escJs(u.procedureId || '') + "')"; },
+                badges: function (u) { return [u.accessType || 'READ']; },
+                line: function (u) { return u.lineNumber; },
+                lineLink: function (u) {
+                    return u.lineNumber
+                        ? "PA.sourceView.openAtLine('" + PA.escJs(u.sourceFile || '') + "'," + u.lineNumber + ")"
+                        : null;
+                },
+                source: PA.usageTable.nodeSource
+            });
+        }
+        html += '</div></div>';
+        return html;
     },
 
     _notAnalyzed: function(name) {
