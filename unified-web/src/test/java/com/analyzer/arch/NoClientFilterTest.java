@@ -67,6 +67,17 @@ class NoClientFilterTest {
         ALLOWED.put("parser/js/claudeEnrichment.js", 1);
         // refs.js (§90 UI-024 bug fix): one procedure's own calls/callers, not a corpus scan.
         ALLOWED.put("parser/js/refs.js", 3);
+        // estateGlobals.js: 2 = the sortKeys + searchFn option objects of the one variable-level
+        // PA.tf table. The rows are CLIENT-ASSEMBLED and cannot be server-paged: `/globals` emits
+        // one row PER PACKAGE, so the variable rows are built by fetching each package's own
+        // `/globals/{pkg}` detail and flattening it (see _buildVarRows). There is no server
+        // endpoint that emits variable-level rows to page over. The server's `q` on /globals only
+        // indexes the package name and its variable names, whereas this table's box also matches
+        // the dataType and every referencing procedure name — forwarding `q` server-side would
+        // silently drop those matches, a UX regression. The resident array is bounded by
+        // _MAX_PACKAGES (200) package details, so the client filter is the same
+        // threshold-justified choice the JAR side above records, not a corpus scan.
+        ALLOWED.put("parser/js/estateGlobals.js", 2);
 
         // ── Parser side, permanently exempt by design (UI-013's original 3-file list, each with
         //    its own header comment measuring the real payload): paging measurably makes these
