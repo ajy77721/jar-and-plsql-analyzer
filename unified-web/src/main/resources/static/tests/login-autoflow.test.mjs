@@ -42,11 +42,20 @@ export async function test_auto_start_is_guarded_once_per_session() {
     'auto-start must be a no-op when already authenticated');
 }
 
-export async function test_auto_redirect_to_the_aws_portal_and_resume() {
+export async function test_aws_portal_opens_in_a_new_tab_and_is_closed_on_success() {
   const html = await read('index.html');
-  // Straight to the AWS portal, no click.
+  // The AWS portal opens in a NEW TAB, so the app tab stays open and keeps polling.
+  includes(html, "window.open(d.verificationUriComplete, '_blank')",
+    'the auto-start path must open the AWS portal in a new tab');
+  includes(html, 'function awsSsoCloseVerifyTab(',
+    'the app must try to close the AWS tab once the login completes');
+  includes(html, 'w.close()',
+    'closing the AWS tab must use the window handle');
+  includes(html, 'you can close the AWS tab',
+    'when the tab cannot be closed, the app must say so as a hint');
+  // Popup-blocked fallback: same-tab redirect, with the flow still persisted.
   includes(html, 'window.location.href = d.verificationUriComplete',
-    'the auto-start path must redirect the browser to verificationUriComplete');
+    'a blocked popup must fall back to the same-tab redirect');
   includes(html, "AWS_SSO_FLOW_KEY = 'awsSsoFlow'",
     'the in-flight flow must be persisted across the AWS redirect');
   includes(html, 'function awsSsoReadFlow()',
@@ -69,7 +78,7 @@ export async function test_post_approval_shows_live_status() {
   const html = await read('index.html');
   includes(html, 'id="awsSsoStatusLine"',
     'the modal must render a shared live-status line');
-  includes(html, "awsSsoSetStatus('Approved — loading your workspace…')",
+  includes(html, 'Approved — loading your workspace…',
     'the post-approval step must show the loading status');
   includes(html, 'function awsSsoAwaitReconnect(',
     'the UI must wait briefly for the server-side auto-reconnect');
