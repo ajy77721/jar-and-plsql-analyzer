@@ -343,6 +343,10 @@
             </div>
             <div style="overflow-y:auto;flex:1;padding:24px">
 
+                <!-- Live flow status, shared by every step: "Code: XXXX — redirecting to AWS…",
+                     "Approved — loading your workspace…". Text only; never token material. -->
+                <div id="awsSsoStatusLine" style="display:none;padding:10px 14px;background:var(--sidebar-hover);border:1px solid var(--sidebar-border);color:var(--sidebar-text);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
+
                 <!-- Step 1 — choose the sign-in method, then start. -->
                 <div id="awsSsoStep1">
                     <div id="awsSsoError1" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
@@ -1265,8 +1269,17 @@
     const AWS_SSO_REGION_KEY = 'awsSsoRegion';
     const AWS_SSO_DEFAULT_BUCKET = 'amp-analyzer-parse-jar';
     const AWS_SSO_DEFAULT_REGION = 'ap-south-1';
-    const AWS_SSO_POLL_FALLBACK_MS = 5000;
+    // Poll the device flow every 2 s: the approval→usable-app target is <10 s, and the old 5 s
+    // interval alone added up to 5 s of dead time after the user approved. The backend treats a
+    // too-fast poll as "pending" (SlowDownException), so this cannot break the flow.
+    const AWS_SSO_POLL_MS = 2000;
     const AWS_SSO_MODE_KEY = 'awsSsoAuthMode';   // 'sso' (default) or 'iam', remembered per browser
+    // Auto-start guard: the device flow registers a NEW device code on every /start, so a refresh
+    // must not restart it. One auto-start per browser session, and only while unauthenticated.
+    const AWS_SSO_AUTOSTART_KEY = 'awsSsoAutoStarted';
+    // The in-flight device flow, persisted across the automatic redirect to AWS so returning to
+    // the app resumes polling (no new registration) instead of starting a second flow.
+    const AWS_SSO_FLOW_KEY = 'awsSsoFlow';
 
     // Which sign-in method step 1 is showing: the Identity Center device flow, or classic IAM access
     // keys for an account with no Identity Center. Purely a UI branch — the server decides from the
@@ -1334,21 +1347,23 @@
             _awsSsoDefaultStartUrl = d.defaultStartUrl || '';
             setAwsSsoPill(d);
             awsSsoFillTargets(_awsSsoSession);
-            // No session yet -> prompt for login once, on first resolution only. Later
-            // session checks (e.g. after a disconnect) do not reopen the modal.
+            // No session yet -> start the login once, on first resolution only. Later session
+            // checks (e.g. after a disconnect) do not reopen the modal. This is the page-lock
+            // landing: an unauthenticated visitor is taken straight into the device flow, which
+            // auto-redirects to AWS — no intermediate "click here" step.
             if (!d.connected && !_awsSsoAutoOpened) {
                 _awsSsoAutoOpened = true;
-                openAwsSsoModal();
+                awsSsoAutoStartLogin();
             }
             // Page lock: an unauthenticated visitor cannot navigate to the tool pages at all —
-            // clicking a card opens the SSO login instead. The User Manual stays reachable (its
+            // clicking a card starts the SSO login instead. The User Manual stays reachable (its
             // content is public by design); everything else demands the login first.
             document.querySelectorAll('a.card').forEach(card => {
                 card.addEventListener('click', e => {
                     if (!_awsSsoSession) {
                         e.preventDefault();
                         _awsSsoAutoOpened = true;
-                        openAwsSsoModal();
+                        awsSsoAutoStartLogin();
                     }
                 });
             });
@@ -1380,7 +1395,7 @@
                 _awsSsoSession = null;
                 _awsSsoAutoOpened = true;
                 setAwsSsoPill(null);
-                openAwsSsoModal();
+                awsSsoAutoStartLogin();
                 awsSsoShowError(1, msg);
             }).catch(function () { /* non-JSON 401 — leave it to the call site */ });
         } catch (e) { /* clone unavailable — call site still short-circuits on the 401 */ }
@@ -1559,10 +1574,95 @@
         if (m && m.style.display === 'flex') closeAwsSsoModal();
     });
 
+    // A single live-status line across every step ("Approved — loading your workspace…", the
+    // auto-redirect notice, …). Never renders token material — only flow/status text.
+    function awsSsoSetStatus(msg) {
+        const el = document.getElementById('awsSsoStatusLine');
+        if (!el) return;
+        if (msg) { el.textContent = msg; el.style.display = 'block'; }
+        else { el.textContent = ''; el.style.display = 'none'; }
+    }
+
+    // The persisted in-flight flow, or null. Cleared once the login completes/expires, and ignored
+    // once its device code has lapsed, so a stale entry cannot resurrect an old flow.
+    function awsSsoReadFlow() {
+        try {
+            const raw = sessionStorage.getItem(AWS_SSO_FLOW_KEY);
+            if (!raw) return null;
+            const flow = JSON.parse(raw);
+            if (!flow || !flow.userCode) { sessionStorage.removeItem(AWS_SSO_FLOW_KEY); return null; }
+            if (flow.expiresAt && Date.now() > flow.expiresAt) {
+                sessionStorage.removeItem(AWS_SSO_FLOW_KEY);
+                return null;
+            }
+            return flow;
+        } catch (e) { return null; }
+    }
+    function awsSsoSaveFlow(d) {
+        try {
+            sessionStorage.setItem(AWS_SSO_FLOW_KEY, JSON.stringify({
+                userCode: d.userCode,
+                verificationUri: d.verificationUri,
+                verificationUriComplete: d.verificationUriComplete,
+                expiresAt: d.expiresAt
+            }));
+        } catch (e) { /* storage unavailable — the flow still works without resume */ }
+    }
+    function awsSsoClearFlow() {
+        try { sessionStorage.removeItem(AWS_SSO_FLOW_KEY); } catch (e) { /* storage unavailable */ }
+    }
+    function awsSsoRenderFlow(flow) {
+        const code = document.getElementById('awsSsoUserCode');
+        if (code) code.textContent = flow.userCode || '-';
+        const link = document.getElementById('awsSsoVerifyLink');
+        const href = flow.verificationUriComplete || flow.verificationUri || '';
+        if (link) { link.href = href || '#'; link.style.display = href ? '' : 'none'; }
+        awsSsoSetStatus('Waiting for approval — confirm the code on AWS…');
+    }
+
+    // The login page's whole job is to get the user to AWS. Rather than a "click here" step, this
+    // starts the device flow on load and auto-redirects. Guarded two ways: only while
+    // unauthenticated, and at most once per browser session (sessionStorage) — a refresh must never
+    // register a second device code. A flow already started before the AWS redirect is resumed
+    // instead of restarted, so returning to the app keeps polling the same code.
+    function awsSsoAutoStartLogin() {
+        if (_awsSsoSession) return;
+        // Respect a deliberate "IAM access keys" choice: that branch is a form, not a redirect.
+        let mode = 'sso';
+        try { mode = localStorage.getItem(AWS_SSO_MODE_KEY) || 'sso'; } catch (e) { /* storage unavailable */ }
+        if (mode === 'iam') { openAwsSsoModal(); return; }
+
+        const flow = awsSsoReadFlow();
+        if (flow) {
+            openAwsSsoModal();
+            awsSsoShowStep(2);
+            awsSsoRenderFlow(flow);
+            awsSsoStartPoll();
+            return;
+        }
+        let alreadyStarted = false;
+        try { alreadyStarted = sessionStorage.getItem(AWS_SSO_AUTOSTART_KEY) === '1'; } catch (e) { /* unavailable */ }
+        if (alreadyStarted) { openAwsSsoModal(); return; }
+
+        // A portal URL is required to register. Prefer this browser's saved one, then the
+        // server-configured default; with neither, open the modal so the user can type it.
+        let startUrl = '';
+        try { startUrl = localStorage.getItem(AWS_SSO_START_URL_KEY) || ''; } catch (e) { /* unavailable */ }
+        if (!startUrl) startUrl = _awsSsoDefaultStartUrl || '';
+        if (!startUrl) { openAwsSsoModal(); return; }
+
+        try { sessionStorage.setItem(AWS_SSO_AUTOSTART_KEY, '1'); } catch (e) { /* unavailable */ }
+        openAwsSsoModal();
+        awsSsoContinue({ startUrl: startUrl, autoRedirect: true });
+    }
+
     // Step 1 -> 2: register the device authorisation request.
-    async function awsSsoContinue() {
+    //   opts.startUrl     — pre-resolved portal URL (the auto-start path); else the input's value.
+    //   opts.autoRedirect — take the browser straight to the AWS portal after showing the code.
+    async function awsSsoContinue(opts) {
+        opts = opts || {};
         const input = document.getElementById('awsSsoStartUrl');
-        const startUrl = ((input && input.value) || '').trim();
+        const startUrl = ((opts.startUrl || (input && input.value) || '')).trim();
         if (!startUrl) { awsSsoShowError(1, 'Enter your Identity Center portal URL'); return; }
         const btn = document.getElementById('awsSsoStartBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
@@ -1583,15 +1683,17 @@
                 return;
             }
             localStorage.setItem(AWS_SSO_START_URL_KEY, startUrl);
-            const code = document.getElementById('awsSsoUserCode');
-            if (code) code.textContent = d.userCode || '-';
-            const link = document.getElementById('awsSsoVerifyLink');
-            if (link) {
-                link.href = d.verificationUriComplete || '#';
-                link.style.display = d.verificationUriComplete ? '' : 'none';
-            }
+            // Persist before rendering, so a redirect away and back resumes this same flow.
+            awsSsoSaveFlow(d);
+            awsSsoRenderFlow(d);
             awsSsoShowStep(2);
-            awsSsoStartPoll(d.intervalSeconds);
+            awsSsoStartPoll();
+            // Auto-start: show the code, then open the AWS portal itself — the user confirms the
+            // code there (one natural step) and returns; polling resumes on return.
+            if (opts.autoRedirect && d.verificationUriComplete) {
+                awsSsoSetStatus('Code: ' + (d.userCode || '') + ' — redirecting to AWS…');
+                setTimeout(function () { window.location.href = d.verificationUriComplete; }, 1500);
+            }
         } catch (e) {
             awsSsoShowError(1, 'Failed to start AWS SSO: ' + e.message);
         } finally {
@@ -1780,11 +1882,11 @@
         }
     }
 
-    // Step 2 polling. Backend supplies intervalSeconds; 5 s is the documented default.
-    function awsSsoStartPoll(intervalSeconds) {
+    // Step 2 polling, every AWS_SSO_POLL_MS (2 s). The backend answers a too-fast poll with
+    // "pending" (SlowDownException), so this cannot break the flow.
+    function awsSsoStartPoll() {
         awsSsoStopPoll();
-        const ms = (intervalSeconds && intervalSeconds > 0) ? intervalSeconds * 1000 : AWS_SSO_POLL_FALLBACK_MS;
-        _awsSsoPollId = setInterval(awsSsoPoll, ms);
+        _awsSsoPollId = setInterval(awsSsoPoll, AWS_SSO_POLL_MS);
     }
     function awsSsoStopPoll() {
         if (_awsSsoPollId) { clearInterval(_awsSsoPollId); _awsSsoPollId = null; }
@@ -1801,9 +1903,19 @@
             }
             if (d.status === 'complete') {
                 awsSsoStopPoll();
+                awsSsoClearFlow();
                 // The login landed server-side. Ask what accounts/roles it exposed: offer the
                 // chooser when there is a real choice, else fall straight through to the target.
                 await awsSsoAfterLogin(d);
+            } else if (d.status === 'expired' || d.status === 'none') {
+                // The code lapsed (or there is no login in progress): stop polling rather than
+                // hammering the endpoint, and return the user to step 1 to start again.
+                awsSsoStopPoll();
+                awsSsoClearFlow();
+                awsSsoShowStep(1);
+                if (d.status === 'expired') {
+                    awsSsoShowError(1, 'The AWS code expired before it was approved — start again.');
+                }
             }
             // status === "pending" -> keep polling
         } catch (e) {
@@ -1816,6 +1928,9 @@
     // chooser (when more than one account or role exists) or skips silently to the S3 target step —
     // the single-choice path behaves exactly as before this feature.
     async function awsSsoAfterLogin(pollResult) {
+        // Live status (task: "approved — loading your workspace…"). Shown while the account list
+        // is fetched and the server reconnects the session in the background.
+        awsSsoSetStatus('Approved — loading your workspace…');
         let accounts = [];
         try {
             const res = await fetch('/api/auth/aws/accounts');
@@ -1831,13 +1946,53 @@
         if (!_awsSsoChooseNeeded) {
             awsSsoShowStep(3);
             awsSsoFillTargets(null);
+            // The server auto-reconnects this session to its saved target in the background (off the
+            // poll response). Give it a short window; if it lands, let the user straight in. If not,
+            // fall back: a returning browser remembers its bucket, so connect it with no extra click;
+            // a first-time user gets the target form.
+            if (await awsSsoAwaitReconnect(4000)) { awsSsoEnterWorkspace(); return; }
+            let saved = null;
+            try { saved = localStorage.getItem(AWS_SSO_BUCKET_KEY); } catch (e) { /* unavailable */ }
+            if (saved) { awsSsoConnect({ closeOnSuccess: true }); return; }
             // Login just landed server-side — pull the session so the step-3 identity line
             // can show who signed in (the poll response carries no identity fields).
             loadAwsSsoStatus();
+            awsSsoSetStatus('');
             return;
         }
+        awsSsoSetStatus('');
         awsSsoRenderAccountChoices(accounts, pollResult);
         awsSsoShowStep('choose');
+    }
+
+    // Waits (briefly) for the server's background auto-reconnect to make this session connected.
+    // Returns true as soon as /session reports connected, false on timeout. Reads only identity
+    // fields — never token material.
+    async function awsSsoAwaitReconnect(timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+            const d = await fetch('/api/auth/aws/session')
+                .then(r => r.ok ? r.json() : null).catch(() => null);
+            if (d && d.connected) {
+                _awsSsoSession = d;
+                setAwsSsoPill(d);
+                awsSsoFillTargets(d);
+                return true;
+            }
+            if (Date.now() >= deadline) return false;
+            await new Promise(function (r) { setTimeout(r, 700); });
+        }
+    }
+
+    // The user is in: the session is connected, so close the modal and refresh everything the page
+    // 401'd on before the login.
+    function awsSsoEnterWorkspace() {
+        awsSsoSetStatus('');
+        closeAwsSsoModal();
+        invalidateCache();
+        loadStats();
+        loadProgress();
+        loadClaudeStats();
     }
 
     // Fills the two dropdowns of the chooser. The server's auto-pick (the pinned/configured account,
@@ -1909,7 +2064,14 @@
         };
         awsSsoShowStep(3);
         awsSsoFillTargets(_awsSsoSession);
+        // Same zero-click finish as the single-choice path: a browser that remembers its bucket is
+        // connected automatically; otherwise the user confirms the target.
+        awsSsoSetStatus('Approved — loading your workspace…');
+        let saved = null;
+        try { saved = localStorage.getItem(AWS_SSO_BUCKET_KEY); } catch (e) { /* unavailable */ }
+        if (saved) { awsSsoConnect({ closeOnSuccess: true }); return; }
         loadAwsSsoStatus();
+        awsSsoSetStatus('');
     }
 
     // Step 3: dry-run the read/upload/write probe without committing. Leaves step 3 and the
@@ -1949,7 +2111,10 @@
     }
 
     // Step 3: bind the assumed role to a bucket/region.
-    async function awsSsoConnect() {
+    //   opts.closeOnSuccess — the post-login auto-connect path: close the modal and admit the user
+    //   once the target is verified (the manual button leaves the modal open on step 3).
+    async function awsSsoConnect(opts) {
+        opts = opts || {};
         const bucketEl = document.getElementById('awsSsoBucket');
         const regionEl = document.getElementById('awsSsoRegion');
         const dnEl = document.getElementById('awsSsoDisplayName');
@@ -2011,6 +2176,8 @@
                 localStorage.setItem(AWS_SSO_BUCKET_KEY, _awsSsoSession.bucket);
                 localStorage.setItem(AWS_SSO_REGION_KEY, _awsSsoSession.region);
             } catch (e) { /* storage unavailable — non-fatal */ }
+            // Auto-connect path: the user is in — close the modal and stop waiting.
+            if (opts.closeOnSuccess) { awsSsoSetStatus(''); closeAwsSsoModal(); }
         } catch (e) {
             awsSsoShowError(3, 'Failed to connect to S3: ' + e.message);
         } finally {

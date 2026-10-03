@@ -3,8 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign-in not required</title>
-    <link rel="stylesheet" href="/shared/mongodb-theme.css?v=1789287064">
+    <title>Signing in…</title>
+    <!--
+      This page used to be a dead end: a "No sign-in required" card that told an old /login
+      bookmark there was nothing to sign in to. Sign-in now lives on the home page, whose login
+      modal auto-starts the AWS SSO device flow and redirects to the AWS portal (see index.html,
+      awsSsoAutoStartLogin). So /login forwards there rather than stranding the visitor.
+    -->
+    <meta http-equiv="refresh" content="0; url=/?login=1">
+    <link rel="stylesheet" href="/shared/mongodb-theme.css">
+    <script>window.location.replace('/?login=1');</script>
     <style>
         body { display:flex; align-items:center; justify-content:center; min-height:100vh;
                margin:0; font-family:inherit; background:var(--bg,#111); color:var(--text,#eee); }
@@ -13,34 +21,13 @@
         h1 { margin:0 0 12px; font-size:19px; }
         p { margin:0 0 12px; font-size:13px; color:var(--text-secondary,#bbb); }
         a { color:var(--accent,#4a9); }
-        code { font-size:12px; background:var(--bg-hover,rgba(128,128,128,.15));
-               padding:1px 5px; border-radius:3px; }
     </style>
 </head>
 <body>
-<!--
-  This page previously presented a "Sign in with your Anthropic API key" form.
-
-  It was removed because it was misleading in a way that mattered:
-
-    - Authentication is deliberately disabled for local use. ApiKeyAuthInterceptor is not
-      registered (see WebConfig.addInterceptors), so nothing in the application was gated by it and
-      signing in granted nothing.
-    - The form POSTed to /api/auth/login, and no such endpoint exists anywhere in the codebase. The
-      request 404'd, the JSON parse threw, and the user was shown "Network error".
-    - It asked for a real Anthropic API key — a live secret — to submit it nowhere. A form
-      soliciting a credential it cannot use is worth removing on its own, regardless of the 404.
-
-  Claude features authenticate through the local `claude` CLI credentials, not through this page.
-  If an auth gate is wanted again, re-register the interceptor in WebConfig and add the endpoint;
-  restoring this form without both would recreate the same misleading state.
--->
 <div class="card">
-    <h1>No sign-in required</h1>
-    <p>This analyzer runs without authentication. There is nothing to sign in to, and no API key
-       needs to be entered here.</p>
-    <p>Claude features use your local <code>claude</code> CLI credentials.</p>
-    <p><a href="/">Continue to the analyzer</a></p>
+    <h1>Signing in…</h1>
+    <p>Taking you to the AWS SSO login.</p>
+    <p><a href="/?login=1">Continue to the login</a></p>
 </div>
 </body>
 </html>

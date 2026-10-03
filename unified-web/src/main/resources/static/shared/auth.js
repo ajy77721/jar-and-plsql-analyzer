@@ -1,12 +1,15 @@
 /**
  * Injects a fixed "Sign Out" button into any page that loads this script.
- * Also redirects to /login if any API response comes back 401.
+ * Also redirects to the login page (/?login=1) if any API response comes back 401.
+ *
+ * The home page's login modal auto-starts the AWS SSO device flow and redirects to the AWS portal,
+ * so /?login=1 is the one sign-in surface; the old /login card was a dead end.
  */
 (function () {
     function logout() {
         fetch('/api/auth/logout', { method: 'POST' })
             .catch(() => {})
-            .finally(() => { window.location.href = '/login'; });
+            .finally(() => { window.location.href = '/?login=1'; });
     }
 
     function injectBtn() {
@@ -41,7 +44,7 @@
     window.fetch = function (...args) {
         return _origFetch.apply(this, args).then(res => {
             if (res.status === 401) {
-                window.location.href = '/login?next=' + encodeURIComponent(location.pathname);
+                window.location.href = '/?login=1&next=' + encodeURIComponent(location.pathname);
             }
             return res;
         });

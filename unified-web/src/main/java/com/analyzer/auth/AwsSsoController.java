@@ -179,9 +179,10 @@ public class AwsSsoController {
         try {
             AwsSsoLoginService.PollResult result = loginService.poll(registry.get(sessionId));
             if ("complete".equals(result.status()) && loginWarmUp != null) {
-                // The login is complete and this thread still has the request-bound session, so the
-                // user's freshly minted role credentials can be snapshotted here. The sweep itself
-                // is queued and runs in the background; this never delays the response.
+                // The login is complete. Hand the session id to the warm-up hook, which queues the
+                // saved-target reconnect and the sidecar sweep on a worker and returns at once — so
+                // the "complete" reply reaches the browser the moment the identity is resolved, and
+                // the user is let in without waiting on the reconnect probe.
                 loginWarmUp.onLoginComplete(sessionId);
             }
             Map<String, Object> out = new LinkedHashMap<>();

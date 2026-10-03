@@ -2,6 +2,7 @@ package com.analyzer.storage.sso;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -26,6 +27,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -156,9 +160,27 @@ public class AwsSsoLoginService {
     /** Deployment-wide preferred role within {@link #configuredAccountId}; blank means any/auto. */
     private final String configuredRoleName;
 
+    /**
+     * Fan-out pool for the independent AWS calls that make up the post-approval chain: one
+     * {@code ListAccountRoles} per account, and the STS / Identity Store identity lookups. All are
+     * plain blocking SDK calls on the poll thread, and running them serially was the bulk of the
+     * "approval to usable app" latency. Daemon threads so the pool can never hold the JVM open.
+     */
+    private final ExecutorService ioExecutor = Executors.newFixedThreadPool(8, r -> {
+        Thread t = new Thread(r, "aws-sso-io");
+        t.setDaemon(true);
+        return t;
+    });
+
     /** Cap on {@code sso:ListAccountRoles} calls made at poll-complete, so a many-account login
      *  cannot fan out into an unbounded burst against the Identity Center API. */
     private static final int MAX_ACCOUNT_ROLE_LOOKUPS = 50;
+
+    /** Stops the fan-out pool when the context closes; in-flight AWS calls are not interrupted. */
+    @PreDestroy
+    void shutdownIoExecutor() {
+        ioExecutor.shutdownNow();
+    }
 
     /**
      * @param regionProperty the Identity Center / IAM region the OIDC and SSO endpoints live in.
@@ -411,29 +433,49 @@ public class AwsSsoLoginService {
      */
     public List<SsoSessionState.AccountChoice> listChoices(String accessToken) {
         List<AccountInfo> accounts = sso.listAccounts(b -> b.accessToken(accessToken)).accountList();
-        List<SsoSessionState.AccountChoice> out = new ArrayList<>(accounts.size());
+        // Fan the per-account role listings out concurrently: they are independent, and listing
+        // them serially is what made a multi-account login slow. The cap still bounds the fan-out,
+        // and each call stays tolerant (a failed listing yields an empty role list, never an
+        // aborted login), so the result is byte-for-byte what the serial loop produced.
+        List<CompletableFuture<List<String>>> roleFutures = new ArrayList<>(accounts.size());
         int calls = 0;
         for (AccountInfo account : accounts) {
-            List<String> roles = new ArrayList<>();
             if (account.accountId() != null && calls < MAX_ACCOUNT_ROLE_LOOKUPS) {
                 calls++;
-                try {
-                    for (RoleInfo r : sso.listAccountRoles(b -> b
-                            .accessToken(accessToken)
-                            .accountId(account.accountId())).roleList()) {
-                        if (r.roleName() != null && !r.roleName().isBlank()) roles.add(r.roleName());
-                    }
-                } catch (RuntimeException e) {
-                    // Class name only — the request carries the bearer token. The account stays in the
-                    // list with no roles, so the UI can show it but cannot let the user pick it.
-                    log.warn("[aws-sso] could not list roles for one account ({}); keeping it with no roles",
-                            e.getClass().getSimpleName());
-                }
+                final String accountId = account.accountId();
+                roleFutures.add(CompletableFuture.supplyAsync(
+                        () -> listRolesFor(accessToken, accountId), ioExecutor));
+            } else {
+                roleFutures.add(CompletableFuture.completedFuture(List.of()));
             }
+        }
+        List<SsoSessionState.AccountChoice> out = new ArrayList<>(accounts.size());
+        for (int i = 0; i < accounts.size(); i++) {
+            AccountInfo account = accounts.get(i);
             out.add(new SsoSessionState.AccountChoice(account.accountId(), account.accountName(),
-                    List.copyOf(roles)));
+                    roleFutures.get(i).join()));
         }
         return out;
+    }
+
+    /**
+     * One account's role names, or an empty list when the listing fails. Tolerant by design: the
+     * account stays in the result with no roles (visible, not selectable) rather than aborting the
+     * whole login, and only the SDK exception class is logged — never the bearer token it carries.
+     */
+    private List<String> listRolesFor(String accessToken, String accountId) {
+        List<String> roles = new ArrayList<>();
+        try {
+            for (RoleInfo r : sso.listAccountRoles(b -> b
+                    .accessToken(accessToken)
+                    .accountId(accountId)).roleList()) {
+                if (r.roleName() != null && !r.roleName().isBlank()) roles.add(r.roleName());
+            }
+        } catch (RuntimeException e) {
+            log.warn("[aws-sso] could not list roles for one account ({}); keeping it with no roles",
+                    e.getClass().getSimpleName());
+        }
+        return List.copyOf(roles);
     }
 
     /**
@@ -532,27 +574,34 @@ public class AwsSsoLoginService {
         AwsCredentialsProvider userCredentials = (name == null || email == null)
                 ? userCredentials(state, accessToken, account.accountId(), role)
                 : null;
+        // STS email and the Identity Store lookup are independent AWS calls that both sign with the
+        // same user credentials, so run them together rather than one after the other — this is the
+        // last serial pair on the post-approval path. Each is best-effort and returns null on any
+        // failure, so the join cannot fail the login.
+        CompletableFuture<String> stsEmailFuture = (email == null && userCredentials != null)
+                ? CompletableFuture.supplyAsync(() -> stsCallerEmail(userCredentials), ioExecutor)
+                : null;
+        CompletableFuture<AwsIdentityStoreLookup.ResolvedIdentity> lookupFuture =
+                (name == null || email == null)
+                        ? CompletableFuture.supplyAsync(() -> lookupIdentity(claims, userCredentials),
+                                ioExecutor)
+                        : null;
         // STS email: the mechanism this feature exists for. It fills `email` only when the id_token
         // carried none — a real token claim always wins — but it IS the person, so it also outranks
         // a remembered display name from the audit rollup, which is why the backfill stands down as
-        // soon as this populates email.
-        String stsEmail = null;
-        if (email == null) {
-            stsEmail = stsCallerEmail(userCredentials);
-            if (stsEmail != null) email = stsEmail;
-        }
+        // soon as this populates email. Joined first so it outranks the Identity Store email below.
+        String stsEmail = stsEmailFuture == null ? null : stsEmailFuture.join();
+        if (stsEmail != null) email = stsEmail;
         // A bare `sub` is NOT a human name: Identity Center routinely returns only that. Prefer a
         // real name claim, then Identity Store's display name — which beats the raw STS email local
         // part below — and when that is absent, fall back to the local part. Best-effort: an empty
         // result simply leaves that field null, exactly as before.
-        AwsIdentityStoreLookup.ResolvedIdentity resolved = null;
-        if (name == null || email == null) {
-            resolved = lookupIdentity(claims, userCredentials);
-            if (resolved != null) {
-                name = firstNonBlank(name, resolved.name());
-                // STS email already set above outranks the Identity Store email here.
-                email = firstNonBlank(email, resolved.email());
-            }
+        AwsIdentityStoreLookup.ResolvedIdentity resolved =
+                lookupFuture == null ? null : lookupFuture.join();
+        if (resolved != null) {
+            name = firstNonBlank(name, resolved.name());
+            // STS email already set above outranks the Identity Store email here.
+            email = firstNonBlank(email, resolved.email());
         }
         // Nothing named this person anywhere: a minimally humanised local part of the STS email is
         // still the person, and far better than the bare account id.
