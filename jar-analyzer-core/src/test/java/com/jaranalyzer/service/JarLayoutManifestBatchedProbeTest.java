@@ -106,6 +106,23 @@ class JarLayoutManifestBatchedProbeTest {
     }
 
     @Test
+    @DisplayName("counts are readable back and carried into the document")
+    void countsAreReadableBack() throws Exception {
+        JarLayoutManifest m = new JarLayoutManifest("web", 5L);
+        m.setCount("classes", 12).setCount("endpoints", 3).setCount("packages", 4);
+
+        assertEquals(12L, m.count("classes"));
+        assertEquals(3L, m.count("endpoints"));
+        assertEquals(-1L, m.count("missing"), "an unset count is unknown, not zero");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> counts = (Map<String, Object>) m.toDocument(untouchable()).get("counts");
+        assertEquals(12L, counts.get("classes"));
+        assertEquals(3L, counts.get("endpoints"));
+        assertEquals(4L, counts.get("packages"));
+    }
+
+    @Test
     @DisplayName("with no supplied mtime the store is consulted once — the documented fallback")
     void fallsBackToStoreWhenNoMtimeSupplied() throws Exception {
         long[] lastModifiedCalls = {0};

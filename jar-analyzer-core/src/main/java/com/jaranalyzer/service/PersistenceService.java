@@ -430,6 +430,7 @@ public class PersistenceService {
 
         long[] offsets() { return java.util.Arrays.copyOf(offsets, size); }
         long[] lengths() { return java.util.Arrays.copyOf(lengths, size); }
+        int size() { return size; }
     }
 
     /**
@@ -625,6 +626,20 @@ public class PersistenceService {
             stats.endpointCount = epCount;
             stats.packageCount = packages.size();
             stats.docLength = counting.count();
+
+            // Post-write accuracy: the offset table is appended to row-by-row as the document is
+            // emitted, so its length is an independent witness of what actually landed. The layout
+            // manifest's counts.classes/counts.endpoints come from the same pass; a divergence means
+            // the manifest would serve a count the artifact does not have, so the save fails loudly
+            // (the staged write is discarded and the previous analysis stays intact).
+            if (classOffsets.size() != classCount) {
+                throw new IllegalStateException("manifest accuracy: classes written=" + classCount
+                        + " but offsets recorded=" + classOffsets.size());
+            }
+            if (endpointOffsets.size() != epCount) {
+                throw new IllegalStateException("manifest accuracy: endpoints written=" + epCount
+                        + " but offsets recorded=" + endpointOffsets.size());
+            }
         }
     }
 

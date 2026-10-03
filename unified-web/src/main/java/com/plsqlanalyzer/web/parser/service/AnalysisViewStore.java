@@ -341,11 +341,128 @@ public class AnalysisViewStore {
             throws IOException {
         JsonNode cached = read(name, view);
         if (cached != null) return cached;
+        // The manifest proves this facet is empty (the write pass, or a previous backfill, recorded
+        // zero rows for it): answer the empty document instantly rather than re-running the node
+        // scan that would produce it. A stale/absent manifest records nothing, so the legacy compute
+        // and its lazy backfill run exactly as before — the manifest only ever removes work it has
+        // already proven is wasted.
+        JsonNode recordedEmpty = recordedEmptyFacet(name, view);
+        if (recordedEmpty != null) return recordedEmpty;
         JsonNode computed = legacy.get();
         if (computed != null) {
             write(name, view, computed);
+            recordFacet(name, view, computed);
         }
         return computed;
+    }
+
+    /**
+     * The empty document for a facet the manifest records as having zero rows, or {@code null} when
+     * the manifest is absent/stale, does not carry the facet, or the facet is not one whose empty
+     * shape is a bare array. Restricted to the three estate array facets so an "instant empty" can
+     * never disagree with the shape the legacy computation would have returned.
+     */
+    private JsonNode recordedEmptyFacet(String name, String view) {
+        if (!EMPTY_ARRAY_FACETS.contains(view)) return null;
+        Long rows = facetRows(name, view);
+        return rows != null && rows == 0L ? mapper.createArrayNode() : null;
+    }
+
+    /** The estate facet sidecars whose empty value is a bare JSON array. */
+    private static final java.util.Set<String> EMPTY_ARRAY_FACETS =
+            java.util.Set.of(VIEWS_INDEX, TRIGGERS_INDEX, GLOBALS_INDEX);
+
+    /** {@code <analysis>/api/manifest.json} — the layout manifest the writer emitted. */
+    private ArtifactKey manifestKey(String name) {
+        return AnalysisPaths.resolveKey(name, "api/manifest.json");
+    }
+
+    /**
+     * The manifest's recorded row count for {@code view}, or {@code null} when the manifest is
+     * absent, stale (older than {@code api/index.json}), unreadable, or does not carry the facet.
+     *
+     * <p>Freshness uses {@link ArtifactStore#lastModified} — the storage layer's write stamp, which
+     * orders writes the backend's own second-granular timestamp cannot — so a sidecar/manifest pair
+     * written in the same second is still judged exactly.
+     */
+    public Long facetRows(String name, String view) {
+        JsonNode doc = readFreshManifest(name);
+        JsonNode facets = doc == null ? null : doc.get("facets");
+        JsonNode v = facets == null ? null : facets.get(view);
+        return v != null && v.isNumber() ? v.asLong() : null;
+    }
+
+    /**
+     * A top-level count from the fresh per-analysis manifest ({@code nodes}/{@code tables}/
+     * {@code statements}/{@code edges}/{@code jobs}), or {@code null} when the manifest is absent,
+     * stale, unreadable, or does not carry it. A count endpoint can therefore answer without reading
+     * the (possibly large) index the count summarises.
+     */
+    public Long manifestCount(String name, String count) {
+        JsonNode doc = readFreshManifest(name);
+        JsonNode counts = doc == null ? null : doc.get("counts");
+        JsonNode v = counts == null ? null : counts.get(count);
+        return v != null && v.isNumber() ? v.asLong() : null;
+    }
+
+    /**
+     * The per-analysis manifest document, or {@code null} when it is absent, stale (older than
+     * {@code api/index.json}), or unreadable. Freshness compares
+     * {@link ArtifactStore#lastModified} — the storage layer's write stamp — so the exact
+     * ordering the backend's own second-granular timestamp cannot supply is honoured.
+     */
+    private JsonNode readFreshManifest(String name) {
+        try {
+            ArtifactKey mk = manifestKey(name);
+            long manifestMtime = store.lastModified(mk);
+            if (manifestMtime < 0) return null;
+            long indexMtime = store.lastModified(indexKey(name));
+            if (indexMtime >= 0 && manifestMtime < indexMtime) return null;
+            try (InputStream in = store.read(mk)) {
+                return mapper.readTree(in);
+            }
+        } catch (Exception e) {
+            log.debug("manifest read {} failed: {}", name, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Records {@code view}'s row count in the analysis manifest's {@code facets} section, so a later
+     * read can answer "this analysis has none of that" without the node scan. Best-effort and a
+     * no-op when the writer never emitted a manifest (an analysis predating it stays on the legacy
+     * path, unchanged).
+     *
+     * <p>Read-modify-write of one small document, under the same per-analysis lock as the sidecar
+     * write so two facets landing at once cannot lose each other's entry.
+     */
+    public void recordFacet(String name, String view, JsonNode doc) {
+        if (doc == null || view == null) return;
+        synchronized (lockFor(name)) {
+            try {
+                ArtifactKey mk = manifestKey(name);
+                if (store.lastModified(mk) < 0) return;      // no manifest to update
+                JsonNode parsed;
+                try (InputStream in = store.read(mk)) {
+                    parsed = mapper.readTree(in);
+                }
+                if (!(parsed instanceof ObjectNode root)) return;
+                ObjectNode facets;
+                JsonNode existing = root.get("facets");
+                if (existing instanceof ObjectNode o) {
+                    facets = o;
+                } else {
+                    facets = mapper.createObjectNode();
+                    root.set("facets", facets);
+                }
+                facets.put(view, doc.isArray() ? doc.size() : 1L);
+                try (OutputStream out = store.write(mk)) {
+                    mapper.writeValue(out, root);
+                }
+            } catch (Exception e) {
+                log.debug("facet record {} / {} failed: {}", name, view, e.getMessage());
+            }
+        }
     }
 
     /** Writes {@code doc} as the sidecar for {@code view}. Best-effort — never throws. */
@@ -427,6 +544,29 @@ public class AnalysisViewStore {
             } catch (Exception e) {
                 log.debug("view invalidate {} failed: {}", name, e.getMessage());
             }
+            // The sidecars are gone, so the manifest's facet records are no longer true: a facet
+            // recorded as empty must not suppress the backfill a correction re-enables. Clear them
+            // (best-effort — a manifest that cannot be updated just falls back to the legacy path).
+            clearFacets(name);
+        }
+    }
+
+    /** Empties the manifest's {@code facets} section; see {@link #invalidate(String)}. */
+    private void clearFacets(String name) {
+        try {
+            ArtifactKey mk = manifestKey(name);
+            if (store.lastModified(mk) < 0) return;
+            JsonNode parsed;
+            try (InputStream in = store.read(mk)) {
+                parsed = mapper.readTree(in);
+            }
+            if (!(parsed instanceof ObjectNode root)) return;
+            root.set("facets", mapper.createObjectNode());
+            try (OutputStream out = store.write(mk)) {
+                mapper.writeValue(out, root);
+            }
+        } catch (Exception e) {
+            log.debug("facet clear {} failed: {}", name, e.getMessage());
         }
     }
 

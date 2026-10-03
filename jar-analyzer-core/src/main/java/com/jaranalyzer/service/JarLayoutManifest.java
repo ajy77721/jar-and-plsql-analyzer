@@ -95,6 +95,16 @@ public final class JarLayoutManifest {
         return this;
     }
 
+    /**
+     * The recorded top-level count, or {@code -1} when the save never set it. Mirrors
+     * {@code LayoutManifest#count}: a reader serving a count from the manifest, and the writer's
+     * own post-write verification, both go through this rather than poking the raw map.
+     */
+    public long count(String name) {
+        Long v = counts.get(name);
+        return v == null ? -1L : v;
+    }
+
     /** A structured sub-section (offsets refs, class-tree chunks). */
     public JarLayoutManifest setSection(String name, Map<String, Object> value) {
         if (name != null && value != null) sections.put(name, value);

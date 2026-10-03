@@ -121,6 +121,20 @@ class AnalyzerControllerViewsTest {
     }
 
     @Test
+    void aStaleSidecarIsRejectedByTheStampedMtimeAndTheDocumentIsRebuilt() throws Exception {
+        stubHeaderStream(provider);
+        stubDoc(provider, "{\"jarName\":\"svc.jar\",\"totalClasses\":1,\"endpoints\":[]}");
+        controller.getSummaryHeader(ID, null, new MockHttpServletRequest(), new MockHttpServletResponse());
+        verify(provider, times(1)).openStream();
+
+        // Age the sidecar past the provider's own write stamp: the freshness check must reject it
+        // and rebuild, so a re-analysed JAR can never serve the previous run's header.
+        store.setLastModifiedForTest(paths.summaryHeaderViewKey(ID), 500L); // < provider's 1000
+        controller.getSummaryHeader(ID, null, new MockHttpServletRequest(), new MockHttpServletResponse());
+        verify(provider, times(2)).openStream();
+    }
+
+    @Test
     void collectionsIsByteIdenticalFromSidecarAndTheDocumentIsNotReopened() throws Exception {
         stubDoc(provider, "{\"jarName\":\"svc.jar\",\"endpoints\":["
                 + "{\"controllerSimpleName\":\"Ctrl\",\"methodName\":\"m\",\"httpMethod\":\"GET\","

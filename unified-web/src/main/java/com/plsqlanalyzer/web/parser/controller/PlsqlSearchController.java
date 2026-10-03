@@ -60,6 +60,12 @@ public class PlsqlSearchController {
 
     private final ArtifactStore store;
     private final ObjectMapper mapper;
+    /**
+     * The per-analysis manifest reader — supplies {@code totalStatements} for the empty-query hint
+     * from the manifest's recorded count when it is fresh, instead of a header read of
+     * {@code api/statements/index.json}. Nullable for the non-Spring construction used in tests.
+     */
+    private final com.plsqlanalyzer.web.parser.service.AnalysisViewStore views;
 
     // The 24 MB memo was here — MID-007.
     //
@@ -76,8 +82,15 @@ public class PlsqlSearchController {
 
 
     public PlsqlSearchController(@Qualifier("parserArtifactStore") ArtifactStore store, ObjectMapper mapper) {
+        this(store, mapper, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public PlsqlSearchController(@Qualifier("parserArtifactStore") ArtifactStore store, ObjectMapper mapper,
+                                 com.plsqlanalyzer.web.parser.service.AnalysisViewStore views) {
         this.store = store;
         this.mapper = mapper;
+        this.views = views;
     }
 
     @GetMapping("/{name}/search")
@@ -122,7 +135,11 @@ public class PlsqlSearchController {
             // must not walk the statements to answer "type something".
             out.put("total", 0);
             out.putArray("rows");
-            out.put("totalStatements", headerTotal(indexKey));
+            // Prefer the fresh manifest's recorded statement count: it IS the statements index's
+            // own `totalStatements` scalar, recorded from the write, so the answer is byte-identical
+            // and needs no read of the (potentially multi-MB) statements index at all.
+            Long fromManifest = views == null ? null : views.manifestCount(name, "statements");
+            out.put("totalStatements", fromManifest != null ? fromManifest : headerTotal(indexKey));
             out.put("message", "Type something to search.");
             return ResponseEntity.ok(out);
         }

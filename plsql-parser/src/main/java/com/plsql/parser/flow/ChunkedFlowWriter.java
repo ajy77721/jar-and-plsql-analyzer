@@ -1109,6 +1109,7 @@ public class ChunkedFlowWriter {
         manifest.setListingScalars(listingScalars(indexRoot));
 
         // ── 2. nodes/{nodeId}.json: full detail per node (on-demand) ──
+        int nodeDetailCount = 0;
         for (ResolvedNode rn : resolvedNodes) {
             FlowNode node = readNodeChunk(rn.originalId(), chunkIndex);
             if (node == null) continue;
@@ -1427,6 +1428,7 @@ public class ChunkedFlowWriter {
 
             String safeId = safeFileName(nodeId);
             writeJson(nodesDir.resolve(safeId + ".json"), detail);
+            nodeDetailCount++;
         }
 
         // MID-026: `lightNodes`/`nodeIndex` are now built once, near the top of this method, and
@@ -1456,14 +1458,71 @@ public class ChunkedFlowWriter {
         // ── 7. manifest.json: written LAST, after index.json (the staleness anchor) ──
         // The routing artifact every API can use to answer in one small read. Counts are the ones
         // this pass already computed; nothing is re-read to produce it.
-        manifest.setCount("nodes", lightNodes.size());
+        //
+        // `nodes` counts the node detail files actually emitted, not `lightNodes.size()`: a dangling
+        // chunk reference (a chunk with no id) is skipped by every consumer below, so counting the
+        // raw projection would advertise one more node than the analysis serves. The two are equal
+        // on every well-formed crawl; verifyManifestCounts fails the save if they ever diverge.
+        manifest.setCount("nodes", nodeDetailCount);
         manifest.setCount("tables", tableCount);
         manifest.setCount("statements", statementCount);
         manifest.setCount("edges", edges.size());
         manifest.setCount("jobs", jobCount);
+        // Facet presence the write pass can prove: a reader answers "no such facet" from the
+        // manifest instead of probing the artifact. The estate facet sidecars are recorded by
+        // AnalysisViewStore as they land (the writer does not emit them).
+        manifest.setFacet("nodes", nodeDetailCount);
+        manifest.setFacet("tables", tableCount);
+        manifest.setFacet("statements", statementCount);
+        manifest.setFacet("edges", edges.size());
+        manifest.setFacet("jobs", jobCount);
         writeManifest();
 
+        // Post-write consistency: the counts the manifest will serve must equal what this pass
+        // actually emitted. A mismatch is a wiring bug that would serve a wrong number, so it fails
+        // the save loudly instead (the whole point of the accuracy pass).
+        verifyManifestCounts(nodeDetailCount, indexNodes.size(), tableCount, statementCount,
+                jobCount, edges.size());
+
         System.err.println("[ChunkedFlowWriter] API files written: " + apiDir);
+    }
+
+    /**
+     * The manifest's recorded counts must equal the artifacts this write pass emitted. Throws
+     * {@link IllegalStateException} on any mismatch — the save fails rather than publishing a
+     * manifest that would answer a count question wrongly.
+     *
+     * <p>Package-private and taking the actuals explicitly so the failure path is unit-testable
+     * without provoking a real write-pass bug.
+     *
+     * @param nodeDetails  node detail files actually written
+     * @param indexNodes   rows actually written into {@code api/index.json}'s {@code nodes[]}
+     * @param tables       rows actually written into {@code api/tables/index.json}
+     * @param statements   rows actually written into {@code api/statements/index.json}
+     * @param jobs         rows actually written into {@code api/jobs/index.json}
+     * @param edges        edges actually written into {@code api/call_graph.json}
+     */
+    void verifyManifestCounts(int nodeDetails, int indexNodes, int tables, int statements,
+                              int jobs, int edges) {
+        // The two node counts are the same artifact viewed twice (both loops skip the same dangling
+        // chunks); a divergence means the index and the node detail set disagree.
+        checkCount("nodes", manifest.count("nodes"), nodeDetails);
+        if (indexNodes != nodeDetails) {
+            throw new IllegalStateException("[ChunkedFlowWriter] manifest accuracy: "
+                    + "api/index.json nodes=" + indexNodes + " but node detail files=" + nodeDetails);
+        }
+        checkCount("tables", manifest.count("tables"), tables);
+        checkCount("statements", manifest.count("statements"), statements);
+        checkCount("edges", manifest.count("edges"), edges);
+        checkCount("jobs", manifest.count("jobs"), jobs);
+    }
+
+    private static void checkCount(String name, long recorded, long actual) {
+        if (recorded != actual) {
+            throw new IllegalStateException("[ChunkedFlowWriter] manifest accuracy: counts." + name
+                    + "=" + recorded + " but the write emitted " + actual
+                    + " — refusing to save a manifest that would serve a wrong count");
+        }
     }
 
     /**

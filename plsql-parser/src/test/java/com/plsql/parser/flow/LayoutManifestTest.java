@@ -52,6 +52,11 @@ class LayoutManifestTest {
         return JSON.readTree(store.read(BUILD.resolve("api", "manifest.json")));
     }
 
+    /** How many emitted files sit directly under {@code prefix} and end in {@code suffix}. */
+    private static long countKeys(InMemoryArtifactStore store, ArtifactKey prefix, String suffix) {
+        return store.keys().stream().filter(k -> k.startsWith(prefix.toString() + "/") && k.endsWith(suffix)).count();
+    }
+
     @Test
     @DisplayName("every emitted artifact appears with its correct byte length")
     void everyEmittedArtifactIsInventoried() throws Exception {
@@ -138,6 +143,13 @@ class LayoutManifestTest {
         JsonNode man = manifest(store);
         assertEquals(1, man.get("counts").get("nodes").asInt());
         assertEquals(1, man.get("counts").get("statements").asInt());
+        // The counts the manifest serves must equal the artifacts the write actually emitted.
+        assertEquals(1, man.get("counts").get("tables").asInt(), "tables count");
+        assertEquals(1, man.get("counts").get("nodes").asInt(),
+                countKeys(store, BUILD.resolve("api", "nodes"), ".json"), "node detail files");
+        // Facet presence is recorded beside the counts: a reader answers "no such facet" from this.
+        assertTrue(man.get("facets").has("nodes"), "facets must carry the writer's node facet");
+        assertTrue(man.get("facets").has("statements"), "facets must carry the writer's statement facet");
 
         JsonNode indexEntry = null;
         for (JsonNode a : man.get("artifacts")) {
@@ -150,6 +162,29 @@ class LayoutManifestTest {
 
         // The offset index is written alongside the statements index.
         assertTrue(store.exists(BUILD.resolve("api", "statements", "index.offsets.json")));
+    }
+
+    @Test
+    @DisplayName("a count that disagrees with the emitted artifact fails the save loudly")
+    void aCountMismatchFailsTheSave() throws Exception {
+        InMemoryArtifactStore store = new InMemoryArtifactStore();
+        ChunkedFlowWriter writer = new ChunkedFlowWriter(store, BUILD);
+        writer.writeChunk(node("APP$PKG$P", 0));
+        FlowResult result = new FlowResult();
+        result.setEntryPoint("APP.PKG.P");
+        result.setEntrySchema("APP");
+        writer.writeFinalResult(result, Map.of());
+
+        // The counts the write actually emitted pass the post-write check...
+        writer.verifyManifestCounts(1, 1, 0, 0, 0, 0);
+        // ...a wrong actual is refused rather than served.
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> writer.verifyManifestCounts(1, 1, 0, 1, 0, 0));
+        assertTrue(ex.getMessage().contains("statements"), ex.getMessage());
+        // The two node views must agree: index rows vs emitted detail files.
+        IllegalStateException nodes = assertThrows(IllegalStateException.class,
+                () -> writer.verifyManifestCounts(1, 2, 0, 0, 0, 0));
+        assertTrue(nodes.getMessage().contains("node detail files"), nodes.getMessage());
     }
 
     @Test

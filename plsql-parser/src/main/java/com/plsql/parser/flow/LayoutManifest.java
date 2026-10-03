@@ -85,6 +85,14 @@ public final class LayoutManifest {
     private final Map<String, Long> totals = new LinkedHashMap<>();
 
     /**
+     * Facet presence: {@code facet-view-name -> row count} (an empty facet is {@code 0}). Recorded
+     * by the write pass for the families it emits and, for the estate facet sidecars, by
+     * {@code AnalysisViewStore} as each sidecar lands. A reader can answer "this analysis has no
+     * such data" from one small read instead of scanning nodes — see {@code AnalysisViewStore}.
+     */
+    private final Map<String, Long> facets = new LinkedHashMap<>();
+
+    /**
      * The analysis's listing scalars — the root scalars of {@code api/index.json} (entry point,
      * schema, node/table/edge/LOC counts, timings, {@code dbCallCount}) plus its {@code errors}
      * array. Supplied by the writer from the index root it already holds, so the history listing can
@@ -120,6 +128,25 @@ public final class LayoutManifest {
     /** A top-level count (nodes, tables, statements, edges). */
     public void setCount(String name, long value) {
         totals.put(name, value);
+    }
+
+    /**
+     * The recorded top-level count, or {@code -1} when the write pass never set it. Used by the
+     * writer's own post-write verification ({@code ChunkedFlowWriter#verifyManifestCounts}): the
+     * value the manifest will serve is compared against the count the write actually emitted, so a
+     * mismatch fails the save rather than being served.
+     */
+    public long count(String name) {
+        Long v = totals.get(name);
+        return v == null ? -1L : v;
+    }
+
+    /**
+     * Records a facet's row count — {@code 0} for a facet the analysis genuinely has none of. Part of
+     * the manifest's {@code facets} section; see the field's own note.
+     */
+    public void setFacet(String name, long rows) {
+        if (name != null) facets.put(name, rows);
     }
 
     /**
@@ -181,6 +208,7 @@ public final class LayoutManifest {
         doc.put("analysisIdentity", analysisIdentity);
         doc.put("generatedAt", generatedAt);
         doc.put("counts", new LinkedHashMap<>(totals));
+        doc.put("facets", new LinkedHashMap<>(facets));
         doc.put("listing", new LinkedHashMap<>(listing));
         doc.put("artifacts", artifacts);
         doc.put("collections", collections);
