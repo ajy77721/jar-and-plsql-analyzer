@@ -435,17 +435,22 @@
                     </div>
                 </div>
 
-                <!-- Step 2 — device verification -->
+                <!-- Step 2 — device verification. The code is shown BIG, and the big "Open AWS
+                     login →" button right beneath it is the design: the user's click is the gesture
+                     the browser requires, so the AWS tab opens reliably (an auto-open after an async
+                     fetch is always popup-blocked). The app keeps polling in this tab. -->
                 <div id="awsSsoStep2" style="display:none">
                     <div id="awsSsoError2" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
                     <div style="font-size:12px;color:var(--sidebar-muted);line-height:1.5;margin-bottom:10px">
-                        Open the AWS login page and enter this code to approve this device:
+                        Enter this code on the AWS page to approve this device:
                     </div>
-                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-                        <code id="awsSsoUserCode" style="flex:1;font-size:22px;font-weight:700;letter-spacing:0.18em;font-family:'Cascadia Code','Fira Code',monospace;color:var(--sidebar-text);background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);padding:12px 14px;text-align:center">-</code>
-                        <button onclick="awsSsoCopyCode()" style="background:var(--sidebar-hover);border:1px solid var(--sidebar-border);color:var(--sidebar-text);padding:10px 16px;border-radius:var(--radius-md);font-size:12px;cursor:pointer;font-weight:600;white-space:nowrap">Copy</button>
-                    </div>
-                    <a id="awsSsoVerifyLink" href="#" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;color:var(--orange);font-size:13px;font-weight:600;text-decoration:none">&#128279; Open AWS login page</a>
+                    <code id="awsSsoUserCode" style="display:block;font-size:34px;font-weight:800;letter-spacing:0.22em;font-family:'Cascadia Code','Fira Code',monospace;color:var(--sidebar-text);background:var(--sidebar-hover);border:1px solid var(--sidebar-border);border-radius:var(--radius-md);padding:18px 14px;text-align:center;margin-bottom:14px">-</code>
+                    <!-- ONE big button, no copy, no link: the URL carries the code pre-filled, so the
+                         code on the AWS page is just for confirm-matching. The click is the gesture
+                         that opens the AWS tab reliably, and its handle lets us close it on success. -->
+                    <button type="button" id="awsSsoOpenAwsBtn" onclick="awsSsoOpenVerifyTab()" style="width:100%;background:var(--orange);border:none;color:var(--text-inverse);padding:16px 20px;border-radius:var(--radius-md);font-size:16px;font-weight:800;cursor:pointer;transition:filter 0.15s" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+                        Open AWS login &#8594;
+                    </button>
                     <div id="awsSsoPollHint" style="font-size:11px;color:var(--sidebar-muted);margin-top:16px">
                         <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--orange);animation:pulse 1.5s infinite;margin-right:6px"></span>
                         Waiting for approval&hellip;
@@ -1287,7 +1292,8 @@
     let _awsSsoMode = 'sso';
 
     let _awsSsoPollId = null;    // setInterval handle for /api/auth/aws/poll
-    let _awsSsoVerifyWindow = null;  // the AWS portal tab we opened, so we can close it on success
+    let _awsSsoVerifyWindow = null;  // the AWS portal tab the user opened, so we can close it on success
+    let _awsSsoVerifyUrl = '';       // the verificationUriComplete for the current flow
     let _awsSsoSession = null;   // last known session from /api/auth/aws/session or /connect
     let _awsSsoDefaultStartUrl = '';  // server-configured portal URL (session.defaultStartUrl), for prefill
     let _awsSsoAutoOpened = false;  // auto-open the login modal at most once per page load
@@ -1640,10 +1646,41 @@
     function awsSsoRenderFlow(flow) {
         const code = document.getElementById('awsSsoUserCode');
         if (code) code.textContent = flow.userCode || '-';
-        const link = document.getElementById('awsSsoVerifyLink');
-        const href = flow.verificationUriComplete || flow.verificationUri || '';
-        if (link) { link.href = href || '#'; link.style.display = href ? '' : 'none'; }
+        // The verificationUriComplete carries the code pre-filled, so the button opens the AWS page
+        // ready to approve; the on-screen code is only for confirm-matching.
+        _awsSsoVerifyUrl = flow.verificationUriComplete || flow.verificationUri || '';
         awsSsoSetStatus('Waiting for approval — confirm the code on AWS…');
+    }
+
+    // The big "Open AWS login →" button's handler. This runs INSIDE the click gesture, which is
+    // what makes window.open reliable — an auto-open after an async fetch is always blocked. The
+    // handle is kept so the tab can be closed automatically once the approval lands.
+    function awsSsoOpenVerifyTab() {
+        const href = _awsSsoVerifyUrl;
+        if (!href) {
+            awsSsoShowError(2, 'No AWS verification URL is available — start the login again.');
+            return;
+        }
+        awsSsoClearErrors();
+        // A second click should re-focus the tab we already opened, not spawn another one.
+        if (_awsSsoVerifyWindow && !_awsSsoVerifyWindow.closed) {
+            try { _awsSsoVerifyWindow.focus(); } catch (e) { /* cross-origin focus may be refused */ }
+            return;
+        }
+        let w = null;
+        try { w = window.open(href, '_blank'); } catch (e) { w = null; }
+        // Some blockers hand back a window that is already closed; treat that as blocked.
+        if (w && w.closed) w = null;
+        if (w) {
+            _awsSsoVerifyWindow = w;
+            awsSsoSetStatus('Waiting for approval on the AWS tab…');
+            return;
+        }
+        // Last-resort fallback: even the click gesture was refused. Say so plainly and, after a
+        // moment, take this tab to AWS (the flow is persisted, so returning resumes polling).
+        awsSsoShowError(2, 'Your browser blocked the new tab — taking this tab to AWS instead.');
+        awsSsoSetStatus('Code: ' + (document.getElementById('awsSsoUserCode') || {}).textContent + ' — redirecting to AWS…');
+        setTimeout(function () { window.location.href = href; }, 2500);
     }
 
     // The login page's whole job is to get the user to AWS. Rather than a "click here" step, this
@@ -1679,12 +1716,16 @@
 
         try { sessionStorage.setItem(AWS_SSO_AUTOSTART_KEY, '1'); } catch (e) { /* unavailable */ }
         openAwsSsoModal();
-        awsSsoContinue({ startUrl: startUrl, autoRedirect: true });
+        // Register the device flow so the code is ready immediately, landing the user on Step 2.
+        // It deliberately does NOT try to open the AWS tab here: an auto-open after this async
+        // fetch has no user gesture and is always popup-blocked. The big button is the gesture.
+        awsSsoContinue({ startUrl: startUrl });
     }
 
     // Step 1 -> 2: register the device authorisation request.
-    //   opts.startUrl     — pre-resolved portal URL (the auto-start path); else the input's value.
-    //   opts.autoRedirect — take the browser straight to the AWS portal after showing the code.
+    //   opts.startUrl — pre-resolved portal URL (the auto-start path); else the input's value.
+    // Step 2 then shows the big code + the big "Open AWS login →" button; the button's click is the
+    // user gesture that opens the AWS tab (see awsSsoOpenVerifyTab).
     async function awsSsoContinue(opts) {
         opts = opts || {};
         const input = document.getElementById('awsSsoStartUrl');
@@ -1714,23 +1755,8 @@
             awsSsoRenderFlow(d);
             awsSsoShowStep(2);
             awsSsoStartPoll();
-            // Auto-start: show the code, then open the AWS portal itself — the user confirms the
-            // code there (one natural step) while THIS tab stays open and keeps polling.
-            if (opts.autoRedirect && d.verificationUriComplete) {
-                awsSsoSetStatus('Code: ' + (d.userCode || '') + ' — waiting for approval…');
-                // Open AWS in a NEW TAB so the app stays open and can close the tab again on
-                // success. A popup blocker returns null: fall back to the same-tab redirect (the
-                // flow is persisted, so returning resumes it) and keep the code on screen.
-                let w = null;
-                try { w = window.open(d.verificationUriComplete, '_blank'); } catch (e) { w = null; }
-                // Some blockers hand back a window that is already closed; treat that as blocked.
-                if (w && w.closed) w = null;
-                _awsSsoVerifyWindow = w;
-                if (!w) {
-                    awsSsoSetStatus('Code: ' + (d.userCode || '') + ' — redirecting to AWS…');
-                    setTimeout(function () { window.location.href = d.verificationUriComplete; }, 1500);
-                }
-            }
+            // No auto-open here: it would be popup-blocked without a gesture. The user clicks the
+            // big "Open AWS login →" button on this step to open the tab (awsSsoOpenVerifyTab).
         } catch (e) {
             awsSsoShowError(1, 'Failed to start AWS SSO: ' + e.message);
         } finally {
@@ -1910,15 +1936,6 @@
         }
     }
 
-    function awsSsoCopyCode() {
-        const el = document.getElementById('awsSsoUserCode');
-        const code = el ? el.textContent : '';
-        if (!code || code === '-') return;
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(code).catch(() => {});
-        }
-    }
-
     // Step 2 polling, every AWS_SSO_POLL_MS (2 s). The backend answers a too-fast poll with
     // "pending" (SlowDownException), so this cannot break the flow.
     function awsSsoStartPoll() {
@@ -1984,14 +2001,10 @@
     // chooser (when more than one account or role exists) or skips silently to the S3 target step —
     // the single-choice path behaves exactly as before this feature.
     async function awsSsoAfterLogin(pollResult, verifyTabClosed) {
-        // Live status (task: "approved — loading your workspace…"). Shown while the account list
-        // is fetched and the server reconnects the session in the background. When the AWS tab
-        // could not be closed for the user, say so rather than leaving them guessing.
-        awsSsoSetStatus(verifyTabClosed === false
-            ? 'Approved — you can close the AWS tab. Loading your workspace…'
-            : 'Approved — loading your workspace…');
-        // The tab close is best-effort; when the browser refused, keep a hint visible even after
-        // the modal closes and the workspace loads.
+        // Live status while the account list is fetched and the server reconnects in the
+        // background. If the AWS tab was closed automatically, the user just sees "entering"; if
+        // the browser refused the close, a hint tells them they can close it themselves.
+        awsSsoSetStatus('Approved — entering…');
         if (verifyTabClosed === false) awsSsoHint('Approved — you can close the AWS tab.');
         let accounts = [];
         try {
@@ -2256,6 +2269,7 @@
         _awsSsoChosen = null;
         _awsSsoChooseNeeded = false;
         _awsSsoVerifyWindow = null;   // an explicit disconnect abandons any open AWS portal tab
+        _awsSsoVerifyUrl = '';
         // Drop any IAM key material still in the page and its per-connect strips.
         const ak = document.getElementById('awsSsoIamAccessKey');
         const sk = document.getElementById('awsSsoIamSecret');
