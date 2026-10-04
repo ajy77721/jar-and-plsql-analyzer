@@ -48,6 +48,10 @@
 
 | # | Task | Source audit | Priority |
 |---|---|---|---|
+| 47b | **Progress engine**: ALL stages first-class (incl. the background warm-up/ingest — no more fake 100%!), the size-aware per-stage ETAs (the calibration learned from the past runs' timings), the ETA in the UI, the honest completion | user ask | 🔄 in flight |
+
+| # | Task | Source audit | Priority |
+|---|---|---|---|
 | 48 | ✅ DONE: TEMP tables = the fourth kind (all 5 dialects, grammar-first, scopes, the modernization tooltip) + the truthful per-type count labels (Procs+Funcs/Triggers/Tables/Views) | user ask | ca04369 |
 
 | # | Task | Source audit | Priority |
