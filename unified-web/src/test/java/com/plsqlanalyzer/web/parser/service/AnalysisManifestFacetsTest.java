@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -206,5 +207,47 @@ class AnalysisManifestFacetsTest {
         JsonNode doc = M.readTree(store.read(manifestKey()));
         assertEquals(1L, doc.get("facets").get("nodes").asLong(), "existing facets are preserved");
         assertEquals(1L, doc.get("facets").get(AnalysisViewStore.GLOBALS_INDEX).asLong());
+    }
+
+    /**
+     * The table enrichers and the index patch rewrite {@code api/tables/index.json} and
+     * {@code api/index.json} AFTER the crawler's write pass, so the lengths the manifest recorded at
+     * crawl time go stale. {@code refreshArtifactLengths} re-records them from the store and
+     * rewrites the manifest in place, keeping it the last artifact written (and therefore fresh
+     * against the rewritten index).
+     */
+    @Test
+    void refreshArtifactLengthsUpdatesRewrittenArtifactsAndStaysLast() throws IOException {
+        InMemoryArtifactStore store = new InMemoryArtifactStore();
+        ArtifactKey idx = AnalysisPaths.resolveKey(NAME, "api/index.json");
+        ArtifactKey tbl = AnalysisPaths.resolveKey(NAME, "api/tables/index.json");
+        put(store, idx, "{\"nodes\":[{\"a\":1}]}");
+        put(store, tbl, "{\"tables\":[{\"name\":\"T\"}]}");
+        // A manifest carrying STALE lengths (1) for both rewritten artifacts.
+        put(store, manifestKey(), "{\"manifestVersion\":1,\"artifacts\":["
+                + "{\"key\":\"" + idx + "\",\"length\":1},"
+                + "{\"key\":\"" + tbl + "\",\"length\":1}]}");
+        store.setLastModifiedForTest(manifestKey(), store.lastModified(idx) - 1000);
+
+        new AnalysisViewStore(store).refreshArtifactLengths(NAME,
+                List.of("api/index.json", "api/tables/index.json"));
+
+        JsonNode doc = M.readTree(store.read(manifestKey()));
+        for (JsonNode a : doc.get("artifacts")) {
+            String k = a.get("key").asText();
+            ArtifactKey key = k.equals(idx.toString()) ? idx : tbl;
+            assertEquals(store.size(key), a.get("length").asLong(), "length wrong for " + k);
+        }
+        assertTrue(store.lastModified(manifestKey()) >= store.lastModified(idx),
+                "the refreshed manifest must not be older than the index it describes");
+    }
+
+    /** A missing manifest is a no-op — an analysis predating it stays on the legacy path. */
+    @Test
+    void refreshArtifactLengthsIsANoOpWithoutAManifest() throws IOException {
+        InMemoryArtifactStore store = new InMemoryArtifactStore();
+        put(store, AnalysisPaths.resolveKey(NAME, "api/index.json"), "{}");
+        new AnalysisViewStore(store).refreshArtifactLengths(NAME, List.of("api/index.json"));
+        assertFalse(store.exists(manifestKey()));
     }
 }

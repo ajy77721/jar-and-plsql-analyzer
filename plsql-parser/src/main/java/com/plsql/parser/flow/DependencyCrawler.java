@@ -84,6 +84,20 @@ public class DependencyCrawler {
     // Cache of parse results: "OBJECT_NAME" -> ParseResult
     private final Map<String, ParseResult> parseCache = new ConcurrentHashMap<>();
 
+    // Package SPEC variable declarations, keyed by upper-case package name — the estate globals
+    // facet's declaration list. The crawler parses the package BODY (its members come from it), but
+    // a package's globals are declared in the SPEC (the body only assigns them), so the spec is
+    // parsed once per package here and its packageVariables routed to the writer's dedicated
+    // artifact. Cached so many members of one package cost one spec parse.
+    private final Map<String, List<VariableInfo>> packageSpecVarsCache = new ConcurrentHashMap<>();
+
+    // Crawled routine identity -> node id, populated as each node is generated. The DB-discovered
+    // trigger path runs AFTER the crawl and its body's callees arrive unresolved (the trigger is a
+    // catalog artefact, not a crawled node), so this lets it stamp a crawled target's node id onto
+    // the call for the UI cross-link. Keys: OBJECT_NAME (upper) for standalone routines and
+    // PACKAGE.SUBPROGRAM (upper) for package members; both are recorded per node.
+    private final Map<String, String> crawledNodeIds = new ConcurrentHashMap<>();
+
     // Visited set to avoid infinite loops: "PACKAGE.SUBPROGRAM" or "STANDALONE_NAME"
     private final Set<String> visited = Collections.synchronizedSet(new LinkedHashSet<>());
 
@@ -716,6 +730,20 @@ public class DependencyCrawler {
                 node.setPackageName(nodePackage);
                 node.setObjectName(item.subprogramName);
 
+                // Package-global DECLARATIONS, captured at parse time and routed to the writer's
+                // dedicated artifact (independent of any PACKAGE node — a member entry point crawls
+                // none). The body parse has the members but not the globals; they live in the spec,
+                // so fall back to parsing the spec once per package (cached). The DB2 module path
+                // already carries them on the parsed object. See ChunkedFlowWriter#recordPackageGlobals.
+                if (chunkedWriter != null && nodePackage != null && !nodePackage.isEmpty()) {
+                    List<VariableInfo> pkgDecls =
+                            (targetObj != null && targetObj.getPackageVariables() != null
+                                    && !targetObj.getPackageVariables().isEmpty())
+                                    ? targetObj.getPackageVariables()
+                                    : packageSpecVariables(nodePackage);
+                    chunkedWriter.recordPackageGlobals(nodePackage, pkgDecls);
+                }
+
                 // Check if source is wrapped/encrypted
                 String srcObjName = item.packageName != null ? item.packageName : item.subprogramName;
                 if (downloader.isWrapped(srcObjName)
@@ -991,6 +1019,10 @@ public class DependencyCrawler {
                     node.setOverloadSignature(itemOverloadDisc);
                 }
                 node.generateNodeId();
+                // Register the crawled node's id under both its bare name and (for a package
+                // member) PACKAGE.SUBPROGRAM, so a post-crawl caller can resolve a routine name to
+                // the node it became — see resolveTriggerCallNodeIds.
+                recordCrawledNodeId(crawledNodeIds, node);
 
                 // Record this node's write-DML (INSERT/UPDATE/DELETE/MERGE) so trigger edges can
                 // be attached later from the exact routine that performs the firing statement.
@@ -1251,7 +1283,12 @@ public class DependencyCrawler {
             // body. Persisting them on the node is what lets the estate trigger facet expose
             // bodyCalls (the cross-estate edge from a trigger into the routines it calls) — before
             // this the trigger node carried no calls[] at all, so the facet field never appeared.
-            tn.setCalls(toCallInfos(t.get("calls")));
+            // The trigger itself is a catalog-discovered node, not a crawled one, so its body's
+            // callees arrive unresolved (type EXTERNAL); resolve each against the crawled estate
+            // and stamp the crawled target's node id on the call, so the UI can cross-link to it.
+            List<CallInfo> triggerCalls = toCallInfos(t.get("calls"));
+            resolveTriggerCallNodeIds(triggerCalls, crawledNodeIds);
+            tn.setCalls(triggerCalls);
             tn.setReadable(true);
             // Anchor every trigger at depth 1: a trigger is an artefact of the table it fires on,
             // not a node on the caller's own path, so it is pinned one level under the root rather
@@ -1375,6 +1412,48 @@ public class DependencyCrawler {
             out.add(ci);
         }
         return out;
+    }
+
+    /**
+     * Registers one crawled node's id under its bare object name and, for a package member, under
+     * {@code PACKAGE.SUBPROGRAM} — the two shapes a call target can take. First writer wins, so a
+     * later overload does not displace the canonical node. Null/blank ids and names are ignored.
+     */
+    static void recordCrawledNodeId(Map<String, String> into, FlowNode node) {
+        if (into == null || node == null) return;
+        String id = node.getNodeId();
+        String obj = node.getObjectName();
+        if (id == null || id.isEmpty() || obj == null || obj.isBlank()) return;
+        String pkg = node.getPackageName();
+        if (pkg != null && !pkg.isBlank()) {
+            into.putIfAbsent((pkg + "." + obj).toUpperCase(Locale.ROOT), id);
+        }
+        into.putIfAbsent(obj.toUpperCase(Locale.ROOT), id);
+    }
+
+    /**
+     * Resolves the DB-discovered trigger body's outbound calls against the crawled estate. The
+     * trigger is a catalog artefact, not a crawled node, so its callees arrive unresolved; each is
+     * looked up by {@code PACKAGE.NAME} then bare {@code NAME} and, when found, stamped with the
+     * crawled target's node id (for the UI cross-link). A call whose target was not crawled is left
+     * exactly as it arrived — EXTERNAL, no node id. Type is deliberately NOT changed: the trigger
+     * node's package namespace is {@code TRG}, and {@code groupCalls} would fold a bare INTERNAL
+     * call into that namespace, corrupting the target name.
+     */
+    static void resolveTriggerCallNodeIds(List<CallInfo> calls, Map<String, String> crawledNodeIds) {
+        if (calls == null || calls.isEmpty() || crawledNodeIds == null || crawledNodeIds.isEmpty()) return;
+        for (CallInfo c : calls) {
+            if (c == null) continue;
+            String name = c.getName();
+            if (name == null || name.isBlank()) continue;
+            String id = null;
+            String pkg = c.getPackageName();
+            if (pkg != null && !pkg.isBlank()) {
+                id = crawledNodeIds.get((pkg + "." + name).toUpperCase(Locale.ROOT));
+            }
+            if (id == null) id = crawledNodeIds.get(name.toUpperCase(Locale.ROOT));
+            if (id != null) c.setNodeId(id);
+        }
     }
 
     private void writeNodeSource(ChunkedFlowWriter writer, FlowNode node, String ownerSchema) {
@@ -2260,6 +2339,36 @@ public class DependencyCrawler {
         if (obj.getPackageVariables() != null) combined.addAll(obj.getPackageVariables());
         if (obj.getGlobalVariables() != null) combined.addAll(obj.getGlobalVariables());
         return combined;
+    }
+
+    /**
+     * The package-level variable declarations of a package, read from its SPEC. The crawler parses
+     * the package BODY (which holds the subprograms but not the globals — the body only assigns
+     * them), so the spec is fetched and parsed here, once per package (cached), purely to capture
+     * {@code name/dataType/defaultValue/constant}. Returns an empty list when the spec cannot be
+     * fetched or parsed; never null.
+     */
+    private List<VariableInfo> packageSpecVariables(String packageName) {
+        if (packageName == null || packageName.isBlank()) return Collections.emptyList();
+        String key = packageName.toUpperCase();
+        List<VariableInfo> cached = packageSpecVarsCache.get(key);
+        if (cached != null) return cached;
+        List<VariableInfo> vars = new ArrayList<>();
+        try {
+            String spec = downloader.downloadPackageSpec(packageName);
+            if (spec != null && !spec.isBlank()) {
+                ParseResult r = engine.parseContent(spec, packageName + ".pks");
+                if (r != null && r.getObjects() != null) {
+                    for (ParsedObject o : r.getObjects()) {
+                        if (o.getPackageVariables() != null) vars.addAll(o.getPackageVariables());
+                    }
+                }
+            }
+        } catch (Exception | StackOverflowError e) {
+            log.debug("[Crawler] package spec parse for {} failed: {}", packageName, e.getMessage());
+        }
+        packageSpecVarsCache.put(key, vars);
+        return vars;
     }
 
     /**

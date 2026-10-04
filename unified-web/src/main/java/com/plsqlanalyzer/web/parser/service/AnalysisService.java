@@ -1050,6 +1050,16 @@ public class AnalysisService {
         patchConnectionMeta(baseFolderName, project, environment, patchConnName, patchJdbcUrl,
                 System.currentTimeMillis() - analysisStartMs);
 
+        // The two artifacts above were rewritten AFTER the crawler's write pass — the table
+        // enrichers rewrote api/tables/index.json and patchConnectionMeta rewrote api/index.json —
+        // so the lengths the manifest recorded at crawl time are stale. Re-record them and rewrite
+        // the manifest in place, keeping it the last artifact written (and therefore at least as new
+        // as the index it describes).
+        if (viewStore != null) {
+            viewStore.refreshArtifactLengths(baseFolderName,
+                    List.of("api/index.json", "api/tables/index.json"));
+        }
+
         return baseFolderName;
     }
 

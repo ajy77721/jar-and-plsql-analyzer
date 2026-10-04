@@ -27,6 +27,15 @@ public class CallInfo {
      */
     private String subprogramName;
 
+    /**
+     * The resolved node id of the crawled routine this call targets, set ONLY for calls that were
+     * resolved against the crawled estate after the crawl (currently the DB-discovered trigger
+     * body's outbound calls — see {@code DependencyCrawler#emitTriggerNodesAndEdges}). Null for
+     * every ordinary call, whose target is resolved at edge-construction time instead, so existing
+     * call output stays byte-identical.
+     */
+    private String nodeId;
+
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
     public String getPackageName() { return packageName; }
@@ -43,4 +52,6 @@ public class CallInfo {
     public void setArgTypes(List<String> argTypes) { this.argTypes = argTypes; }
     public String getSubprogramName() { return subprogramName; }
     public void setSubprogramName(String subprogramName) { this.subprogramName = subprogramName; }
+    public String getNodeId() { return nodeId; }
+    public void setNodeId(String nodeId) { this.nodeId = nodeId; }
 }

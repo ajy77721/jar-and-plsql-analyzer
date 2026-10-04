@@ -99,6 +99,22 @@ class EstateFacetReader {
         return ShallowTree.parallelMap(r.store(), files, this::readTree);
     }
 
+    /**
+     * The dedicated parse-time package-global declaration artifact
+     * ({@code api/globals/declarations.json}: {@code {declarations:{PACKAGE:[{name,dataType,
+     * defaultValue,constant}]}}}), or {@code null} when the analysis has none. A crawler output,
+     * not a node scan — read directly, like {@code getTables}, and absent for older analyses.
+     */
+    private JsonNode globalsDeclarations(String name) {
+        try {
+            ArtifactKey key = r.resolveKey(name, "api/globals/declarations.json");
+            if (!r.store().exists(key)) return null;
+            return readTree(key);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** The last dotted segment, upper-cased — how the artifacts key object names. */
     static String norm(String s) {
         if (s == null) return "";
@@ -1222,19 +1238,33 @@ class EstateFacetReader {
 
         List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
 
-        // Estate-level guard behind the visitor's grammar-first gate: a record variable, a cursor
-        // FOR-loop record and a table alias all share the X.Y shape with a genuine package-global
-        // reference, so a ref is only admitted when its qualifier is a real package in this estate
-        // (a PACKAGE_BODY/PACKAGE_SPEC node or a node carrying declarations), carries the
-        // conventional package-name token, or its variable is a declared global somewhere. Artifacts
-        // written before the visitor gate therefore cannot leak the record/alias noise either.
-        PackageGlobalScope scope = packageGlobalScope(nodeFiles);
-
-        // Declaration lists persisted per package (PACKAGE_BODY/PACKAGE_SPEC node details): the
-        // declaring package plus name/dataType/defaultValue/constant — the exact shape each
-        // variable row uses. Keyed package → variable → declaration so a ref can pick up its own
-        // declaration, and a declared-but-unreferenced variable still appears.
+        // Declaration lists persisted per package — the declaring package plus
+        // name/dataType/defaultValue/constant, the exact shape each variable row uses. Keyed
+        // package → variable → declaration so a ref can pick up its own declaration, and a
+        // declared-but-unreferenced variable still appears. Two sources are merged:
+        //   1. api/globals/declarations.json — the parse-time capture, written INDEPENDENT of
+        //      whether a PACKAGE_BODY/PACKAGE_SPEC node was crawled. This is the one that makes a
+        //      member-entry-point analysis (no package node at all) report real globals.
+        //   2. per-node packageGlobalDeclarations — older analyses, package-as-entry-point
+        //      aggregation, and DB2 module variables.
         Map<String, Map<String, JsonNode>> declarations = new LinkedHashMap<>();
+        JsonNode declDoc = globalsDeclarations(name);
+        if (declDoc != null) {
+            JsonNode byPkg = declDoc.path("declarations");
+            if (byPkg.isObject()) {
+                Iterator<Map.Entry<String, JsonNode>> it = byPkg.fields();
+                while (it.hasNext()) {
+                    Map.Entry<String, JsonNode> e = it.next();
+                    if (!e.getValue().isArray()) continue;
+                    Map<String, JsonNode> byVar = declarations.computeIfAbsent(
+                            norm(e.getKey()), k -> new LinkedHashMap<>());
+                    for (JsonNode d : e.getValue()) {
+                        String vn = textOrNull(d, "name");
+                        if (vn != null && !vn.isBlank()) byVar.putIfAbsent(norm(vn), d);
+                    }
+                }
+            }
+        }
         for (JsonNode node : nodeFiles) {
             JsonNode decls = node.get("packageGlobalDeclarations");
             if (decls == null || !decls.isArray() || decls.isEmpty()) continue;
@@ -1247,6 +1277,19 @@ class EstateFacetReader {
                 String vn = textOrNull(d, "name");
                 if (vn != null && !vn.isBlank()) byVar.putIfAbsent(norm(vn), d);
             }
+        }
+
+        // Estate-level guard behind the visitor's grammar-first gate: a record variable, a cursor
+        // FOR-loop record and a table alias all share the X.Y shape with a genuine package-global
+        // reference, so a ref is only admitted when its qualifier is a real package in this estate
+        // (a PACKAGE_BODY/PACKAGE_SPEC node or a package with declarations), carries the
+        // conventional package-name token, or its variable is a declared global somewhere. Artifacts
+        // written before the visitor gate therefore cannot leak the record/alias noise either.
+        // Built AFTER the merge so the dedicated declarations artifact also vouches for its packages.
+        PackageGlobalScope scope = packageGlobalScope(nodeFiles);
+        for (Map.Entry<String, Map<String, JsonNode>> e : declarations.entrySet()) {
+            scope.addPackage(e.getKey());
+            for (String v : e.getValue().keySet()) scope.addVariable(v);
         }
 
         Map<String, ObjectNode> byPackage = new LinkedHashMap<>();
@@ -1312,6 +1355,14 @@ class EstateFacetReader {
     private static final class PackageGlobalScope {
         private final Set<String> packages = new HashSet<>();
         private final Set<String> variables = new HashSet<>();
+
+        void addPackage(String pkg) {
+            if (pkg != null && !pkg.isBlank()) packages.add(pkg);
+        }
+
+        void addVariable(String var) {
+            if (var != null && !var.isBlank()) variables.add(var);
+        }
 
         boolean admits(String pkg, String var) {
             if (pkg == null || pkg.isEmpty() || var == null || var.isEmpty()) return false;

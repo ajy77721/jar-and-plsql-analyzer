@@ -48,6 +48,16 @@ public class ChunkedFlowWriter {
     private List<Map<String, Object>> discoveredJobs = new ArrayList<>();
 
     /**
+     * Package-level variable declarations captured at PARSE time, keyed by upper-case package name
+     * — the estate globals facet's declaration list. Written to the dedicated
+     * {@code api/globals/declarations.json} artifact during the write pass, INDEPENDENT of whether a
+     * PACKAGE_BODY/PACKAGE_SPEC node was crawled (a member entry point crawls no package node, so the
+     * per-node {@code packageGlobalDeclarations} path never fired). See
+     * {@link #recordPackageGlobals(String, List)}.
+     */
+    private final Map<String, List<VariableInfo>> packageGlobalDeclarations = new LinkedHashMap<>();
+
+    /**
      * The source artifact name actually written for a node, keyed by node identity — so the
      * index/node-detail {@code sourceFile} records the extension the artifact really has
      * ({@code .prc} for a standalone PROCEDURE, {@code .fnc} for a FUNCTION) instead of always
@@ -154,6 +164,36 @@ public class ChunkedFlowWriter {
 
     public void setDiscoveredTriggers(List<Map<String, Object>> triggers) {
         this.discoveredTriggers = triggers != null ? triggers : new ArrayList<>();
+    }
+
+    /**
+     * Record a package's package-level variable declarations, captured at parse time from the
+     * PACKAGE_SPEC/PACKAGE_BODY {@code ParsedObject}. Persisted as the dedicated
+     * {@code api/globals/declarations.json} during the write pass — the estate globals facet reads
+     * it directly, so the declarations survive even when the crawl produced no PACKAGE node (the
+     * member entry point case). Duplicate variable names within a package are ignored; a re-record
+     * from another member of the same package merges rather than replaces.
+     */
+    public void recordPackageGlobals(String packageName, List<VariableInfo> vars) {
+        if (packageName == null || packageName.isBlank() || vars == null || vars.isEmpty()) return;
+        List<VariableInfo> existing = packageGlobalDeclarations
+                .computeIfAbsent(packageName.toUpperCase(Locale.ROOT), k -> new ArrayList<>());
+        for (VariableInfo v : vars) {
+            if (v == null || v.getName() == null || v.getName().isBlank()) continue;
+            boolean dup = false;
+            for (VariableInfo e : existing) {
+                if (e.getName().equalsIgnoreCase(v.getName())) { dup = true; break; }
+            }
+            if (!dup) existing.add(v);
+        }
+    }
+
+    /** Writes {@code api/globals/declarations.json} — package → declared variables. */
+    private void writeGlobalsDeclarations(ArtifactKey apiDir) throws IOException {
+        if (packageGlobalDeclarations.isEmpty()) return;
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("declarations", packageGlobalDeclarations);
+        writeJson(apiDir.resolve("globals", "declarations.json"), doc);
     }
 
     public void setDiscoveredJobs(List<Map<String, Object>> jobs) {
@@ -1439,6 +1479,11 @@ public class ChunkedFlowWriter {
         // ── 3. tables/index.json: all tables, who uses them, which operations ──
         int tableCount = writeTableIndex(apiDir, lightNodes);
 
+        // ── 3a. globals/declarations.json: parse-time package-global declarations ──
+        // A dedicated artifact (not a per-node section) so the declarations survive a crawl that
+        // produced no PACKAGE_BODY/PACKAGE_SPEC node — see recordPackageGlobals.
+        writeGlobalsDeclarations(apiDir);
+
         // ── 3b. jobs/index.json: discovered scheduled jobs (job, schedule, enabled, target) ──
         int jobCount = writeJobsIndex(apiDir);
 
@@ -1824,6 +1869,12 @@ public class ChunkedFlowWriter {
             });
             ((List<Integer>) info.get("lines")).add(c.getLine());
             info.put("count", (int) info.get("count") + 1);
+            // A post-crawl resolved call (the DB-discovered trigger body's callee) carries the
+            // crawled target's node id so the facet can cross-link to it. Ordinary calls leave it
+            // null, so this field is absent and existing call rows stay byte-identical.
+            if (c.getNodeId() != null && !c.getNodeId().isEmpty() && !info.containsKey("nodeId")) {
+                info.put("nodeId", c.getNodeId());
+            }
         }
         return new ArrayList<>(grouped.values());
     }

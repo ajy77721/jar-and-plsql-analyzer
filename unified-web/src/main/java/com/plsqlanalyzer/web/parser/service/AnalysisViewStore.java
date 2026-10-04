@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -461,6 +462,55 @@ public class AnalysisViewStore {
                 }
             } catch (Exception e) {
                 log.debug("facet record {} / {} failed: {}", name, view, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Re-records the byte lengths of artifacts that were rewritten AFTER the crawler's write pass —
+     * the inline table enrichers and {@code patchConnectionMeta} rewrite {@code api/tables/index.json}
+     * and {@code api/index.json}, so the lengths the manifest captured at crawl time are stale. The
+     * manifest is refreshed in place (its {@code artifacts[]} entries updated from the store's own
+     * size) and stays the last artifact written, which also keeps it fresh against the rewritten
+     * index. Best-effort and a no-op when there is no manifest, exactly like {@link #recordFacet}.
+     *
+     * @param relativePaths analysis-relative artifact paths, e.g. {@code api/index.json}
+     */
+    public void refreshArtifactLengths(String name, List<String> relativePaths) {
+        if (name == null || relativePaths == null || relativePaths.isEmpty()) return;
+        synchronized (lockFor(name)) {
+            try {
+                ArtifactKey mk = manifestKey(name);
+                if (store.lastModified(mk) < 0) return;      // no manifest to update
+                JsonNode parsed;
+                try (InputStream in = store.read(mk)) {
+                    parsed = mapper.readTree(in);
+                }
+                if (!(parsed instanceof ObjectNode root)) return;
+                JsonNode artifacts = root.get("artifacts");
+                if (!(artifacts instanceof com.fasterxml.jackson.databind.node.ArrayNode arr)) return;
+                Map<String, Long> wanted = new java.util.LinkedHashMap<>();
+                for (String rel : relativePaths) {
+                    if (rel == null) continue;
+                    long size = store.size(AnalysisPaths.resolveKey(name, rel));
+                    if (size >= 0) wanted.put(AnalysisPaths.resolveKey(name, rel).toString(), size);
+                }
+                if (wanted.isEmpty()) return;
+                boolean changed = false;
+                for (JsonNode a : arr) {
+                    if (!(a instanceof ObjectNode entry)) continue;
+                    Long size = wanted.get(entry.path("key").asText(""));
+                    if (size != null && entry.path("length").asLong(-1) != size) {
+                        entry.put("length", size);
+                        changed = true;
+                    }
+                }
+                if (!changed) return;
+                try (OutputStream out = store.write(mk)) {
+                    mapper.writeValue(out, root);
+                }
+            } catch (Exception e) {
+                log.debug("manifest length refresh {} failed: {}", name, e.getMessage());
             }
         }
     }

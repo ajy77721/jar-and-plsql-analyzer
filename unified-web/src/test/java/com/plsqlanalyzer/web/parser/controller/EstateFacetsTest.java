@@ -319,6 +319,67 @@ class EstateFacetsTest {
         assertEquals("0", v.path("defaultValue").asText());
     }
 
+    /**
+     * The dedicated parse-time declaration artifact ({@code api/globals/declarations.json}) feeds
+     * the globals facet even when the crawl produced no PACKAGE node at all — the member-entry-point
+     * case. Declarations survive, so a referenced global gets {@code declared:true} with its type,
+     * an UNREFERENCED declared global still appears, and a package with no {@code PKG} token and no
+     * node is admitted because the artifact vouches for it. This is the real Oracle shape:
+     * {@code erp_pkg_planner}'s three globals, only one of them referenced.
+     */
+    @Test
+    void dedicatedDeclarationsArtifactFeedsGlobalsWithoutAPackageNode() throws Exception {
+        put("api/index.json", "{\"entryPoint\":\"ERP_PKG_PLANNER\",\"nodes\":[]}");
+        put("api/tables/index.json", "{\"tables\":[]}");
+        put("api/globals/declarations.json", """
+                {"declarations":{
+                  "ERP_PKG_PLANNER":[
+                    {"name":"g_last_context","dataType":"VARCHAR2(4000)","constant":false},
+                    {"name":"g_last_run_id","dataType":"NUMBER","defaultValue":"0","constant":false},
+                    {"name":"g_call_count","dataType":"PLS_INTEGER","defaultValue":"0","constant":false}],
+                  "erp_ledger":[
+                    {"name":"g_total","dataType":"NUMBER","constant":false}]}}""");
+        // A package MEMBER node references one planner global — no PACKAGE_BODY node exists here.
+        put("api/nodes/ERP$ERP_PKG_PLANNER$RUN.json", """
+                {"nodeId":"ERP$ERP_PKG_PLANNER$RUN","name":"ERP_PKG_PLANNER.RUN",
+                 "packageName":"ERP_PKG_PLANNER","objectName":"RUN","schema":"ERP",
+                 "objectType":"PROCEDURE",
+                 "externalPackageVarRefDetails":[
+                   {"packageName":"ERP_PKG_PLANNER","variableName":"g_last_context","line":4,
+                    "accessType":"READ"}]}""");
+        // A ref to a package with no PKG token and no node: admitted only because the artifact
+        // names it a real package.
+        put("api/nodes/ERP$P2.json", """
+                {"nodeId":"ERP$P2","name":"P2","schema":"ERP","objectType":"PROCEDURE",
+                 "externalPackageVarRefDetails":[
+                   {"packageName":"erp_ledger","variableName":"g_total","line":9,
+                    "accessType":"WRITE"}]}""");
+
+        JsonNode globals = staticReader.getGlobals(NAME);
+        JsonNode planner = row(globals, "package", "ERP_PKG_PLANNER");
+        assertEquals(3, planner.path("variableCount").asInt(),
+                "every declared global appears, referenced or not");
+
+        JsonNode referenced = null, unreferenced = null;
+        for (JsonNode v : planner.path("variables")) {
+            if ("g_last_context".equalsIgnoreCase(v.path("name").asText())) referenced = v;
+            if ("g_last_run_id".equalsIgnoreCase(v.path("name").asText())) unreferenced = v;
+        }
+        assertNotNull(referenced);
+        assertTrue(referenced.path("declared").asBoolean(), "declaration present → declared:true");
+        assertEquals("VARCHAR2(4000)", referenced.path("dataType").asText());
+        assertEquals(1, referenced.path("readCount").asInt());
+        assertNotNull(unreferenced, "declared-but-unreferenced global must still appear");
+        assertTrue(unreferenced.path("declared").asBoolean());
+        assertEquals("NUMBER", unreferenced.path("dataType").asText());
+        assertEquals(0, unreferenced.path("readCount").asInt());
+
+        JsonNode ledger = row(globals, "package", "ERP_LEDGER");
+        assertEquals(1, ledger.path("variableCount").asInt(),
+                "declarations.json vouches for a package with no PKG token");
+        assertEquals(1, ledger.path("writeCount").asInt());
+    }
+
     @Test
     void absentFacetsDegradeToEmpty() throws Exception {
         put("api/index.json", "{\"entryPoint\":\"DEMO\",\"nodes\":[]}");
