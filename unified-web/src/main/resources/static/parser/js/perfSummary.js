@@ -107,7 +107,7 @@ PA.perfSummary = {
                     f.withErrors > 0 ? 'var(--red)' : 'var(--green)');
             hf += PA.perfSummary._statCard(PA.formatDuration(f.totalDurationMs), 'Total Time');
             hf += PA.perfSummary._statCard(f.dbCallCount, 'DB Calls');
-            hf += PA.perfSummary._statCard((f.totalNodes || 0).toLocaleString(), 'Procedures');
+            hf += PA.perfSummary._statCard(((f.totalProcs != null ? f.totalProcs : f.totalNodes) || 0).toLocaleString(), 'Procedures');
             hf += PA.perfSummary._statCard((f.totalTables || 0).toLocaleString(), 'Tables');
             hf += PA.perfSummary._statCard((f.totalLinesOfCode || 0).toLocaleString(), 'LOC');
             hf += '</div>';
@@ -118,7 +118,7 @@ PA.perfSummary = {
             var it = list[i];
             totalTime += (it.totalDurationMs || it.crawlTimeMs || 0);
             totalDb += (it.dbCallCount || 0);
-            totalProcs += (it.totalNodes || 0);
+            totalProcs += PA.perfSummary._procsOf(it);
             totalTables += (it.totalTables || 0);
             totalLoc += (it.totalLinesOfCode || 0);
             if (PA.perfSummary._errCount(it) > 0) totalErrors++; else totalSuccess++;
@@ -134,6 +134,19 @@ PA.perfSummary = {
         h += PA.perfSummary._statCard(totalLoc.toLocaleString(), 'LOC');
         h += '</div>';
         return h;
+    },
+
+    /**
+     * "Procs" for one history row = procedures + functions only. The raw node total lumps
+     * triggers/tables/packages; the row's typeCounts carries the truthful split, with totalNodes as
+     * the fallback for an analysis crawled before that field existed.
+     */
+    _procsOf: function(it) {
+        var tc = (it && it.typeCounts) || {};
+        if (tc.PROCEDURE != null || tc.FUNCTION != null) {
+            return (tc.PROCEDURE || 0) + (tc.FUNCTION || 0);
+        }
+        return (it && it.totalNodes) || 0;
     },
 
     _statCard: function(value, label, color) {
@@ -301,7 +314,7 @@ PA.perfSummary = {
             html += '<td><div class="ps-bar"><div class="ps-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div></td>';
             html += '<td style="white-space:nowrap;font-family:monospace;font-size:10px;color:var(--text-muted)">' + self._phasesText(it) + '</td>';
             html += '<td style="text-align:center;font-weight:600">' + (it.dbCallCount || 0) + '</td>';
-            html += '<td style="text-align:center">' + (it.totalNodes || 0) + '</td>';
+            html += '<td style="text-align:center">' + PA.perfSummary._procsOf(it) + '</td>';
             html += '<td style="text-align:center">' + (it.totalTables || 0) + '</td>';
             html += '<td style="text-align:center">' + (it.totalLinesOfCode || 0).toLocaleString() + '</td>';
             html += '<td style="text-align:center">';
@@ -333,7 +346,7 @@ PA.perfSummary = {
                     return (va - vb) * m;
                 case 'duration': return ((a.totalDurationMs || a.crawlTimeMs || 0) - (b.totalDurationMs || b.crawlTimeMs || 0)) * m;
                 case 'db': return ((a.dbCallCount || 0) - (b.dbCallCount || 0)) * m;
-                case 'procs': return ((a.totalNodes || 0) - (b.totalNodes || 0)) * m;
+                case 'procs': return (PA.perfSummary._procsOf(a) - PA.perfSummary._procsOf(b)) * m;
                 case 'tables': return ((a.totalTables || 0) - (b.totalTables || 0)) * m;
                 case 'loc': return ((a.totalLinesOfCode || 0) - (b.totalLinesOfCode || 0)) * m;
                 case 'errors':
@@ -382,7 +395,7 @@ PA.perfSummary = {
 
         html += '<div class="ps-detail-section"><div class="ps-detail-section-title">Metrics</div>';
         html += '<div class="ps-detail-grid">';
-        html += '<div class="ps-detail-kv"><span class="ps-k">Procedures</span><span class="ps-v">' + (it.totalNodes || 0) + '</span></div>';
+        html += '<div class="ps-detail-kv"><span class="ps-k">Procedures</span><span class="ps-v">' + PA.perfSummary._procsOf(it) + '</span></div>';
         html += '<div class="ps-detail-kv"><span class="ps-k">Tables</span><span class="ps-v">' + (it.totalTables || 0) + '</span></div>';
         html += '<div class="ps-detail-kv"><span class="ps-k">Edges</span><span class="ps-v">' + (it.totalEdges || 0) + '</span></div>';
         html += '<div class="ps-detail-kv"><span class="ps-k">LOC</span><span class="ps-v">' + (it.totalLinesOfCode || 0).toLocaleString() + '</span></div>';

@@ -785,6 +785,30 @@ class EstateFacetReader {
             }
         }
 
+        // 2b. TRIGGER nodes in the index that have no node-detail file (older/partial artifacts).
+        //     The procedures facet no longer lists these nodes, so the triggers facet must own them
+        //     even without a detail file — identity, table/event/timing come off the index row.
+        for (JsonNode n : r.getIndex(name).path("nodes")) {
+            if (!"TRIGGER".equalsIgnoreCase(textOrNull(n, "objectType"))) continue;
+            String tn0 = textOrNull(n, "objectName");
+            if (tn0 == null) tn0 = textOrNull(n, "name");
+            if (tn0 == null) continue;
+            final String tn = tn0;
+            String tschema = textOrNull(n, "schema");
+            String key = key(tschema, tn);
+            ObjectNode row = byKey.computeIfAbsent(key, k -> newTriggerRow(m, tn, tschema));
+            if (row.path("nodeId").asText("").isEmpty()) {
+                String id = textOrNull(n, "nodeId");
+                if (id != null) row.put("nodeId", id);
+            }
+            if (row.path("table").asText("").isEmpty()) {
+                String tt = textOrNull(n, "triggerTable");
+                if (tt != null) row.put("table", tt);
+            }
+            putIfAbsent(row, "timing", textOrNull(n, "triggerTiming"));
+            putIfAbsent(row, "event", textOrNull(n, "triggerEvent"));
+        }
+
         // 3. Catalog-discovered triggers (dbTriggers[]) — the DB-discovery enrichment attaches these
         //    to the table entry. They carry triggerType / triggeringEvent / status and are the ONLY
         //    source for triggers the source parser never saw: SQL Server INSTEAD OF triggers (often

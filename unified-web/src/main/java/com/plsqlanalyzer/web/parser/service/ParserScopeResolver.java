@@ -145,14 +145,16 @@ public class ParserScopeResolver {
      */
     private Map<String, String> nodeIdAliases(String analysis) {
         Map<String, String> map = new HashMap<>();
-        JsonNode procedures;
+        JsonNode index;
         try {
-            procedures = service.getProcedures(analysis);
+            // The FULL node list, not /procedures: the alias map must cover every node the call tree
+            // can address (including triggers/tables, which the procedures facet no longer serves),
+            // so read the index root's own nodes[] rather than the entity-filtered procedures rows.
+            index = service.getIndex(analysis);
         } catch (Exception e) {
             return map;
         }
-        JsonNode nodes = procedures == null ? null
-                : (procedures.isArray() ? procedures : procedures.path("nodes"));
+        JsonNode nodes = index == null ? null : index.path("nodes");
         if (nodes == null || !nodes.isArray()) return map;
         for (JsonNode n : nodes) {
             String underscore = n.path("nodeId").asText("").toUpperCase(Locale.ROOT);

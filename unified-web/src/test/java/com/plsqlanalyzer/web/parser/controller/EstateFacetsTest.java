@@ -380,6 +380,33 @@ class EstateFacetsTest {
         assertEquals(1, ledger.path("writeCount").asInt());
     }
 
+    /**
+     * Entity separation: a TRIGGER node in {@code api/index.json} that the table index did not
+     * attach AND that has no {@code api/nodes/*.json} detail file must still appear in the triggers
+     * facet — the procedures facet no longer lists it, so the triggers facet has to own it from the
+     * index row alone (identity, table, event, timing).
+     */
+    @Test
+    void triggerNodeWithoutDetailFileStillAppearsInTriggersFacet() throws Exception {
+        put("api/index.json", """
+                {"entryPoint":"DEMO","nodes":[
+                 {"nodeId":"S$P1","name":"P1","objectType":"PROCEDURE"},
+                 {"nodeId":"S$ORPHAN_TRG","name":"ORPHAN_TRG","objectName":"ORPHAN_TRG",
+                  "schema":"S","objectType":"TRIGGER","triggerTable":"T9",
+                  "triggerEvent":"DELETE","triggerTiming":"BEFORE"}]}""");
+        put("api/tables/index.json", "{\"tables\":[]}");
+        // Deliberately NO api/nodes/S$ORPHAN_TRG.json.
+
+        JsonNode trg = row(staticReader.getTriggers(NAME), "name", "ORPHAN_TRG");
+        assertEquals("T9", trg.path("table").asText());
+        assertEquals("DELETE", trg.path("event").asText());
+        assertEquals("BEFORE", trg.path("timing").asText());
+        assertEquals("S$ORPHAN_TRG", trg.path("nodeId").asText());
+
+        // And it is NOT served by the procedures facet — that is the whole point of the move.
+        assertNull(findRow(staticReader.getProcedures(NAME), "nodeId", "S$ORPHAN_TRG"));
+    }
+
     @Test
     void absentFacetsDegradeToEmpty() throws Exception {
         put("api/index.json", "{\"entryPoint\":\"DEMO\",\"nodes\":[]}");

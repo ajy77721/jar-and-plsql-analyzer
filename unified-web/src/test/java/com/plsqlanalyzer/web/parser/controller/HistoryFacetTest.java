@@ -73,6 +73,29 @@ class HistoryFacetTest {
     }
 
     @Test
+    @DisplayName("per-type node counts ride the row so the cards can show truthful procs")
+    void typeCountsAreProjected() {
+        AnalysisInfo a = info("a", "jdbc:oracle:thin:@//h/X", "P", 1000L, 500L, 0);
+        a.setTypeCounts(java.util.Map.of("PROCEDURE", 31, "FUNCTION", 17, "TRIGGER", 2, "TABLE", 2));
+        ObjectNode row = HistoryFacet.row(M, a);
+        assertEquals(31, row.path("typeCounts").path("PROCEDURE").asInt());
+        assertEquals(17, row.path("typeCounts").path("FUNCTION").asInt());
+        assertEquals(2, row.path("typeCounts").path("TRIGGER").asInt());
+
+        // Absent breakdown: the field is omitted so the client falls back to totalNodes, never a
+        // fabricated zero.
+        ObjectNode plain = HistoryFacet.row(M, info("b", "jdbc:oracle:thin:@//h/X", "P", 1L, 1L, 0));
+        assertFalse(plain.has("typeCounts"));
+
+        // The summary's "Procs" is procedures + functions, not the raw node total.
+        List<ObjectNode> rows = List.of(row);
+        ObjectNode s = HistoryFacet.summary(M, rows, rows);
+        assertEquals(48, s.path("totalProcs").asInt());
+        assertEquals(2, s.path("totalTriggers").asInt());
+        assertEquals(3, s.path("totalNodes").asInt(), "totalNodes stays the raw node total");
+    }
+
+    @Test
     @DisplayName("the projection is smaller than the row it replaces")
     void projectionIsSmaller() {
         AnalysisInfo a = info("a", "jdbc:oracle:thin:@//host:1521/FREEPDB1", "P", 1L, 2L, 4);

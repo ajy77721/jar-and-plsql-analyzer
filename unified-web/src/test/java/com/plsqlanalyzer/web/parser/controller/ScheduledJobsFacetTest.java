@@ -159,10 +159,10 @@ class ScheduledJobsFacetTest {
         assertNotNull(target);
         assertTrue(target.path("scheduled").asBoolean(),
                 "the job's target procedure must carry the scheduled badge");
-        // A procedure that is not a job target stays unstamped (byte-identical output).
-        JsonNode jobNode = row(procedures, "nodeId", "ERP$JOB$NIGHTLY_LOAD");
-        assertNotNull(jobNode);
-        assertFalse(jobNode.path("scheduled").asBoolean());
+        // Entity separation: the JOB node is not a procedure, so it does not appear in the
+        // procedures facet at all — it lives in the scheduled-jobs facet.
+        assertNull(row(procedures, "nodeId", "ERP$JOB$NIGHTLY_LOAD"),
+                "a JOB node must not be listed among the procedures");
     }
 
     @Test

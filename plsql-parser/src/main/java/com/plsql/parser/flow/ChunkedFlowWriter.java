@@ -1601,6 +1601,10 @@ public class ChunkedFlowWriter {
                 scalars.put(e.getKey(), v);
             } else if ("errors".equals(e.getKey()) && v instanceof List) {
                 scalars.put(e.getKey(), v);
+            } else if ("typeCounts".equals(e.getKey()) && v instanceof Map) {
+                // The truthful per-type node counts the history cards read. Carried whole so a
+                // manifest-served listing row is byte-identical to an index-served one.
+                scalars.put(e.getKey(), v);
             }
             // any other nested value is skipped, as the listing's index-header read skips it
         }

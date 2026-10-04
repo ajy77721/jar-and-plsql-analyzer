@@ -1219,6 +1219,8 @@ public class AnalysisService {
 
     /** The one root field the listing needs whole: the history row's {@code errorCount} counts it. */
     private static final String ERRORS_FIELD = "errors";
+    /** Per-node-type counts, needed whole for the history cards' truthful "procs"/"triggers". */
+    private static final String TYPE_COUNTS_FIELD = "typeCounts";
 
     /**
      * The listing scalars of an in-memory index root, exactly as {@link #readIndexHeader} would
@@ -1237,8 +1239,16 @@ public class AnalysisService {
                 scalars.set(e.getKey(), v == null ? READ_HEADER_MAPPER.nullNode() : v);
             } else if (ERRORS_FIELD.equals(e.getKey()) && v.isArray()) {
                 scalars.set(e.getKey(), v);
+            } else if (TYPE_COUNTS_FIELD.equals(e.getKey()) && v.isObject()) {
+                scalars.set(e.getKey(), v);
             }
             // any other nested value is skipped, as readIndexHeader skips it
+        }
+        // Old analyses (crawled before typeCounts existed) still carry their nodes[] here, so the
+        // listing can show the truthful per-type breakdown rather than the lumped totalNodes.
+        if (!scalars.has(TYPE_COUNTS_FIELD) && root.path("nodes").isArray()) {
+            scalars.set(TYPE_COUNTS_FIELD,
+                    IndexFacetReader.nodeTypeCounts(READ_HEADER_MAPPER, root.get("nodes")));
         }
         return scalars;
     }
@@ -1261,6 +1271,7 @@ public class AnalysisService {
      */
     private JsonNode readIndexHeader(ArtifactKey indexKey) throws IOException {
         ObjectNode scalars = READ_HEADER_MAPPER.createObjectNode();
+        ObjectNode computedTypeCounts = null;
         try (InputStream in = openRead(indexKey);
              JsonParser p = READ_HEADER_MAPPER.getFactory().createParser(in)) {
             if (p.nextToken() == JsonToken.START_OBJECT) {
@@ -1280,13 +1291,53 @@ public class AnalysisService {
                         }
                     } else if (value == JsonToken.START_ARRAY && ERRORS_FIELD.equals(field)) {
                         scalars.set(field, READ_HEADER_MAPPER.readTree(p));
+                    } else if (value == JsonToken.START_OBJECT && TYPE_COUNTS_FIELD.equals(field)) {
+                        scalars.set(field, READ_HEADER_MAPPER.readTree(p));
+                    } else if (value == JsonToken.START_ARRAY && "nodes".equals(field)) {
+                        // Count node types as the array streams by — the per-type breakdown the
+                        // history cards need, without materialising the (large) nodes[] array.
+                        computedTypeCounts = countNodeTypes(p);
                     } else {
                         p.skipChildren();
                     }
                 }
             }
         }
+        if (!scalars.has(TYPE_COUNTS_FIELD) && computedTypeCounts != null) {
+            scalars.set(TYPE_COUNTS_FIELD, computedTypeCounts);
+        }
         return scalars;
+    }
+
+    /**
+     * Streams a {@code nodes[]} array and returns {@code {OBJECT_TYPE -> count}}, upper-cased with a
+     * missing type defaulting to {@code PROCEDURE} — exactly the breakdown
+     * {@code ChunkedFlowWriter} writes as {@code typeCounts}. Never materialises the array.
+     */
+    private static ObjectNode countNodeTypes(JsonParser p) throws IOException {
+        Map<String, Integer> counts = new TreeMap<>();
+        while (p.nextToken() != JsonToken.END_ARRAY) {
+            if (p.currentToken() != JsonToken.START_OBJECT) {
+                p.skipChildren();
+                continue;
+            }
+            String objectType = null;
+            while (p.nextToken() != JsonToken.END_OBJECT) {
+                String f = p.currentName();
+                JsonToken vt = p.nextToken();
+                if (vt == JsonToken.START_ARRAY || vt == JsonToken.START_OBJECT) {
+                    p.skipChildren();
+                } else if ("objectType".equals(f)) {
+                    objectType = p.getValueAsString();
+                }
+            }
+            String t = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
+            if (t.isEmpty()) t = "PROCEDURE";
+            counts.merge(t, 1, Integer::sum);
+        }
+        ObjectNode out = READ_HEADER_MAPPER.createObjectNode();
+        counts.forEach(out::put);
+        return out;
     }
 
     /** @param indexKey the {@code .../<OBJECT>/api/index.json} key that identifies the analysis */
@@ -1326,6 +1377,17 @@ public class AnalysisService {
         info.setDiscoverMs(longOrDefault(root, "discoverMs", 0));
         info.setSaveMs(longOrDefault(root, "saveMs", 0));
         info.setDbCallCount(intOrDefault(root, "dbCallCount", 0));
+        // Per-type node counts for the truthful history cards ("procs" = PROCEDURE+FUNCTION). The
+        // header carries them for new crawls; compute from nodes when an older root still has them.
+        JsonNode typeCounts = root.get(TYPE_COUNTS_FIELD);
+        if ((typeCounts == null || !typeCounts.isObject()) && root.path("nodes").isArray()) {
+            typeCounts = IndexFacetReader.nodeTypeCounts(READ_HEADER_MAPPER, root.get("nodes"));
+        }
+        if (typeCounts != null && typeCounts.isObject()) {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            typeCounts.fields().forEachRemaining(e -> counts.put(e.getKey(), e.getValue().asInt()));
+            info.setTypeCounts(counts);
+        }
         info.setProject(textOrDefault(root, "project", ""));
         info.setEnvironment(textOrDefault(root, "environment", ""));
         info.setConnectionName(textOrDefault(root, "connectionName", ""));

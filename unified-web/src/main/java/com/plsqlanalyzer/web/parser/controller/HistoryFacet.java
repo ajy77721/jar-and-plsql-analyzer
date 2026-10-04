@@ -75,6 +75,13 @@ final class HistoryFacet {
         // input to a computation that has moved.
         n.put("dbType", dbType(a));
         n.put("errorCount", a.getErrors() == null ? 0 : a.getErrors().size());
+        // Truthful per-type counts, when the analysis carries them: the History/Performance cards
+        // show procs = PROCEDURE+FUNCTION and their own trigger count instead of the lumped
+        // totalNodes. Omitted when unknown so the client falls back to its existing label.
+        if (a.getTypeCounts() != null && !a.getTypeCounts().isEmpty()) {
+            ObjectNode tc = n.putObject("typeCounts");
+            a.getTypeCounts().forEach(tc::put);
+        }
         return n;
     }
 
@@ -185,6 +192,7 @@ final class HistoryFacet {
      */
     static ObjectNode summary(ObjectMapper mapper, List<ObjectNode> all, List<ObjectNode> matched) {
         long totalTime = 0, totalDb = 0, totalProcs = 0, totalTables = 0, totalLoc = 0;
+        long totalRawNodes = 0, totalTriggers = 0;
         long maxDuration = 0;
         int withErrors = 0;
         Map<String, Integer> dsCounts = new TreeMap<>();
@@ -204,7 +212,16 @@ final class HistoryFacet {
             totalTime += ms;
             if (ms > maxDuration) maxDuration = ms;
             totalDb += r.path("dbCallCount").asLong(0);
-            totalProcs += r.path("totalNodes").asLong(0);
+            totalRawNodes += r.path("totalNodes").asLong(0);
+            // "Procs" is procedures + functions only, never the raw node total (which lumps
+            // triggers/tables/packages). Falls back to totalNodes for a row without the breakdown.
+            JsonNode tc = r.path("typeCounts");
+            if (tc.isObject()) {
+                totalProcs += tc.path("PROCEDURE").asLong(0) + tc.path("FUNCTION").asLong(0);
+                totalTriggers += tc.path("TRIGGER").asLong(0);
+            } else {
+                totalProcs += r.path("totalNodes").asLong(0);
+            }
             totalTables += r.path("totalTables").asLong(0);
             totalLoc += r.path("totalLinesOfCode").asLong(0);
             if (r.path("errorCount").asInt(0) > 0) withErrors++;
@@ -218,7 +235,9 @@ final class HistoryFacet {
         out.put("totalDurationMs", totalTime);
         out.put("maxDurationMs", maxDuration);
         out.put("dbCallCount", totalDb);
-        out.put("totalNodes", totalProcs);
+        out.put("totalNodes", totalRawNodes);
+        out.put("totalProcs", totalProcs);
+        out.put("totalTriggers", totalTriggers);
         out.put("totalTables", totalTables);
         out.put("totalLinesOfCode", totalLoc);
         ObjectNode counts = out.putObject("dsCounts");

@@ -1,6 +1,7 @@
 package com.plsqlanalyzer.web.parser.model;
 
 import java.util.List;
+import java.util.Map;
 
 public class AnalysisInfo {
 
@@ -16,6 +17,9 @@ public class AnalysisInfo {
     private int dbCallCount;
     private long timestamp;
     private List<String> errors;
+
+    /** Per-node-type counts ({@code PROCEDURE}/{@code FUNCTION}/{@code TRIGGER}/…), when known. */
+    private Map<String, Integer> typeCounts;
 
     // Connection context stored at analysis time
     private String project;
@@ -76,6 +80,9 @@ public class AnalysisInfo {
 
     public List<String> getErrors() { return errors; }
     public void setErrors(List<String> errors) { this.errors = errors; }
+
+    public Map<String, Integer> getTypeCounts() { return typeCounts; }
+    public void setTypeCounts(Map<String, Integer> typeCounts) { this.typeCounts = typeCounts; }
 
     public String getProject() { return project; }
     public void setProject(String project) { this.project = project; }

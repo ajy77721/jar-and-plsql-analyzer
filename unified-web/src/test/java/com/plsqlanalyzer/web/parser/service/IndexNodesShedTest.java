@@ -74,8 +74,61 @@ class IndexNodesShedTest {
         assertTrue(full.has("nodes"), "getIndex must still carry nodes for internal callers");
         assertEquals(50, full.get("nodes").size());
 
+        // This fixture predates objectType, so every node is a routine by the same default the
+        // crawler applies; /procedures keeps them all. Entity separation for typed nodes is covered
+        // by proceduresFacetKeepsOnlyRoutines below.
         JsonNode procedures = reader.getProcedures(ANALYSIS);
-        assertEquals(50, procedures.size(), "/procedures must still serve the full node list");
+        assertEquals(50, procedures.size());
+    }
+
+    /** An index whose nodes carry the real entity types the crawler writes. */
+    private static InMemoryArtifactStore typedFixture() throws Exception {
+        InMemoryArtifactStore store = new InMemoryArtifactStore();
+        ObjectNode index = M.createObjectNode();
+        index.put("entryPoint", "PKG.ENTRY");
+        index.put("entrySchema", "APP");
+        index.put("totalNodes", 5);
+        ArrayNode nodes = index.putArray("nodes");
+        nodes.addObject().put("nodeId", "S$P1").put("name", "P1").put("objectType", "PROCEDURE");
+        nodes.addObject().put("nodeId", "S$P2").put("name", "P2").put("objectType", "PROCEDURE");
+        nodes.addObject().put("nodeId", "S$F1").put("name", "F1").put("objectType", "FUNCTION");
+        nodes.addObject().put("nodeId", "S$T1").put("name", "T1").put("objectType", "TRIGGER");
+        nodes.addObject().put("nodeId", "S$TBL1").put("name", "TBL1").put("objectType", "TABLE");
+        var key = AnalysisPaths.resolveKey(ANALYSIS, "api/index.json");
+        try (var out = store.write(key)) {
+            M.writeValue(out, index);
+        }
+        return store;
+    }
+
+    @Test
+    void proceduresFacetKeepsOnlyRoutines() throws Exception {
+        // Entity separation: TRIGGER and TABLE nodes belong to their own facets, never the
+        // procedures list. A blank objectType is treated as a routine (crawler default).
+        StaticAnalysisReader reader = new StaticAnalysisReader(typedFixture());
+
+        JsonNode procedures = reader.getProcedures(ANALYSIS);
+        assertEquals(3, procedures.size(), "PROCEDURE x2 + FUNCTION x1 only: " + procedures);
+        for (JsonNode n : procedures) {
+            String ot = n.path("objectType").asText();
+            assertTrue("PROCEDURE".equals(ot) || "FUNCTION".equals(ot),
+                    "a non-routine leaked into /procedures: " + ot);
+        }
+    }
+
+    @Test
+    void indexWithoutNodesCarriesComputedTypeCounts() throws Exception {
+        // An analysis crawled before typeCounts existed still gets the truthful breakdown, computed
+        // from the nodes array /index already had to load before shedding it.
+        StaticAnalysisReader reader = new StaticAnalysisReader(typedFixture());
+
+        JsonNode shed = reader.getIndexWithoutNodes(ANALYSIS);
+        assertFalse(shed.has("nodes"));
+        JsonNode tc = shed.path("typeCounts");
+        assertEquals(2, tc.path("PROCEDURE").asInt());
+        assertEquals(1, tc.path("FUNCTION").asInt());
+        assertEquals(1, tc.path("TRIGGER").asInt());
+        assertEquals(1, tc.path("TABLE").asInt());
     }
 
     @Test

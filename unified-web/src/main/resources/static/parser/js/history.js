@@ -264,7 +264,13 @@ PA._renderFilteredHistory = function() {
         var entry = item.entryPoint || item.name || '';
         var schema = item.entrySchema || '';
         var ts = item.timestamp ? new Date(item.timestamp).toLocaleString() : '';
-        var procs = item.totalNodes || 0;
+        // Truthful per-type counts: "procs" = procedures + functions only (the raw node total lumps
+        // triggers/tables/packages); triggers get their own figure. Falls back to the raw total for
+        // analyses crawled before typeCounts existed.
+        var tc = item.typeCounts || {};
+        var hasTypes = (tc.PROCEDURE != null || tc.FUNCTION != null);
+        var procs = hasTypes ? ((tc.PROCEDURE || 0) + (tc.FUNCTION || 0)) : (item.totalNodes || 0);
+        var triggers = hasTypes ? (tc.TRIGGER || 0) : 0;
         var tables = item.totalTables || 0;
         var loc = item.totalLinesOfCode || 0;
         // errorCount from the projected row; item.errors only on a legacy unpaged response.
@@ -289,7 +295,9 @@ PA._renderFilteredHistory = function() {
             html += '</div>';
         }
         if (ts) html += '<div class="hc-meta">' + PA.esc(ts) + '</div>';
-        html += '<div class="hc-stats">' + procs + ' procs | ' + tables + ' tables | ' + loc.toLocaleString() + ' LOC';
+        html += '<div class="hc-stats">' + procs + ' procs | ' + tables + ' tables';
+        if (triggers > 0) html += ' | ' + triggers + ' triggers';
+        html += ' | ' + loc.toLocaleString() + ' LOC';
         if (duration) html += ' | ' + PA.esc(duration);
         if (errors > 0) html += ' | <span style="color:var(--red)">' + errors + ' errors</span>';
         html += '</div></div>';

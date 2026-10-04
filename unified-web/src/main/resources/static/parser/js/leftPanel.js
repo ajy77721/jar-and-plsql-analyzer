@@ -254,14 +254,28 @@ PA._lpItemHtml = function(kind, x) {
 };
 
 /**
+ * The "Procedures (N)" header count: procedures + functions only. The analysis index carries the
+ * per-type breakdown (typeCounts); analyses crawled before it existed fall back to totalNodes so
+ * the header never renders blank. Never the raw node total when the breakdown is known.
+ */
+PA._lpRoutineCount = function() {
+    var idx = PA.analysisData || {};
+    var tc = idx.typeCounts || {};
+    if (tc.PROCEDURE != null || tc.FUNCTION != null) {
+        return (tc.PROCEDURE || 0) + (tc.FUNCTION || 0);
+    }
+    return idx.totalNodes || 0;
+};
+
+/**
  * UI-024 (§160): threshold-aware, matching the filter path MID-002 (§39) already made so. Below
  * `PA._LP_SERVER_FILTER_THRESHOLD`, unchanged — the array path this file's own header comment was
  * measured against. At or above it, this no longer touches `PA.nodeIndex.all()` at all: painting
  * the first screen used to force the whole node array resident before a single keystroke, the same
  * defect the filter path itself had before MID-002, just one call earlier in the sequence. The
- * total procedure count for the header comes from `PA.analysisData.totalNodes` (already known
- * cheaply since MID-002 dropped `nodes[]` from `/index` — see `api.js`'s own doc comment), never
- * from the array whose residency this fix removes.
+ * total procedure count for the header comes from `PA._lpRoutineCount()` (procedures + functions,
+ * via `PA.analysisData.typeCounts` — never the raw node total), never from the array whose
+ * residency this fix removes.
  *
  * <p>UI-024 (§165): `async` now, awaiting `PA.nodeIndex.ensureLoaded()` at the top of the
  * below-threshold branch only — the above-threshold branch never touches the array at all, so it
@@ -273,7 +287,9 @@ PA._lpItemHtml = function(kind, x) {
 PA._renderLeftProcedures = async function() {
     var panel = document.getElementById('lpProcedures');
     if (!panel) return;
-    var totalKnown = (PA.analysisData && PA.analysisData.totalNodes) || 0;
+    // The header count is the procedure/function total, never the raw node total (which lumps
+    // triggers/tables/events). typeCounts comes from /index; fall back to totalNodes when absent.
+    var totalKnown = PA._lpRoutineCount();
 
     if (totalKnown >= PA._LP_SERVER_FILTER_THRESHOLD) {
         PA._lp.proc.all = [];      // deliberately never populated at this scale — see doc comment above

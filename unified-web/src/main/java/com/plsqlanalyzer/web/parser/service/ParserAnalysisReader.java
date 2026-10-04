@@ -224,7 +224,10 @@ public class ParserAnalysisReader {
     public JsonNode getProcedures(String name) throws IOException {
         JsonNode index = getIndex(name);
         JsonNode nodes = index.get("nodes");
-        return (nodes != null && nodes.isArray()) ? nodes : mapper.createArrayNode();
+        if (nodes == null || !nodes.isArray()) return mapper.createArrayNode();
+        // Entity separation: the procedures list is PROCEDURE + FUNCTION only. TRIGGER / TABLE /
+        // EVENT and other node kinds live in their own facets — see IndexFacetReader.getProcedures.
+        return IndexFacetReader.proceduresOnly(mapper, nodes);
     }
 
     public JsonNode getJoins(String name) throws IOException {
@@ -742,6 +745,18 @@ public class ParserAnalysisReader {
         info.setMaxDepth(intDef(root, "maxDepth", 0));
         info.setCrawlTimeMs(root.has("crawlTimeMs") && root.get("crawlTimeMs").isNumber() ? root.get("crawlTimeMs").asLong() : 0);
         info.setDbCallCount(intDef(root, "dbCallCount", 0));
+        // Per-type node counts for the truthful history cards ("procs" = PROCEDURE+FUNCTION, its own
+        // trigger count, …). New crawls carry typeCounts on the index root; analyses crawled before
+        // that field existed have their nodes array here, so compute the same breakdown from it.
+        JsonNode typeCounts = root.get("typeCounts");
+        if ((typeCounts == null || !typeCounts.isObject()) && root.path("nodes").isArray()) {
+            typeCounts = IndexFacetReader.nodeTypeCounts(mapper, root.get("nodes"));
+        }
+        if (typeCounts != null && typeCounts.isObject()) {
+            Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+            typeCounts.fields().forEachRemaining(e -> counts.put(e.getKey(), e.getValue().asInt()));
+            info.setTypeCounts(counts);
+        }
 
         List<String> errors = new ArrayList<>();
         JsonNode errNode = root.get("errors");

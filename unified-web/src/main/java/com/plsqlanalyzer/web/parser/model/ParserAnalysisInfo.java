@@ -1,6 +1,7 @@
 package com.plsqlanalyzer.web.parser.model;
 
 import java.util.List;
+import java.util.Map;
 
 public class ParserAnalysisInfo {
 
@@ -15,6 +16,9 @@ public class ParserAnalysisInfo {
     private long crawlTimeMs;
     private int dbCallCount;
     private List<String> errors;
+
+    /** Per-node-type counts ({@code PROCEDURE}/{@code FUNCTION}/{@code TRIGGER}/…), when known. */
+    private Map<String, Integer> typeCounts;
 
     public ParserAnalysisInfo() {}
 
@@ -50,4 +54,7 @@ public class ParserAnalysisInfo {
 
     public List<String> getErrors() { return errors; }
     public void setErrors(List<String> errors) { this.errors = errors; }
+
+    public Map<String, Integer> getTypeCounts() { return typeCounts; }
+    public void setTypeCounts(Map<String, Integer> typeCounts) { this.typeCounts = typeCounts; }
 }

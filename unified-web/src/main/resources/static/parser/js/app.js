@@ -53,7 +53,11 @@ PA.loadAnalysis = async function(name, opts) {
         PA._tablesIndexPromise = null;
         PA._renderLeftTables();
         PA._syncTopbarTableCount();   // scalar fetch; the full index stays lazy
-        PA.toast('Loaded: ' + (result.entryPoint || name) + ' (' + (result.totalNodes || 0) + ' procs)', 'success');
+        // "procs" = procedures + functions only; the raw node total lumps triggers/tables/etc.
+        var loadTc = result.typeCounts || {};
+        var loadProcs = (loadTc.PROCEDURE != null || loadTc.FUNCTION != null)
+            ? ((loadTc.PROCEDURE || 0) + (loadTc.FUNCTION || 0)) : (result.totalNodes || 0);
+        PA.toast('Loaded: ' + (result.entryPoint || name) + ' (' + loadProcs + ' procs)', 'success');
 
         var targetHash = '#/analysis/' + encodeURIComponent(name);
         if (window.location.hash !== targetHash && !routeProcId) {
@@ -1317,7 +1321,10 @@ PA.pullData = async function() {
         await PA._renderLeftProcedures();
         PA._renderLeftTables();
         PA._syncTopbarTableCount();
-        PA.toast('Data refreshed (' + (result.totalNodes || 0) + ' procs)', 'success');
+        var pullTc = result.typeCounts || {};
+        var pullProcs = (pullTc.PROCEDURE != null || pullTc.FUNCTION != null)
+            ? ((pullTc.PROCEDURE || 0) + (pullTc.FUNCTION || 0)) : (result.totalNodes || 0);
+        PA.toast('Data refreshed (' + pullProcs + ' procs)', 'success');
     } catch(e) {
         PA.toast('Pull failed: ' + (e.message || e), 'error');
     }
