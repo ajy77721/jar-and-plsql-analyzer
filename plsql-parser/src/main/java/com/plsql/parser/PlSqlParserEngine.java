@@ -5,7 +5,12 @@ import com.plsql.parser.model.ParsedObject;
 import com.plsql.parser.visitor.PlSqlAnalysisVisitor;
 
 import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.atn.ATN;
+import org.antlr.v4.runtime.atn.LexerATNSimulator;
+import org.antlr.v4.runtime.atn.ParserATNSimulator;
+import org.antlr.v4.runtime.atn.PredictionContextCache;
 import org.antlr.v4.runtime.atn.PredictionMode;
+import org.antlr.v4.runtime.dfa.DFA;
 import org.antlr.v4.runtime.misc.ParseCancellationException;
 import org.antlr.v4.runtime.tree.ParseTree;
 
@@ -24,9 +29,40 @@ public class PlSqlParserEngine {
     private static final com.plsql.parser.service.TableOperationEnricher ENRICHER =
             new com.plsql.parser.service.TableOperationEnricher();
 
-    /** Counts parses so the shared SLL DFA cache is cleared only periodically (memory bound). */
-    private static final java.util.concurrent.atomic.AtomicLong PARSE_COUNT =
-            new java.util.concurrent.atomic.AtomicLong();
+    /**
+     * Per-thread ANTLR mutable caches. ANTLR's generated lexer/parser share STATIC {@code DFA[]}
+     * arrays and a static {@link PredictionContextCache}; all three are plain (non-concurrent)
+     * structures that the runtime MUTATES while predicting (adding DFA states, caching prediction
+     * contexts). Two threads parsing with those shared statics can corrupt them — this is the real
+     * reason the crawl serialized parses behind a global lock, not merely the periodic
+     * {@code clearDFA}. Giving each thread its own DFA arrays + context cache over the same
+     * (immutable) ATN removes the shared mutable state entirely, so parses can run in parallel
+     * without any lock. The caches live on the thread so the DFA stays warm across parses and are
+     * bounded by the number of live parse threads (the crawl's bounded pool).
+     */
+    private static final class AntlrCaches {
+        final DFA[] lexerDfa;
+        final DFA[] parserDfa;
+        final PredictionContextCache contextCache = new PredictionContextCache();
+        /** Parses done on this thread's caches — drives the periodic memory-bound clear. */
+        int parses = 0;
+
+        AntlrCaches() {
+            lexerDfa = newDfaArray(PlSqlLexer._ATN);
+            parserDfa = newDfaArray(PlSqlParser._ATN);
+        }
+
+        private static DFA[] newDfaArray(ATN atn) {
+            DFA[] dfas = new DFA[atn.getNumberOfDecisions()];
+            for (int i = 0; i < dfas.length; i++) {
+                dfas[i] = new DFA(atn.getDecisionState(i), i);
+            }
+            return dfas;
+        }
+    }
+
+    private static final ThreadLocal<AntlrCaches> ANTLR_CACHES =
+            ThreadLocal.withInitial(AntlrCaches::new);
 
     /**
      * Parse a file and return the result.
@@ -307,12 +343,21 @@ public class PlSqlParserEngine {
             CharStream charStream = CharStreams.fromString(content);
             PlSqlLexer lexer = new PlSqlLexer(charStream);
 
+            // Install THIS thread's ANTLR caches before any prediction happens. The generated
+            // lexer/parser otherwise use static (shared, non-concurrent) DFA arrays + context
+            // cache; swapping in per-thread instances is what makes concurrent parses safe.
+            AntlrCaches caches = ANTLR_CACHES.get();
+            lexer.setInterpreter(new LexerATNSimulator(lexer, lexer.getATN(),
+                    caches.lexerDfa, caches.contextCache));
+
             // Suppress lexer error output; collect errors
             lexer.removeErrorListeners();
             lexer.addErrorListener(new CollectingErrorListener(errors));
 
             CommonTokenStream tokenStream = new CommonTokenStream(lexer);
             PlSqlParser parser = new PlSqlParser(tokenStream);
+            parser.setInterpreter(new ParserATNSimulator(parser, parser.getATN(),
+                    caches.parserDfa, caches.contextCache));
 
             // --- Stage 1: SLL prediction mode (fast, low memory) ---
             // Remove all error listeners and use BailErrorStrategy so that
@@ -335,12 +380,13 @@ public class PlSqlParserEngine {
                 tree = parser.sql_script();
             }
 
-            // Keep the SLL DFA (decision) cache WARM across parses — it is shared
-            // across PlSqlParser instances, so clearing it every parse forced each
-            // object to rebuild the DFA from the ATN, which is the dominant cost for
-            // the heavy PL/SQL grammar (~0.6s per large proc). Clear only periodically
-            // to bound memory on very long runs while preserving the warmup benefit.
-            if (PARSE_COUNT.incrementAndGet() % 200 == 0) {
+            // Keep this thread's SLL DFA (decision) cache WARM across parses — clearing it every
+            // parse forced each object to rebuild the DFA from the ATN, which is the dominant cost
+            // for the heavy PL/SQL grammar (~0.6s per large proc). Clear only periodically to bound
+            // per-thread memory on very long runs while preserving the warmup benefit. The counter
+            // is per-thread (the caches are too), so each thread bounds its OWN cache; no shared
+            // state, no lock.
+            if (++caches.parses % 200 == 0) {
                 parser.getInterpreter().clearDFA();
             }
 

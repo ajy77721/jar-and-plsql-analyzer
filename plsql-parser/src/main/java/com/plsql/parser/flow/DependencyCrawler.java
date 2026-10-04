@@ -157,11 +157,22 @@ public class DependencyCrawler {
     private int closureLevelsServed = 0;
     private int fallbackLevelsServed = 0;
 
-    // A4: parse happens while the next fetch is in flight. Parsing runs on the wave's pool threads,
-    // so all parse entry points take this lock — the generated ANTLR parsers share a static DFA
-    // cache that is cleared periodically, and concurrent parse + clear would race. Holding the lock
-    // still overlaps fetch (network) with parse (CPU) across pool threads.
-    private final Object parseLock = new Object();
+    // A4 (parallel): parse happens while the next fetch is in flight, and the ANTLR PL/SQL parse
+    // now runs CONCURRENTLY on the wave's pool threads — no global parse lock. That is safe because
+    // PlSqlParserEngine gives every thread its own ANTLR DFA/context caches (see AntlrCaches): the
+    // generated parser's shared static DFA was the only race, and it is no longer touched. The
+    // non-Oracle dialect engines (MySQL/SQL Server/DB2/Postgres) still share their own static DFA
+    // caches, so those parses keep a narrow lock — they are outside this lane and not the measured
+    // bottleneck. Holding it does not affect Oracle parallelism.
+    private final Object dialectParseLock = new Object();
+
+    // Observability for the parallel parse: how many parses are in flight and the high-water mark
+    // reached, logged with the phase timing so the parallelism is visible in the crawl log.
+    private final AtomicLong parsesStarted = new AtomicLong();
+    private final java.util.concurrent.atomic.AtomicInteger activeParses =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger maxConcurrentParses =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     // --- Top-level 3-phase timing (parse / discover / save) for the whole crawl() run ---
     // "parse"    = ANTLR/dialect grammar parse of already-fetched source text (CPU-bound, local).
@@ -311,6 +322,9 @@ public class DependencyCrawler {
         parseNanos.set(0);
         discoverNanos.set(0);
         saveNanos.set(0);
+        parsesStarted.set(0);
+        activeParses.set(0);
+        maxConcurrentParses.set(0);
         List<String> errors = new ArrayList<>();
         Map<String, SchemaTableInfo> tableInfoMap = new LinkedHashMap<>();
         List<FlowEdge> edgeBatch = new ArrayList<>();
@@ -1335,6 +1349,10 @@ public class DependencyCrawler {
         long saveMs = saveNanos.get() / 1_000_000;
         log.info("[timing] {}: parse={}ms discover={}ms save={}ms total={}ms",
                 entryName, parseMs, discoverMs, saveMs, totalMs);
+        // Parse-parallelism observability: parses done, the pool width, and the high-water mark of
+        // concurrent parses (1 = fully serial; >1 proves the parallel parse actually overlapped).
+        log.info("[parse] {}: parses={} pool={} maxConcurrent={}",
+                entryName, parsesStarted.get(), sourceParallelism, maxConcurrentParses.get());
         log.info("[crawl] {}: closure={} levels={} fallbackLevels={}",
                 entryName, closureNames != null ? closureNames.size() : 0,
                 closureLevelsServed, fallbackLevelsServed);
@@ -1947,14 +1965,11 @@ public class DependencyCrawler {
         }
 
         // Parse — use the dialect-specific parser for MySQL/SQL Server, ANTLR PL/SQL for Oracle.
-        // The parseLock serializes this with the closure wave's pipelined parses (A4): the ANTLR
-        // parsers share a static DFA cache, so parse + periodic clearDFA must not run concurrently.
+        // Oracle parses run lock-free in parallel (per-thread ANTLR caches in the engine); the
+        // dialect engines keep a narrow lock inside parseSourceForDialect.
         long t0 = System.currentTimeMillis();
         long tParse0 = System.nanoTime();
-        ParseResult result;
-        synchronized (parseLock) {
-            result = parseSourceForDialect(source, objectName);
-        }
+        ParseResult result = parseWithMetrics(source, objectName);
         String dialect = downloader.getConnManager() == null ? "ANTLR"
                 : downloader.getConnManager().isMySQL() ? "MySQL"
                 : downloader.getConnManager().isSqlServer() ? "SQL Server"
@@ -2165,9 +2180,17 @@ public class DependencyCrawler {
         } catch (Exception e) {
             log.info("[Crawler] bulk source pull skipped: " + e.getMessage());
         }
-        for (Map.Entry<String, String> e : bulk.entrySet()) {
-            // A4: parse immediately; do not wait for the rest of the wave.
-            pipelineParse(e.getKey(), e.getValue(), true);
+        // A4 (parallel): parse the bulk-pulled sources CONCURRENTLY on the wave's bounded pool.
+        // Oracle parsing is lock-free (per-thread ANTLR caches), so this is the wave's CPU-bound
+        // parse running sourceParallelism-wide instead of one-at-a-time.
+        if (!bulk.isEmpty()) {
+            List<Runnable> parseTasks = new ArrayList<>(bulk.size());
+            for (Map.Entry<String, String> e : bulk.entrySet()) {
+                final String n = e.getKey();
+                final String src = e.getValue();
+                parseTasks.add(() -> pipelineParse(n, src, true));
+            }
+            fanOut(parseTasks, sourceParallelism);
         }
 
         // Per-object fan-out for the remainder (and all non-Oracle dialects). The task fetches and
@@ -2248,9 +2271,7 @@ public class DependencyCrawler {
         }
         ParseResult result;
         try {
-            synchronized (parseLock) {
-                result = parseSourceForDialect(source, name);
-            }
+            result = parseWithMetrics(source, name);
         } catch (Exception e) {
             return;
         }
@@ -2259,16 +2280,47 @@ public class DependencyCrawler {
         if (packageResult) parseCache.putIfAbsent(name.toUpperCase(), result);
     }
 
-    /** Parse {@code source} with the dialect-appropriate parser (shared by BFS and the wave). */
+    /**
+     * Parse {@code source}, timing it and recording the in-flight / high-water parse concurrency so
+     * the parallel parse is observable. Safe to call from many threads: Oracle is lock-free and the
+     * dialect path locks internally.
+     */
+    private ParseResult parseWithMetrics(String source, String objectName) {
+        parsesStarted.incrementAndGet();
+        int now = activeParses.incrementAndGet();
+        maxConcurrentParses.accumulateAndGet(now, Math::max);
+        try {
+            return parseSourceForDialect(source, objectName);
+        } finally {
+            activeParses.decrementAndGet();
+        }
+    }
+
+    /**
+     * Parse {@code source} with the dialect-appropriate parser (shared by BFS and the wave).
+     *
+     * <p>Oracle (ANTLR PL/SQL) is lock-free: {@link PlSqlParserEngine} hands every thread its own
+     * DFA/context caches, so concurrent parses share no mutable state. The four non-Oracle dialect
+     * engines still use their generated static DFA caches, so they keep a narrow lock here (their
+     * modules are outside this change); this serializes dialect parses only, never Oracle ones.
+     */
     private ParseResult parseSourceForDialect(String source, String objectName) {
         if (downloader.getConnManager() != null && downloader.getConnManager().isMySQL()) {
-            return new MySqlProcedureParser().parse(source, objectName, downloader.getConnManager().getMySqlSchema());
+            synchronized (dialectParseLock) {
+                return new MySqlProcedureParser().parse(source, objectName, downloader.getConnManager().getMySqlSchema());
+            }
         } else if (downloader.getConnManager() != null && downloader.getConnManager().isSqlServer()) {
-            return new SqlServerProcedureParser().parse(source, objectName, downloader.getConnManager().getSqlServerSchema());
+            synchronized (dialectParseLock) {
+                return new SqlServerProcedureParser().parse(source, objectName, downloader.getConnManager().getSqlServerSchema());
+            }
         } else if (downloader.getConnManager() != null && downloader.getConnManager().isDB2()) {
-            return new Db2ProcedureParser().parse(source, objectName, downloader.getConnManager().getDb2Schema());
+            synchronized (dialectParseLock) {
+                return new Db2ProcedureParser().parse(source, objectName, downloader.getConnManager().getDb2Schema());
+            }
         } else if (downloader.getConnManager() != null && downloader.getConnManager().isPostgres()) {
-            return new PostgresProcedureParser().parse(source, objectName, downloader.getConnManager().getPostgresSchema());
+            synchronized (dialectParseLock) {
+                return new PostgresProcedureParser().parse(source, objectName, downloader.getConnManager().getPostgresSchema());
+            }
         }
         return engine.parseContent(source, objectName + ".sql");
     }
