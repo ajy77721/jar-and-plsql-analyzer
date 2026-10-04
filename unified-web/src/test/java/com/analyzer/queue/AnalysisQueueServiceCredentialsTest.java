@@ -50,7 +50,8 @@ class AnalysisQueueServiceCredentialsTest {
                 mock(PurposeSummaryExecutor.class),
                 mock(SsoStoreSwapper.class),
                 resolver,
-                mock(ConnectionGuard.class));
+                mock(ConnectionGuard.class),
+                mock(ProgressEstimator.class));
     }
 
     @Test
@@ -102,7 +103,7 @@ class AnalysisQueueServiceCredentialsTest {
                 mock(FastAnalysisExecutor.class), mock(ParserAnalysisExecutor.class),
                 mock(ParserValidationExecutor.class), mock(ClaudeJobExecutor.class),
                 mock(JarExportBundleExecutor.class), mock(PurposeSummaryExecutor.class),
-                swapper, resolver, mock(ConnectionGuard.class));
+                swapper, resolver, mock(ConnectionGuard.class), mock(ProgressEstimator.class));
 
         QueueJob job = service.submit(QueueJob.Type.JAR_UPLOAD, "stores", Map.of());
         assertSame(stores, job.capturedStores);

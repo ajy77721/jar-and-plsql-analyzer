@@ -5,6 +5,7 @@ import com.analyzer.storage.sso.CapturedStores;
 
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class QueueJob {
 
@@ -49,6 +50,36 @@ public class QueueJob {
     public volatile Long totalMs;
     public volatile Thread runThread;
     public volatile Map<String, Object> followUpJob;
+
+    // ── The accurate progress engine ─────────────────────────────────────────
+    //
+    // Every stage of the job is first-class (see JobStage): the hidden background work — sidecar
+    // warm-up, estate facets, entity ingest, decompile — is a stage like any other, so the job only
+    // completes when all of them do. progressPercent/etaMs/stepNumber are derived from the stage
+    // list by ProgressMath, weighted by calibrated stage shares and scaled by content size.
+
+    /** The job's stages, in model order. Empty for job types the engine does not model. */
+    public final List<JobStage> stages = new CopyOnWriteArrayList<>();
+    /** Calibration dialect ("plsql"/"jar") once ProgressEstimator has prepared the job. */
+    public volatile String progressDialect;
+    /** Calibrated ms-per-unit costs applied to this job's stages (see ProgressEstimator). */
+    public volatile Map<String, Double> msPerUnit = Map.of();
+    /** Size hint for the whole job before any stage count is known (bytes-derived for JAR/WAR). */
+    public volatile long baselineEstimatedMs;
+    /** Size-scaled estimate of the whole job, recomputed as counts become known. */
+    public volatile long estimatedTotalMs;
+    /** Remaining estimate in ms (estimate x (1 - progress)). */
+    public volatile long etaMs;
+    /** The id of the currently running stage, or null. */
+    public volatile String currentStage;
+    /** True once this job's timing has been folded into the calibration store. */
+    public volatile boolean calibrated;
+    /**
+     * Set when the analysis artifacts are written and browsable, even though background stages
+     * (warm-up / ingest) may still be running. Lets the UI offer early access honestly:
+     * "ready to browse — polishing in background (N stages left)".
+     */
+    public volatile Instant readyToBrowseAt;
 
     /**
      * The submitter's per-user SSO snapshot, captured on the request thread at submit time so the
@@ -115,6 +146,17 @@ public class QueueJob {
         m.put("discoverMs", discoverMs);
         m.put("saveMs", saveMs);
         m.put("totalMs", totalMs);
+        // The accurate progress engine: the full stage list with per-stage progress/ETA, plus the
+        // job-level estimate and the "browsable before complete" hint.
+        m.put("stages", stages.stream().map(JobStage::toMap).toList());
+        m.put("currentStage", currentStage);
+        m.put("estimatedTotalMs", estimatedTotalMs);
+        m.put("etaMs", etaMs);
+        m.put("estimatedRemainingMs", etaMs);
+        m.put("calibrated", calibrated);
+        m.put("readyToBrowse", readyToBrowseAt != null);
+        m.put("readyToBrowseAt", readyToBrowseAt != null ? readyToBrowseAt.toString() : null);
+        m.put("remainingStages", remainingStages());
         m.put("metadata", metadata);
         List<String> recent;
         synchronized (log) {
@@ -135,6 +177,9 @@ public class QueueJob {
     public void updateProgress(String message) {
         this.lastMessage = message;
         this.log.add(message);
+        // With the stage engine active, currentStep/stepNumber/progressPercent are derived from the
+        // stage list (ProgressMath) and must not be clobbered by the legacy "[n/m] message" scrape.
+        if (!stages.isEmpty()) return;
         this.currentStep = message;
         if (message.startsWith("[")) {
             int slash = message.indexOf('/');
@@ -149,5 +194,76 @@ public class QueueJob {
                 } catch (NumberFormatException ignored) {}
             }
         }
+    }
+
+    // ── Stage-driven progress ────────────────────────────────────────────────
+
+    /** The stage with this id, or null. */
+    public JobStage stage(String id) {
+        for (JobStage s : stages) if (s.id.equals(id)) return s;
+        return null;
+    }
+
+    /** Begins a stage, optionally with a known unit count (0 = unknown). */
+    public void beginStage(String id, long total) {
+        JobStage s = stage(id);
+        if (s == null) return;
+        s.start(total);
+        ProgressMath.recompute(this);
+    }
+
+    /** Records progress within a stage; the count only moves forward. */
+    public void advanceStage(String id, long done, long total) {
+        JobStage s = stage(id);
+        if (s == null) return;
+        s.advance(done, total);
+        ProgressMath.recompute(this);
+    }
+
+    /** Marks a stage complete (idempotent). */
+    public void completeStage(String id) {
+        JobStage s = stage(id);
+        if (s == null) return;
+        s.complete();
+        ProgressMath.recompute(this);
+    }
+
+    /** Marks a stage deliberately skipped (disabled feature) so it counts as done, not missing. */
+    public void skipStage(String id) {
+        JobStage s = stage(id);
+        if (s == null) return;
+        s.skip();
+        ProgressMath.recompute(this);
+    }
+
+    public void failStage(String id) {
+        JobStage s = stage(id);
+        if (s == null) return;
+        s.fail();
+        ProgressMath.recompute(this);
+    }
+
+    /** Records that the analysis artifacts are written and browsable while background stages run. */
+    public void markReadyToBrowse() {
+        if (readyToBrowseAt == null) readyToBrowseAt = Instant.now();
+    }
+
+    /** True once the artifacts are written and browsable, even if background stages still run. */
+    public boolean readyToBrowse() {
+        return readyToBrowseAt != null;
+    }
+
+    /** Stages not yet in a terminal state. */
+    public long remainingStages() {
+        long n = 0;
+        for (JobStage s : stages) if (!s.terminal()) n++;
+        return n;
+    }
+
+    /** True when every stage is terminal (the job is genuinely, fully complete). */
+    public boolean allStagesComplete() {
+        if (stages.isEmpty()) return true;
+        for (JobStage s : stages) if (!s.terminal()) return false;
+        return true;
     }
 }

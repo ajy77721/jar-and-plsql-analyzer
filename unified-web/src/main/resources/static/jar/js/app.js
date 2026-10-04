@@ -436,8 +436,9 @@ JA.app = {
                                 }
                                 notFoundCount = 0;
                                 if (d.status === 'RUNNING') {
-                                    this._addProgressLine('step', d.currentStep || '');
-                                    if (d.progressPercent > 0) this._updateStatusButton('pending', d.progressPercent + '%');
+                                    const eta = PA.progressStages ? PA.progressStages.etaText(d.etaMs) : '';
+                                    this._addProgressLine('step', (d.currentStep || '') + (eta ? ' · ' + eta : ''));
+                                    if (d.progressPercent > 0) this._updateStatusButton('pending', d.progressPercent + '%' + (eta ? ' · ' + eta : ''));
                                 } else if (d.status === 'COMPLETE') {
                                     this._addProgressLine('complete', 'Analysis complete!');
                                     finish();
@@ -464,8 +465,9 @@ JA.app = {
                                     this._addProgressLine('step', 'Processing started...');
                                     this._updateStatusButton('pending', 'Processing...');
                                 } else if (e.type === 'job-progress') {
-                                    this._addProgressLine('step', job.currentStep || '');
-                                    if (job.progressPercent > 0) this._updateStatusButton('pending', job.progressPercent + '% — ' + (job.currentStep || ''));
+                                    const eta = PA.progressStages ? PA.progressStages.etaText(job.etaMs) : '';
+                                    this._addProgressLine('step', (job.currentStep || '') + (eta ? ' · ' + eta : ''));
+                                    if (job.progressPercent > 0) this._updateStatusButton('pending', job.progressPercent + '% — ' + (job.currentStep || '') + (eta ? ' · ' + eta : ''));
                                 } else if (e.type === 'job-complete') {
                                     this._addProgressLine('complete', 'Analysis complete!');
                                     finish();

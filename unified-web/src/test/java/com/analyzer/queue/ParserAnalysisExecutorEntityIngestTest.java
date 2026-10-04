@@ -43,7 +43,8 @@ class ParserAnalysisExecutorEntityIngestTest {
         when(ingest.enabled()).thenReturn(true);
 
         ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest,
-                mock(com.plsqlanalyzer.web.parser.service.SidecarWarmUpService.class));
+                mock(com.plsqlanalyzer.web.parser.service.SidecarWarmUpService.class),
+                new com.analyzer.storage.InMemoryArtifactStore());
         QueueJob job = job();
         exec.execute(job, (j, event) -> {});
 
@@ -62,7 +63,8 @@ class ParserAnalysisExecutorEntityIngestTest {
         when(ingest.enabled()).thenReturn(false);
 
         ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest,
-                mock(com.plsqlanalyzer.web.parser.service.SidecarWarmUpService.class));
+                mock(com.plsqlanalyzer.web.parser.service.SidecarWarmUpService.class),
+                new com.analyzer.storage.InMemoryArtifactStore());
         exec.execute(job(), (j, event) -> {});
 
         verify(ingest, never()).afterPlsqlAnalyze(any(), any(), any(), any(), any());
@@ -92,7 +94,8 @@ class ParserAnalysisExecutorEntityIngestTest {
         }).when(ingest).afterPlsqlAnalyze(any(), any(), any(), any(), any());
 
         ParserAnalysisExecutor exec = new ParserAnalysisExecutor(analysisService, ingest,
-                mock(com.plsqlanalyzer.web.parser.service.SidecarWarmUpService.class));
+                mock(com.plsqlanalyzer.web.parser.service.SidecarWarmUpService.class),
+                new com.analyzer.storage.InMemoryArtifactStore());
         QueueJob job = job();
         try {
             exec.execute(job, (j, event) -> {});

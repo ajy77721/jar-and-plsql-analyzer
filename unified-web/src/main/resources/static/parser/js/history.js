@@ -410,7 +410,11 @@ PA._waitForJob = function(jobId, prog, progText, progFill, label) {
             if (done) return;
             done = true;
             if (es) { try { es.close(); } catch(e){} es = null; }
-            if (prog) prog.style.display = 'none';
+            if (prog) {
+                var liveEl = prog.querySelector ? prog.querySelector('.pa-stages-live') : null;
+                if (liveEl) liveEl.innerHTML = '';
+                prog.style.display = 'none';
+            }
             if (PA.jobTracker) PA.jobTracker.remove(jobId);
             if (failed) {
                 // Show whatever real reason the server gave (job.error) rather than just the
@@ -430,6 +434,13 @@ PA._waitForJob = function(jobId, prog, progText, progFill, label) {
             resolve();
         }
 
+        function renderStages(job) {
+            if (!prog || !PA.progressStages) return;
+            var el = prog.querySelector('.pa-stages-live');
+            if (!el) { el = document.createElement('div'); el.className = 'pa-stages-live'; prog.appendChild(el); }
+            el.innerHTML = PA.progressStages.render(job, { compact: false });
+        }
+
         function poll() {
             fetch('/api/queue/' + encodeURIComponent(jobId))
                 .then(function(r) { return r.json(); })
@@ -437,8 +448,10 @@ PA._waitForJob = function(jobId, prog, progText, progFill, label) {
                     var status = (job.status || '').toUpperCase();
                     var pct = job.progressPercent || 0;
                     var stepText = job.currentStep || job.lastMessage || 'Running...';
+                    var eta = PA.progressStages ? PA.progressStages.etaText(job.etaMs) : '';
                     if (progFill) progFill.style.width = Math.max(10, pct) + '%';
-                    if (progText) progText.textContent = stepText;
+                    if (progText) progText.textContent = stepText + (eta ? ' · ' + eta : '');
+                    renderStages(job);
                     if (PA.jobTracker) PA.jobTracker.update(jobId, Math.max(10, pct), stepText);
                     if (status === 'COMPLETE') {
                         if (progFill) progFill.style.width = '100%';
@@ -466,8 +479,10 @@ PA._waitForJob = function(jobId, prog, progText, progFill, label) {
                     var status = (data.status || '').toUpperCase();
                     var pct = data.progressPercent || 0;
                     var stepText = data.currentStep || data.lastMessage || 'Running...';
+                    var eta = PA.progressStages ? PA.progressStages.etaText(data.etaMs) : '';
                     if (progFill) progFill.style.width = Math.max(10, pct) + '%';
-                    if (progText) progText.textContent = stepText;
+                    if (progText) progText.textContent = stepText + (eta ? ' · ' + eta : '');
+                    renderStages(data);
                     if (PA.jobTracker) PA.jobTracker.update(jobId, Math.max(10, pct), stepText);
                     if (status === 'COMPLETE') {
                         if (progFill) progFill.style.width = '100%';

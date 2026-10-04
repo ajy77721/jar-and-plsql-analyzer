@@ -57,6 +57,9 @@ public class AnalysisQueueService {
     /** Fails a submit fast when the caller is logged in but has not connected a bucket. */
     private final ConnectionGuard connectionGuard;
 
+    /** Builds each job's calibrated stage model and learns from its timings when it finishes. */
+    private final ProgressEstimator progressEstimator;
+
     public AnalysisQueueService(JarAnalysisExecutor jarExecutor,
                                  JarTargetedAnalysisExecutor jarTargetedExecutor,
                                  WarAnalysisExecutor warExecutor,
@@ -69,7 +72,8 @@ public class AnalysisQueueService {
                                  PurposeSummaryExecutor purposeSummaryExecutor,
                                  SsoStoreSwapper ssoStoreSwapper,
                                  SsoCredentialsResolver ssoCredentialsResolver,
-                                 ConnectionGuard connectionGuard) {
+                                 ConnectionGuard connectionGuard,
+                                 ProgressEstimator progressEstimator) {
         this.jarExecutor = jarExecutor;
         this.jarTargetedExecutor = jarTargetedExecutor;
         this.warExecutor = warExecutor;
@@ -83,6 +87,7 @@ public class AnalysisQueueService {
         this.ssoStoreSwapper = ssoStoreSwapper;
         this.ssoCredentialsResolver = ssoCredentialsResolver;
         this.connectionGuard = connectionGuard;
+        this.progressEstimator = progressEstimator;
     }
 
     /**
@@ -354,6 +359,11 @@ public class AnalysisQueueService {
             job.currentStep = "Starting...";
         }
 
+        // Build the calibrated stage model BEFORE the executor is dispatched, so the stage list and
+        // the size-scaled estimate are visible from the first progress event — including the
+        // background stages (warm-up, ingest) that used to be invisible.
+        progressEstimator.prepare(job);
+
         log.info("[QUEUE] Starting job: {} — {}", job.id, job.displayName);
         broadcastUpdate(job, "job-started");
 
@@ -386,6 +396,11 @@ public class AnalysisQueueService {
                     }
                 }
                 if (fJob.status == QueueJob.Status.RUNNING) {
+                    // The executor returns only after every stage — including the background ones
+                    // (sidecar warm-up, estate facets, entity ingest) — has run, so completing here
+                    // is a TRUE completion. finish() closes any stage left open and folds the run's
+                    // timings into the calibration store for the next run's estimate.
+                    progressEstimator.finish(fJob);
                     fJob.status = QueueJob.Status.COMPLETE;
                     fJob.completedAt = Instant.now();
                     broadcastUpdate(fJob, "job-complete");
@@ -399,6 +414,7 @@ public class AnalysisQueueService {
                 if (fJob.status == QueueJob.Status.CANCELLED) {
                     // completedAt and broadcast already handled by cancel()
                 } else {
+                    progressEstimator.fail(fJob);
                     fJob.status = QueueJob.Status.FAILED;
                     // OOM and friends usually carry a null message; fall back to the type name
                     // so the UI shows "OutOfMemoryError" rather than an empty error field.

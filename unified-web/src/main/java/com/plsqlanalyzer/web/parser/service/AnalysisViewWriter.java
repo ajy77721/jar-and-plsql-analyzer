@@ -113,6 +113,19 @@ public class AnalysisViewWriter {
      * @return the number of the {@link #VIEW_COUNT} facets whose sidecar was written
      */
     public int writeAll(String name, boolean verbose) {
+        return writeAll(name, verbose, null);
+    }
+
+    /**
+     * As {@link #writeAll(String, boolean)}, additionally reporting each facet as it lands.
+     *
+     * <p>{@code onFacet} is called with the running count of facets attempted so far (1..{@value
+     * #VIEW_COUNT}) after each facet task returns. The progress engine passes a callback here so the
+     * queue's "Warm up facets" stage shows a live N/{@value #VIEW_COUNT} instead of jumping from 0
+     * to 14. The callback runs on the calling thread (the futures are drained there), so it needs no
+     * synchronisation. Null means "no reporting" and is the default for every other caller.
+     */
+    public int writeAll(String name, boolean verbose, java.util.function.IntConsumer onFacet) {
         if (name == null || name.isBlank()) return 0;
         long startNanos = System.nanoTime();
 
@@ -128,7 +141,7 @@ public class AnalysisViewWriter {
             log.debug("view precompute {}: node-scan pass could not be opened: {}", name, t.toString());
         }
         try {
-            int written = computeFacets(name, verbose);
+            int written = computeFacets(name, verbose, onFacet);
             log.debug("view precompute {} wrote {}/{} facets in {} ms", name, written, VIEW_COUNT,
                     (System.nanoTime() - startNanos) / 1_000_000L);
             return written;
@@ -152,7 +165,8 @@ public class AnalysisViewWriter {
      * shared default principal. This is the same hand-off {@code ShallowTree.parallelMap} performs
      * for its listing fan-out.
      */
-    private int computeFacets(String name, boolean verbose) {
+    private int computeFacets(String name, boolean verbose,
+                              java.util.function.IntConsumer onFacet) {
         CapturedSsoContext sso = CapturedSsoContext.capture(null);
         RequestScopedArtifactStore.Scope scope = storeScope(staticReader.store());
 
@@ -195,11 +209,15 @@ public class AnalysisViewWriter {
             }));
         }
         int written = 0;
+        int attempted = 0;
         for (Future<Integer> f : futures) {
             try {
                 written += f.get();
             } catch (Exception ignored) {
                 // Each task contains its own failures; a future only fails on interruption.
+            } finally {
+                attempted++;
+                if (onFacet != null) onFacet.accept(attempted);
             }
         }
         return written;

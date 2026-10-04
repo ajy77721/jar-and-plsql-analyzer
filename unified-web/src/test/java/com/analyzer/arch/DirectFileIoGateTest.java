@@ -100,6 +100,12 @@ class DirectFileIoGateTest {
         ALLOWED.put("plsql-config/TlsKeystoreConverter", 7);
 
         // ── Logging and traversal guards — local operational concerns, not artifacts.
+        // The progress-engine calibration store: one small JSON per dialect (observed ms-per-unit
+        // costs and stage shares — durations and counts only, no secrets, no analysis artifact).
+        // It MUST stay local, not go through ArtifactStore: it is pod-global runtime state read at
+        // job-submit time (before the job's per-user routed store is installed), it has to work when
+        // a store is unreachable, and routing it would wrongly partition the calibration per user.
+        ALLOWED.put("unified-web/ProgressCalibrationStore", 6);
         ALLOWED.put("unified-web/LogController", 10);
         ALLOWED.put("unified-web/SourceController", 4);
         // Admin audit trail (who logged in / connected / was denied) — same reasoning as the log

@@ -374,9 +374,25 @@ public class SidecarWarmUpService {
      * @return true when the analysis already had, or now has, a complete sidecar set
      */
     public boolean warmOne(String name) {
+        return warmOne(name, null);
+    }
+
+    /**
+     * As {@link #warmOne(String)}, additionally reporting each of the {@value
+     * AnalysisViewWriter#VIEW_COUNT} facets as it lands.
+     *
+     * <p>The progress engine passes a callback here so the queue's "Warm up facets" stage shows a
+     * live N/{@value AnalysisViewWriter#VIEW_COUNT} and a real per-facet ETA, rather than the
+     * warm-up being invisible background work. Null means no reporting. The callback runs on the
+     * caller's thread and never throws into the warm-up path.
+     */
+    public boolean warmOne(String name, java.util.function.IntConsumer onFacet) {
         if (name == null || name.isBlank()) return false;
-        if (views.hasCompleteViewSet(name)) return true;
-        return warmByName(name) >= 0;
+        if (views.hasCompleteViewSet(name)) {
+            if (onFacet != null) onFacet.accept(AnalysisViewWriter.VIEW_COUNT);
+            return true;
+        }
+        return warmByName(name, onFacet) >= 0;
     }
 
     /**
@@ -385,6 +401,10 @@ public class SidecarWarmUpService {
      * therefore retried next sweep).
      */
     private int warmByName(String name) {
+        return warmByName(name, null);
+    }
+
+    private int warmByName(String name, java.util.function.IntConsumer onFacet) {
         long startNanos = System.nanoTime();
         try {
             // The header is the completeness marker; write it only when missing (a fresh analysis
@@ -404,7 +424,7 @@ public class SidecarWarmUpService {
                 header = analysisService.writeHeaderSidecar(name, false);
                 headerNew = header;
             }
-            int written = writer.writeAll(name, false);
+            int written = writer.writeAll(name, false, onFacet);
             long ms = (System.nanoTime() - startNanos) / 1_000_000L;
             if (!header || written != AnalysisViewWriter.VIEW_COUNT) {
                 // One DEBUG line per analysis: the sweep's own INFO line reports the totals.

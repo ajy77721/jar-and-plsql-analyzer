@@ -139,6 +139,7 @@ public class JarAnalysisExecutor {
         long parseNanos = 0L, discoverNanos = 0L, saveNanos = 0L;
 
         try {
+            job.beginStage("parse-classes", 0);
             progress(job, broadcast, "[1/5] Parsing JAR bytecode...");
             long t0 = System.nanoTime();
             JarParserService.ParseResult parseResult = parserService.parseJarToFile(tempJar.toFile(), basePackage, jarName);
@@ -155,8 +156,13 @@ public class JarAnalysisExecutor {
             }
             classesFile = repositoryStereotypeResolver.resolveTransitiveRepositoryStereotypes(classesFile);
             parseNanos += System.nanoTime() - t0;
+            // The class count is known now: record it so this stage's size-scaled estimate and every
+            // subsequent stage's estimate reflect the real content, then complete the stage.
+            job.advanceStage("parse-classes", parseResult.totalClasses(), parseResult.totalClasses());
+            job.completeStage("parse-classes");
             checkCancelled(job);
 
+            job.beginStage("config-extract", 0);
             progress(job, broadcast, "[2/5] Extracting config files...");
             Map<String, String> configFiles = parserService.extractConfigFiles(tempJar.toFile());
             java.util.Set<String> mongoCatalog = null;
@@ -170,9 +176,11 @@ public class JarAnalysisExecutor {
                     persistenceService.storeConnections(jarName, connInfo);
                 }
             }
+            job.completeStage("config-extract");
             checkCancelled(job);
 
             long tDiscover0 = System.nanoTime();
+            job.beginStage("call-graph", parseResult.totalClasses());
             progress(job, broadcast, "[3/5] Building call-graph index...");
             callGraphService.buildIndex();
             callGraphService.setJarArtifactMap(parseResult.jarArtifactMap());
@@ -197,6 +205,7 @@ public class JarAnalysisExecutor {
             progress(job, broadcast, "[4/5] Building enriched call trees...");
             List<EndpointInfo> endpoints = callGraphService.buildEndpointsFromIndex();
             discoverNanos += System.nanoTime() - tDiscover0;
+            job.completeStage("call-graph");
             System.gc();
             checkCancelled(job);
 
@@ -245,6 +254,7 @@ public class JarAnalysisExecutor {
             }
             checkCancelled(job);
 
+            job.beginStage("decompile", targetEndpoints.size());
             progress(job, broadcast, "[5.6] Decompiling source code (" + targetEndpoints.size() + " endpoints)...");
             // The decompiler and the JarFile readers further down need a REAL local file —
             // they open a JarFile and seek — so this is ArtifactStore's documented escape
@@ -270,9 +280,11 @@ public class JarAnalysisExecutor {
                 sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedJarKey, storedJar);
                 parseNanos += System.nanoTime() - tDecompile0;
             }
+            job.completeStage("decompile");
             System.gc();
             checkCancelled(job);
 
+            job.beginStage("save-document", 0);
             progress(job, broadcast, "[5.6.1] Writing analysis.json...");
             // Write analysis.json ONCE — after decompilation so sourceCode is included
             long tSaveAnalysis0 = System.nanoTime();
@@ -282,11 +294,20 @@ public class JarAnalysisExecutor {
                     classesFile, endpoints, "STATIC", basePackage
             );
             saveNanos += System.nanoTime() - tSaveAnalysis0;
+            job.completeStage("save-document");
+            // analysis.json is written: the JAR is browsable even while the remaining stages run.
+            job.markReadyToBrowse();
 
+            job.beginStage("endpoint-outputs", targetEndpoints.size());
             progress(job, broadcast, "[5.7] Writing per-endpoint output folders...");
             long tSaveEndpoints0 = System.nanoTime();
             claudeAnalysisService.writeEndpointOutputs(jarName, targetEndpoints);
             saveNanos += System.nanoTime() - tSaveEndpoints0;
+            job.advanceStage("endpoint-outputs", targetEndpoints.size(), targetEndpoints.size());
+            job.completeStage("endpoint-outputs");
+            // Summary + class-tree sidecars are produced by the same write pass.
+            job.beginStage("summary-tree", 0);
+            job.completeStage("summary-tree");
 
             // Resolve Java-to-Java external API links now that this jar's endpoint index exists:
             //  (1) this jar's own outbound HTTP/Feign calls against already-analyzed jars, and
@@ -315,7 +336,9 @@ public class JarAnalysisExecutor {
 
             // Written unconditionally, even when empty: the artifact's presence is how the API
             // distinguishes "analysed, no DB calls" from "analysed before this facet existed".
+            job.beginStage("db-calls", 0);
             persistenceService.storeDbCalls(jarName, dbCalls);
+            job.completeStage("db-calls");
 
             try {
                 Path jarForBundled = storedJar != null ? storedJar : tempJar;
@@ -356,8 +379,12 @@ public class JarAnalysisExecutor {
             // runs after the analysis itself succeeded, best-effort, never fails the job. Inert
             // unless app.storage.entity-ingest.enabled=true.
             if (entityIngest.enabled()) {
+                job.beginStage("ingest", 0);
                 entityIngest.afterJarAnalyze(jarName,
                         String.join("/", persistenceService.getPaths().jarRootKey(jarName).segments()));
+                job.completeStage("ingest");
+            } else {
+                job.skipStage("ingest");
             }
 
             progressService.start(jarName);

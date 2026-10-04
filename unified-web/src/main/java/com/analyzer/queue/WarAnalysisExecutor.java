@@ -113,14 +113,18 @@ public class WarAnalysisExecutor {
         long parseNanos = 0, discoverNanos = 0, saveNanos = 0;
 
         try {
+            job.beginStage("parse-classes", 0);
             progress(job, broadcast, "[1/5] Parsing WAR bytecode...");
             long tParse0 = System.nanoTime();
             JarParserService.ParseResult parseResult = warParserService.parseWarToFile(tempWar.toFile(), basePackage);
             classesFile = parseResult.classesFile();
             classesFile = repositoryStereotypeResolver.resolveTransitiveRepositoryStereotypes(classesFile);
             parseNanos += System.nanoTime() - tParse0;
+            job.advanceStage("parse-classes", parseResult.totalClasses(), parseResult.totalClasses());
+            job.completeStage("parse-classes");
             checkCancelled(job);
 
+            job.beginStage("config-extract", 0);
             progress(job, broadcast, "[2/5] Extracting config files...");
             Map<String, String> configFiles = warParserService.extractConfigFiles(tempWar.toFile());
             java.util.Set<String> mongoCatalog = null;
@@ -134,8 +138,10 @@ public class WarAnalysisExecutor {
                     warPersistenceService.storeConnections(warName, connInfo);
                 }
             }
+            job.completeStage("config-extract");
             checkCancelled(job);
 
+            job.beginStage("call-graph", parseResult.totalClasses());
             progress(job, broadcast, "[3/5] Building call-graph index...");
             long tDiscover0 = System.nanoTime();
             callGraphService.buildIndex();
@@ -154,6 +160,7 @@ public class WarAnalysisExecutor {
             progress(job, broadcast, "[4/5] Building enriched call trees...");
             List<EndpointInfo> endpoints = callGraphService.buildEndpointsFromIndex();
             discoverNanos += System.nanoTime() - tDiscover0;
+            job.completeStage("call-graph");
             System.gc();
             checkCancelled(job);
 
@@ -189,6 +196,7 @@ public class WarAnalysisExecutor {
             }
             checkCancelled(job);
 
+            job.beginStage("decompile", targetEndpoints.size());
             progress(job, broadcast, "[5.6] Decompiling source code (" + targetEndpoints.size() + " endpoints)...");
             // The decompiler and the JarFile readers further down need a REAL local file —
             // they open a JarFile and seek — so this is ArtifactStore's documented escape
@@ -205,18 +213,31 @@ public class WarAnalysisExecutor {
                 // JarFile; the key remains the decompile-cache identity.
                 sourceEnrichmentService.enrichCallTreesWithSource(targetEndpoints, storedWarKey, storedWar);
             }
+            job.completeStage("decompile");
             System.gc();
             checkCancelled(job);
 
+            job.beginStage("save-document", 0);
             progress(job, broadcast, "[5.6.1] Writing analysis.json...");
             warPersistenceService.writeAnalysisStreaming(
                     warName, projectName, fileSize, analyzedAt,
                     parseResult.totalClasses(), endpoints.size(),
                     classesFile, endpoints, "STATIC", basePackage
             );
+            job.completeStage("save-document");
+            job.markReadyToBrowse();
 
+            job.beginStage("endpoint-outputs", targetEndpoints.size());
             progress(job, broadcast, "[5.7] Writing per-endpoint output folders...");
             claudeAnalysisService.writeEndpointOutputs(warName, targetEndpoints);
+            job.advanceStage("endpoint-outputs", targetEndpoints.size(), targetEndpoints.size());
+            job.completeStage("endpoint-outputs");
+            job.beginStage("summary-tree", 0);
+            job.completeStage("summary-tree");
+            // WAR has no DB-call facet and no entity-ingest trigger; both stages are skipped rather
+            // than left pending, so the job's completion is honest.
+            job.skipStage("db-calls");
+            job.skipStage("ingest");
 
             try {
                 Path warForResources = storedWar != null ? storedWar : tempWar;

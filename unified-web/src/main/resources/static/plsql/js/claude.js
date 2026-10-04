@@ -277,16 +277,21 @@ PA.claude = {
             const c = statusColor[j.status] || 'var(--bg-inset)';
             const bg = statusBg[j.status] || 'var(--bg)';
             const pct = j.progressPercent > 0 ? j.progressPercent : 0;
+            const eta = (j.status === 'RUNNING' && PA.progressStages) ? PA.progressStages.etaText(j.etaMs) : '';
+            // The full stage list (with the current-stage indicator, N/M counts and per-stage ETA)
+            // for a running/queued job — the background stages included.
+            const stagesHtml = ((j.status === 'RUNNING' || j.status === 'QUEUED') && PA.progressStages)
+                ? PA.progressStages.render(j, { compact: false }) : '';
             return `<div style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:var(--radius);background:${bg};margin-bottom:4px;flex-wrap:wrap">
   <span style="font-size:.68rem;font-weight:700;color:${c};flex-shrink:0">${j.status}</span>
   <span style="font-size:.75rem;font-weight:600;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${PA.esc(j.displayName||'')}">
     ${label ? label + ': ' : ''}${PA.esc(j.displayName || j.type || '')}
   </span>
   ${j.currentStep ? `<span style="font-size:.67rem;color:var(--text-muted);flex-shrink:0;max-width:220px;overflow:hidden;text-overflow:ellipsis">${PA.esc(j.currentStep)}</span>` : ''}
-  ${j.status==='RUNNING' && pct>0 ? `<span style="font-size:.67rem;color:var(--blue);flex-shrink:0">${pct}%</span>` : ''}
+  ${j.status==='RUNNING' && pct>0 ? `<span style="font-size:.67rem;color:var(--blue);flex-shrink:0">${pct}%${eta ? ' · ' + eta : ''}</span>` : ''}
   ${(j.status==='RUNNING'||j.status==='QUEUED') ? `<button onclick="PA.jobs.cancel('${PA.escJs(j.id)}')" style="font-size:.65rem;padding:1px 5px;border:1px solid ${c};border-radius:var(--radius-sm);background:var(--bg-card);color:${c};cursor:pointer;flex-shrink:0">✕</button>` : ''}
   ${j.status==='COMPLETE' && j.resultName ? `<button onclick="PA.loadAnalysis('${PA.escJs(j.resultName)}')" style="font-size:.65rem;padding:1px 6px;border:1px solid var(--badge-green);border-radius:var(--radius-sm);background:var(--green);color:var(--text-inverse);cursor:pointer;flex-shrink:0">Load ↓</button>` : ''}
-</div>`;
+</div>${stagesHtml}`;
         };
 
         let html = '';

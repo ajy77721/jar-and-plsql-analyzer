@@ -1285,8 +1285,10 @@ PA.startAnalysis = async function() {
                         progText.textContent = 'Processing...';
                         progFill.style.width = '15%';
                     } else if (evt === 'job-progress') {
-                        progText.textContent = job.currentStep || '';
+                        const eta = PA.progressStages ? PA.progressStages.etaText(job.etaMs) : '';
+                        progText.textContent = (job.currentStep || '') + (eta ? ' · ' + eta : '');
                         if (job.progressPercent > 0) progFill.style.width = job.progressPercent + '%';
+                        PA._renderLiveStages(prog, job);
                     } else if (evt === 'job-complete') {
                         if (completionHandled) return;
                         completionHandled = true;
@@ -1340,6 +1342,17 @@ PA.startAnalysis = async function() {
 // ==================== FULL PACKAGE BATCH ANALYSIS ====================
 
 /**
+ * Renders the queue job's first-class stage list (with the current-stage indicator, N/M counts and
+ * per-stage ETA) inside a caller's progress container, creating the holder on first use.
+ */
+PA._renderLiveStages = function(prog, job) {
+    if (!prog || !PA.progressStages || !prog.querySelector) return;
+    let el = prog.querySelector('.pa-stages-live');
+    if (!el) { el = document.createElement('div'); el.className = 'pa-stages-live'; prog.appendChild(el); }
+    el.innerHTML = PA.progressStages.render(job, { compact: false });
+};
+
+/**
  * Poll the job endpoint until it completes, fails, or is cancelled.
  * This is the RELIABLE path — SSE is a nice-to-have for live progress text.
  */
@@ -1364,12 +1377,17 @@ PA._pollForJobCompletion = function(jobId, prog, progText, progFill, isHandled, 
             if (!job) { errorCount++; if (errorCount > 20) { clearInterval(interval); } return; }
             errorCount = 0;
 
-            // Update progress bar from job state
-            if (job.totalSteps > 0) {
-                const pct = Math.round((job.stepNumber / job.totalSteps) * 100);
-                progFill.style.width = pct + '%';
+            // Update progress bar from job state. progressPercent is the calibrated-share weighted
+            // figure from the progress engine; fall back to the legacy step ratio for job types it
+            // does not model.
+            if (job.progressPercent > 0) {
+                progFill.style.width = job.progressPercent + '%';
+            } else if (job.totalSteps > 0) {
+                progFill.style.width = Math.round((job.stepNumber / job.totalSteps) * 100) + '%';
             }
-            if (job.currentStep) progText.textContent = job.currentStep;
+            const liveEta = PA.progressStages ? PA.progressStages.etaText(job.etaMs) : '';
+            if (job.currentStep) progText.textContent = job.currentStep + (liveEta ? ' · ' + liveEta : '');
+            PA._renderLiveStages(prog, job);
 
             if (job.status === 'COMPLETE') {
                 if (isHandled()) { clearInterval(interval); return; }
@@ -3849,16 +3867,18 @@ PA.homeMenu = {
         } else {
             if (current) {
                 const pct = current.progressPercent || 0;
+                const eta = PA.progressStages ? PA.progressStages.etaText(current.etaMs) : '';
                 html += `<div style="padding:8px 10px;background:var(--badge-green-bg);border-radius:var(--radius);margin-bottom:6px;font-size:.8rem">
                     <div style="display:flex;align-items:center;gap:8px">
                         <span style="color:var(--badge-green)">&#9654;</span>
                         <span style="font-weight:600;color:var(--text);flex:1">${PA.esc(current.displayName||current.id)}</span>
-                        <span style="color:var(--text-muted);font-size:.72rem">${pct}%</span>
+                        <span style="color:var(--text-muted);font-size:.72rem">${pct}%${eta ? ' · ' + eta : ''}</span>
                     </div>
                     <div style="margin-top:5px;height:4px;background:var(--badge-green-bg);border-radius:var(--radius-sm)">
                         <div style="height:4px;background:var(--green);border-radius:var(--radius-sm);width:${pct}%"></div>
                     </div>
                     <div style="margin-top:3px;color:var(--text-muted);font-size:.72rem">${PA.esc(current.currentStep||'')}</div>
+                    ${PA.progressStages ? PA.progressStages.render(current, { compact: false }) : ''}
                 </div>`;
             }
             queued.forEach((j, i) => {
@@ -4065,16 +4085,18 @@ PA.rightTabs = {
         if (running) {
             const pct = running.progressPercent || 0;
             const elapsed = running.elapsedMs ? (running.elapsedMs/1000).toFixed(0) + 's' : '';
+            const eta = PA.progressStages ? PA.progressStages.etaText(running.etaMs) : '';
             html += `<div style="padding:10px 12px;background:var(--badge-green-bg);border:1px solid var(--badge-green-bg);border-radius:var(--radius-md);margin-bottom:8px">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
                     <span style="color:var(--badge-green);font-size:.9rem">&#9654; Running</span>
                     <span style="font-weight:700;color:var(--text);flex:1;font-size:.85rem">${PA.esc(running.displayName||running.id)}</span>
-                    <span style="color:var(--text-muted);font-size:.76rem">${pct}% ${elapsed ? '· ' + elapsed : ''}</span>
+                    <span style="color:var(--text-muted);font-size:.76rem">${pct}% ${eta ? '· ' + eta + ' ' : ''}${elapsed ? '· ' + elapsed : ''}</span>
                 </div>
                 <div style="height:6px;background:var(--badge-green-bg);border-radius:var(--radius-sm);overflow:hidden">
                     <div style="height:6px;background:var(--green);border-radius:var(--radius-sm);width:${pct}%;transition:width .4s"></div>
                 </div>
                 <div style="margin-top:5px;color:var(--text-muted);font-size:.76rem">${PA.esc(running.currentStep||'')}</div>
+                ${PA.progressStages ? PA.progressStages.render(running, { compact: false }) : ''}
             </div>`;
         }
 
