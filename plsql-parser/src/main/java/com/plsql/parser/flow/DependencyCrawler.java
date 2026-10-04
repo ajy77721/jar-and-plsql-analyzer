@@ -732,15 +732,25 @@ public class DependencyCrawler {
 
                 // Package-global DECLARATIONS, captured at parse time and routed to the writer's
                 // dedicated artifact (independent of any PACKAGE node — a member entry point crawls
-                // none). The body parse has the members but not the globals; they live in the spec,
-                // so fall back to parsing the spec once per package (cached). The DB2 module path
-                // already carries them on the parsed object. See ChunkedFlowWriter#recordPackageGlobals.
+                // none). A body can declare private globals while the PUBLIC ones live only in the
+                // spec, so both are merged (spec parsed once per package, cached) rather than
+                // trusting whichever the body happened to carry. The DB2 module path already carries
+                // them on the parsed object. See ChunkedFlowWriter#recordPackageGlobals.
                 if (chunkedWriter != null && nodePackage != null && !nodePackage.isEmpty()) {
-                    List<VariableInfo> pkgDecls =
-                            (targetObj != null && targetObj.getPackageVariables() != null
-                                    && !targetObj.getPackageVariables().isEmpty())
-                                    ? targetObj.getPackageVariables()
-                                    : packageSpecVariables(nodePackage);
+                    List<VariableInfo> pkgDecls = new ArrayList<>();
+                    if (targetObj != null && targetObj.getPackageVariables() != null) {
+                        pkgDecls.addAll(targetObj.getPackageVariables());
+                    }
+                    for (VariableInfo specVar : packageSpecVariables(nodePackage)) {
+                        boolean dup = false;
+                        for (VariableInfo e : pkgDecls) {
+                            if (e.getName() != null && e.getName().equalsIgnoreCase(specVar.getName())) {
+                                dup = true;
+                                break;
+                            }
+                        }
+                        if (!dup) pkgDecls.add(specVar);
+                    }
                     chunkedWriter.recordPackageGlobals(nodePackage, pkgDecls);
                 }
 
