@@ -124,4 +124,34 @@ public class DependencyCrawlerParallelBfsTest {
                         + " edges=" + parallel.getCallGraph().size()
                         + " errors=" + parallel.getErrors());
     }
+
+    @Test
+    @DisplayName("A1 closure-wave path equals level-by-level fallback path")
+    void closureWaveEqualsFallback() {
+        // Reference: no closure (setup's anyString -> empty) -> per-level DB discovery.
+        FlowResult fallback = run(8, "fallback");
+
+        // Closure: the resolver now returns the full reachable set. The wave fetches + pre-parses
+        // every source up front (A2/A4), so the BFS scopes levels 1+ purely in memory (A1).
+        Set<String> closure = new LinkedHashSet<>(
+                List.of("PKG_A", "PKG_B", "PKG_C", "PKG_D", "PKG_E", "PKG_F"));
+        when(schemaResolver.getReachableClosure("PKG_ROOT")).thenReturn(closure);
+        for (Map.Entry<String, String> e : sources.entrySet()) {
+            when(downloader.downloadAny(e.getKey())).thenReturn(e.getValue());
+        }
+        when(downloader.getCachedType(anyString())).thenReturn("PACKAGE BODY");
+        when(downloader.getCachedSource(anyString())).thenAnswer(
+                inv -> sources.get(((String) inv.getArgument(0)).toUpperCase()));
+        when(downloader.fetchSourcesBulk(anyCollection())).thenReturn(Collections.emptyMap());
+
+        FlowResult closureResult = run(8, "closure");
+
+        assertEquals(fallback.getEntryPoint(), closureResult.getEntryPoint());
+        assertEquals(fallback.getTotalObjectsCrawled(), closureResult.getTotalObjectsCrawled(),
+                "closure-wave crawl must reach the same objects as the fallback");
+        assertEquals(fallback.getMaxDepthReached(), closureResult.getMaxDepthReached());
+        assertEquals(edges(fallback), edges(closureResult),
+                "closure-wave call-graph edges must be byte-identical to the fallback");
+        assertFalse(closureResult.getCallGraph().isEmpty(), "fixture should produce edges");
+    }
 }

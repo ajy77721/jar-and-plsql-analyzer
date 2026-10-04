@@ -269,6 +269,14 @@ public class ParserAnalysisController {
                     || "1".equals(forceRefreshRaw.trim())
                     || "on".equalsIgnoreCase(forceRefreshRaw.trim())
                     || "yes".equalsIgnoreCase(forceRefreshRaw.trim()));
+        // Fast re-run: the fresh-default switch. Absent/false => a complete fresh crawl (no
+        // cross-run cache reads, no registry skips). Same truthy spellings as forceRefresh.
+        String fastReRunRaw = body.get("fastReRun");
+        boolean fastReRun = fastReRunRaw != null
+                && ("true".equalsIgnoreCase(fastReRunRaw.trim())
+                    || "1".equals(fastReRunRaw.trim())
+                    || "on".equalsIgnoreCase(fastReRunRaw.trim())
+                    || "yes".equalsIgnoreCase(fastReRunRaw.trim()));
 
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("entryPoint", entryPoint.trim());
@@ -279,6 +287,7 @@ public class ParserAnalysisController {
         if (dbType != null && !dbType.isBlank()) metadata.put("dbType", dbType.trim());
         if (connName != null && !connName.isBlank()) metadata.put("connName", connName.trim());
         if (forceRefresh) metadata.put("forceRefresh", "true");
+        if (fastReRun) metadata.put("fastReRun", "true");
 
         String dbLabel = (dbType != null && !dbType.isBlank() && !"ORACLE".equalsIgnoreCase(dbType))
                 ? "[" + dbType.trim() + "] " : "";

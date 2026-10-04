@@ -306,7 +306,7 @@ PA.home = (function() {
             owner:       '',
             connName:    connName,
             objectType:  '',
-            fastMode:    !!((document.getElementById('homeFast')  || {}).checked),
+            fastReRun:   !!((document.getElementById('homeFastReRun') || {}).checked),
             entryPoint:  (document.getElementById('homeObject')   || {}).value || ''
         };
     }

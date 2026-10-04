@@ -762,13 +762,31 @@ public class AnalysisService {
     }
 
     /**
-     * As the 7-arg overload, plus {@code forceRefresh}: when true the analysis-level idempotency
-     * registry is bypassed so every reachable object is re-fetched/re-analysed even when unchanged.
-     * Wired from the analyze endpoint's {@code forceRefresh} form field.
+     * As the 7-arg overload, plus {@code forceRefresh}. Back-compat overload for callers that do
+     * not set the fresh-default switch; {@code fastReRun} defaults to false (a complete fresh crawl).
      */
     public String runAnalysis(String entryPoint, String owner, String objectType,
                                String project, String environment,
                                String dbType, String connName, boolean forceRefresh) throws Exception {
+        return runAnalysis(entryPoint, owner, objectType, project, environment, dbType, connName,
+                forceRefresh, false);
+    }
+
+    /**
+     * As the 7-arg overload, plus the two crawl-mode switches:
+     * <ul>
+     *   <li>{@code forceRefresh} — bypass the analysis-level idempotency registry even in fast mode
+     *       so every reachable object is re-fetched/re-analysed. Wired from the {@code forceRefresh}
+     *       form field.</li>
+     *   <li>{@code fastReRun} — the fresh-default switch. {@code false} (the default) is a complete
+     *       FRESH crawl: no cross-run cache reads, no registry skips. {@code true} (the
+     *       "Fast re-run (skip unchanged)" checkbox) reuses the persistent caches/registry.</li>
+     * </ul>
+     */
+    public String runAnalysis(String entryPoint, String owner, String objectType,
+                               String project, String environment,
+                               String dbType, String connName, boolean forceRefresh,
+                               boolean fastReRun) throws Exception {
         long analysisStartMs = System.currentTimeMillis(); // full end-to-end timer (crawl + enrichment + write)
 
         // No owner/objectType supplied at all — resolve the real one via the same smart search
@@ -983,6 +1001,8 @@ public class AnalysisService {
         opts.allowEmptyAnalysis = allowEmptyAnalysis;
         // Force-refresh: bypass the idempotency registry for this request.
         opts.forceRefresh = forceRefresh;
+        // Fresh by default: only an explicit fast re-run reads the cross-run caches/registry.
+        opts.fastReRun = fastReRun;
         // W3 DB-impact safety knobs (rate limiter / statement timeout / circuit breaker).
         opts.dbQps = crawlDbQps;
         opts.dbTimeoutSeconds = crawlDbTimeoutSeconds;

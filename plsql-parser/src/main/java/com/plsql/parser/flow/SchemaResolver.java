@@ -936,6 +936,24 @@ public class SchemaResolver {
         return false;
     }
 
+    /**
+     * A1: the FULL reachable-object closure for an entry point, available UP FRONT from the
+     * resolver's Q1 CONNECT BY transitive-dependency query (and the Q4 direct-dependency batch that
+     * fills the in-memory graph). The crawler fetches exactly this set in ONE wave before the BFS
+     * starts, so the BFS can scope in memory. Returns an empty set for a dialect with no closure
+     * data (MySQL / SQL Server / DB2 / Postgres skip Oracle dependency resolution), which is the
+     * crawler's signal to fall back to level-by-level discovery.
+     *
+     * <p>A qualified entry ({@code PKG.PROC}) is reduced to its owning object, matching the BFS's
+     * own package resolution.
+     */
+    public Set<String> getReachableClosure(String entryPoint) {
+        if (entryPoint == null) return Collections.emptySet();
+        String upper = entryPoint.toUpperCase().trim();
+        String obj = upper.contains(".") ? upper.split("\\.", 2)[0] : upper;
+        return getTransitiveDependencies(obj);
+    }
+
     public Set<String> getTransitiveDependencies(String objectName) {
         if (objectName == null) return Collections.emptySet();
         String upper = objectName.toUpperCase().trim();

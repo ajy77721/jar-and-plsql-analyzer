@@ -65,6 +65,18 @@ public class DependencyCrawler {
     private boolean forceRefresh = false;
 
     /**
+     * THE FRESH-DEFAULT SWITCH. When {@code false} (the default) the crawl is 100% fresh: no
+     * cross-run cache reads (persistent source cache, trigger cache, catalog snapshot) and no
+     * registry skips — every reachable object is fetched and parsed anew. When {@code true} (the
+     * user ticked "Fast re-run (skip unchanged)") the existing cache/registry paths are used to
+     * skip unchanged objects. Writes always run in both modes, so a fast run has data to read.
+     *
+     * <p>The two flags are orthogonal: {@code fastReRun} decides whether the caches are CONSULTED
+     * at all; {@code forceRefresh} forces re-analysis even in fast mode.
+     */
+    private boolean fastReRun = false;
+
+    /**
      * When {@code false} (the default), a crawl that produces ZERO nodes is a failure: the writer
      * refuses to persist an empty analysis. This is the guard against the live incident where a
      * dead database (ORA-12541 "no listener") yielded 0 sources and the pipeline happily wrote a
@@ -132,6 +144,24 @@ public class DependencyCrawler {
     private final Set<String> pendingResolveCheck = Collections.synchronizedSet(new HashSet<>());
     // Names already confirmed present (via batch or tryResolveFromDb) — never re-queried.
     private final Set<String> resolvedPresentObjects = Collections.synchronizedSet(new HashSet<>());
+
+    // ── A1 closure-up-front state ─────────────────────────────────────────────────────────────
+    // The full reachable-object closure for the entry point, fetched in ONE wave before the BFS.
+    // When non-null the BFS skips per-level DB discovery for any level whose objects all live in
+    // this set (pure in-memory scoping); a level with an object outside it falls back to the
+    // existing level-by-level discovery. The set is populated only when the closure query returned
+    // a non-empty result (Oracle); for dialects without it the set stays null and every level uses
+    // the fallback path — counted and logged at the end of the crawl.
+    private volatile Set<String> closureNames = null;
+    // Counters proving the fallback is still exercised and measurable.
+    private int closureLevelsServed = 0;
+    private int fallbackLevelsServed = 0;
+
+    // A4: parse happens while the next fetch is in flight. Parsing runs on the wave's pool threads,
+    // so all parse entry points take this lock — the generated ANTLR parsers share a static DFA
+    // cache that is cleared periodically, and concurrent parse + clear would race. Holding the lock
+    // still overlaps fetch (network) with parse (CPU) across pool threads.
+    private final Object parseLock = new Object();
 
     // --- Top-level 3-phase timing (parse / discover / save) for the whole crawl() run ---
     // "parse"    = ANTLR/dialect grammar parse of already-fetched source text (CPU-bound, local).
@@ -203,6 +233,21 @@ public class DependencyCrawler {
         this.forceRefresh = forceRefresh;
     }
 
+    /**
+     * The fresh-default switch. {@code false} (default) = a complete fresh crawl (no cross-run
+     * cache reads, no registry skips); {@code true} = the user chose "Fast re-run", reusing the
+     * persistent source/parse caches and the analysis registry to skip unchanged objects. See
+     * {@link #fastReRun}.
+     */
+    public void setFastReRun(boolean fastReRun) {
+        this.fastReRun = fastReRun;
+    }
+
+    /** True when the fast-rerun (cache-reading) path is active. */
+    public boolean isFastReRun() {
+        return fastReRun;
+    }
+
     public void setParseResultCache(ParseResultCache parseResultCache) {
         this.parseResultCache = parseResultCache;
     }
@@ -248,6 +293,11 @@ public class DependencyCrawler {
         String upperEntry = entryPoint.toUpperCase().trim();
         String entrySchema = null;
 
+        // THE FRESH-DEFAULT GATE: only a fast re-run may read cross-run caches. Writes still run in
+        // both modes (the source/parse caches and the registry are populated for a possible later
+        // fast run), but a default (fresh) crawl never consults them.
+        downloader.setCacheReadEnabled(fastReRun);
+
         // Reset state
         visited.clear();
         dmlRefs.clear();
@@ -255,6 +305,9 @@ public class DependencyCrawler {
         pendingResolveCheck.clear();
         resolvedPresentObjects.clear();
         knownObjectTypes.clear();
+        closureNames = null;
+        closureLevelsServed = 0;
+        fallbackLevelsServed = 0;
         parseNanos.set(0);
         discoverNanos.set(0);
         saveNanos.set(0);
@@ -304,7 +357,13 @@ public class DependencyCrawler {
             subprogramName = upperEntry;
         }
 
-        // Pre-warm transitive dependency cache
+        // ── A1: the closure up front ──────────────────────────────────────────────────────────
+        // Compute the FULL reachable-object closure for the entry point (the resolver's transitive
+        // dependency set, derived from its Q1 CONNECT BY / Q4 direct-dependency queries — already
+        // run at resolver construction). Fetch every source in ONE parallel wave, then let the BFS
+        // scope purely in memory over those local sources. A dialect without the closure query (or
+        // one that returns nothing) leaves the wave empty and the BFS keeps its level-by-level
+        // discovery — counted and logged below.
         String entryObjForDeps = packageName != null ? packageName : subprogramName;
         log.info("[Crawler] Pre-computing transitive dependencies for: " + entryObjForDeps);
         // Never crawl Oracle built-in/system packages (DBMS_*, UTL_*, SYS.*, STANDARD, ...).
@@ -312,11 +371,35 @@ public class DependencyCrawler {
         // needless DB round-trips.  Copy into a fresh mutable set (the resolver may return
         // an immutable view).
         Set<String> entryDeps = new java.util.LinkedHashSet<>();
-        for (String dep : schemaResolver.getTransitiveDependencies(entryObjForDeps)) {
+        for (String dep : schemaResolver.getReachableClosure(entryObjForDeps)) {
             if (!isBuiltInPackage(dep)) entryDeps.add(dep);
         }
         log.info("[Crawler] Found " + entryDeps.size() + " transitive dependencies");
-        prefetchSources(entryDeps);
+
+        // A3: capture the catalog snapshot once (fingerprint-guarded) so the wave and every
+        // subsequent per-level lookup are served from memory rather than the catalog. Fast-rerun
+        // only: a fresh crawl must not read the snapshot (and snapshotMeta() enforces that too).
+        boolean snapshotReady = false;
+        if (fastReRun) {
+            try {
+                snapshotReady = downloader.ensureCatalogSnapshot();
+            } catch (Exception e) {
+                log.info("[Crawler] catalog snapshot skipped: " + e.getMessage());
+            }
+        }
+
+        if (!entryDeps.isEmpty()) {
+            // A2 + A4: bulk-pull the whole wave where the dialect allows, parsing each source as
+            // soon as it is fetched (fetch/parse overlap); per-object parallel fetch otherwise.
+            closureNames = runClosureWave(entryDeps);
+            log.info("[Crawler] Closure wave: {} objects fetched up front (snapshot={})",
+                    closureNames.size(), snapshotReady);
+        } else {
+            // Fallback: no closure (dialect without it / empty result) — existing per-object
+            // prefetch, which the BFS's level-by-level discovery then complements.
+            log.info("[Crawler] No closure available — using level-by-level discovery (fallback)");
+            prefetchSources(entryDeps);
+        }
 
         // Populate object types (TABLE / VIEW / MATERIALIZED_VIEW) from the dialect catalog so
         // referenced views/MVs are tagged (not defaulted to TABLE) in both per-node and aggregate
@@ -354,15 +437,24 @@ public class DependencyCrawler {
                 level.add(item);
                 level.addAll(levelRest);
 
-                // ONE catalog query per level: the union of the pending resolve/missing names and
-                // the level's own objects, returning owner / object_type / LAST_DDL. This replaces
-                // the previous up-to-three ALL_OBJECTS queries (flushPendingResolve +
-                // flushMissingBatch + fetchLevelCatalogMeta) and primes the type map so the
-                // node-cache peek no longer fires blind per-object source probes.
-                Map<String, String[]> levelMeta = prepareLevelCatalog(level);
-                if (!levelMeta.isEmpty()) downloader.primeCatalogMeta(levelMeta);
-                // Parallel source fan-out: every level-N source fetched simultaneously.
-                prefetchLevelSources(level);
+                // A1: when the closure wave already fetched every object on this level, the BFS is
+                // pure in-memory scoping — no catalog query and no source fan-out. A level that
+                // carries an object discovered during parsing (not in the closure) keeps the
+                // existing discovery path for that level, so correctness is never traded for speed.
+                if (closureNames != null && levelCoveredByClosure(level)) {
+                    closureLevelsServed++;
+                } else {
+                    fallbackLevelsServed++;
+                    // ONE catalog query per level: the union of the pending resolve/missing names
+                    // and the level's own objects, returning owner / object_type / LAST_DDL. This
+                    // replaces the previous up-to-three ALL_OBJECTS queries (flushPendingResolve +
+                    // flushMissingBatch + fetchLevelCatalogMeta) and primes the type map so the
+                    // node-cache peek no longer fires blind per-object source probes.
+                    Map<String, String[]> levelMeta = prepareLevelCatalog(level);
+                    if (!levelMeta.isEmpty()) downloader.primeCatalogMeta(levelMeta);
+                    // Parallel source fan-out: every level-N source fetched simultaneously.
+                    prefetchLevelSources(level);
+                }
 
                 for (int i = levelRest.size() - 1; i >= 0; i--) queue.addFirst(levelRest.get(i));
             }
@@ -402,7 +494,7 @@ public class DependencyCrawler {
             // from the node cache with ZERO database fetches and ZERO re-parse. Force-refresh,
             // a missing/corrupt node-cache entry, or a partial previous run all fall through to a
             // normal analysis (fail-safe).
-            if (registry != null && nodeCache != null && !forceRefresh) {
+            if (fastReRun && registry != null && nodeCache != null && !forceRefresh) {
                 String regObj = item.packageName != null ? item.packageName : item.subprogramName;
                 String currentDdl = downloader.getCatalogLastDdl(regObj);
                 AnalysisRegistry.Entry regEntry = registry.entryFor(visitKey);
@@ -484,7 +576,8 @@ public class DependencyCrawler {
                 // Peek at source text (may trigger DB download if not yet cached).
                 // If the same source was fully parsed in a previous run the FlowNode JSON
                 // is restored from disk, its children enqueued, and ANTLR is skipped entirely.
-                if (nodeCache != null) {
+                // Fast-rerun only — a fresh crawl always re-parses.
+                if (fastReRun && nodeCache != null) {
                     // Schema-qualify standalone lookups so same-named objects in different
                     // schemas fetch the correct source (querySourceSqlServer parses "schema.name").
                     // SQL Server only — Oracle's source query matches on the bare name.
@@ -1242,6 +1335,9 @@ public class DependencyCrawler {
         long saveMs = saveNanos.get() / 1_000_000;
         log.info("[timing] {}: parse={}ms discover={}ms save={}ms total={}ms",
                 entryName, parseMs, discoverMs, saveMs, totalMs);
+        log.info("[crawl] {}: closure={} levels={} fallbackLevels={}",
+                entryName, closureNames != null ? closureNames.size() : 0,
+                closureLevelsServed, fallbackLevelsServed);
     }
 
     private static String trigStr(Object o) { return o == null ? null : o.toString(); }
@@ -1839,8 +1935,9 @@ public class DependencyCrawler {
             return null;
         }
 
-        // Disk parse cache — skip ANTLR if same source was parsed in any prior run
-        if (parseResultCache != null) {
+        // Disk parse cache — skip ANTLR if same source was parsed in any prior run.
+        // Fast-rerun only: a fresh crawl re-parses every source (the write below still runs).
+        if (fastReRun && parseResultCache != null) {
             ParseResult diskCached = parseResultCache.get(source);
             if (diskCached != null) {
                 parseCache.put(cacheKey, diskCached);
@@ -1849,30 +1946,22 @@ public class DependencyCrawler {
             }
         }
 
-        // Parse — use the dialect-specific parser for MySQL/SQL Server, ANTLR PL/SQL for Oracle
+        // Parse — use the dialect-specific parser for MySQL/SQL Server, ANTLR PL/SQL for Oracle.
+        // The parseLock serializes this with the closure wave's pipelined parses (A4): the ANTLR
+        // parsers share a static DFA cache, so parse + periodic clearDFA must not run concurrently.
         long t0 = System.currentTimeMillis();
         long tParse0 = System.nanoTime();
         ParseResult result;
-        if (downloader.getConnManager() != null && downloader.getConnManager().isMySQL()) {
-            String mySqlSchema = downloader.getConnManager().getMySqlSchema();
-            result = new MySqlProcedureParser().parse(source, objectName, mySqlSchema);
-            log.info("[Crawler] MySQL parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
-        } else if (downloader.getConnManager() != null && downloader.getConnManager().isSqlServer()) {
-            String sqlServerSchema = downloader.getConnManager().getSqlServerSchema();
-            result = new SqlServerProcedureParser().parse(source, objectName, sqlServerSchema);
-            log.info("[Crawler] SQL Server parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
-        } else if (downloader.getConnManager() != null && downloader.getConnManager().isDB2()) {
-            String db2Schema = downloader.getConnManager().getDb2Schema();
-            result = new Db2ProcedureParser().parse(source, objectName, db2Schema);
-            log.info("[Crawler] DB2 parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
-        } else if (downloader.getConnManager() != null && downloader.getConnManager().isPostgres()) {
-            String pgSchema = downloader.getConnManager().getPostgresSchema();
-            result = new PostgresProcedureParser().parse(source, objectName, pgSchema);
-            log.info("[Crawler] Postgres parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
-        } else {
-            result = engine.parseContent(source, objectName + ".sql");
-            log.info("[Crawler] ANTLR parsed {} in {}ms", objectName, System.currentTimeMillis() - t0);
+        synchronized (parseLock) {
+            result = parseSourceForDialect(source, objectName);
         }
+        String dialect = downloader.getConnManager() == null ? "ANTLR"
+                : downloader.getConnManager().isMySQL() ? "MySQL"
+                : downloader.getConnManager().isSqlServer() ? "SQL Server"
+                : downloader.getConnManager().isDB2() ? "DB2"
+                : downloader.getConnManager().isPostgres() ? "Postgres"
+                : "ANTLR";
+        log.info("[Crawler] {} parsed {} in {}ms", dialect, objectName, System.currentTimeMillis() - t0);
         parseNanos.addAndGet(System.nanoTime() - tParse0);
         parseCache.put(cacheKey, result);
 
@@ -2028,6 +2117,162 @@ public class DependencyCrawler {
         }
     }
 
+    // ── A1 closure-up-front wave ────────────────────────────────────────────────────────────────
+
+    /**
+     * True when every object on {@code level} is already available locally from the closure wave —
+     * so the BFS can scope the level purely in memory (no catalog query, no source fan-out). A
+     * built-in package, a confirmed-missing name and an already-parsed object all count as covered
+     * (none of them needs a fetch); anything else must be in the closure set.
+     */
+    private boolean levelCoveredByClosure(Collection<BfsItem> level) {
+        Set<String> closure = closureNames;
+        if (closure == null) return false;
+        for (BfsItem item : level) {
+            String name = item.packageName != null ? item.packageName : item.subprogramName;
+            if (name == null || name.isBlank()) continue;
+            String upper = name.toUpperCase();
+            if (isBuiltInPackage(upper)) continue;
+            if (knownMissingObjects.contains(upper)) continue;
+            if (parseCache.containsKey(upper)) continue;
+            if (closure.contains(upper)) continue;
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Fetch the whole reachable closure in ONE wave. Oracle pulls the sources in bulk (A2) — a
+     * handful of multi-row ALL_SOURCE queries instead of N round trips — and the per-object
+     * fallback covers any name the bulk pull could not resolve (and every non-Oracle dialect).
+     * Each source is parsed as soon as it is fetched (A4), overlapping the CPU parse with the next
+     * network fetch, and the parsed result is stored so the BFS pays no ANTLR cost.
+     *
+     * @return the upper-cased closure names the wave attempted (never null).
+     */
+    private Set<String> runClosureWave(Set<String> depNames) {
+        Set<String> closure = new java.util.LinkedHashSet<>();
+        for (String n : depNames) {
+            if (n != null && !n.isBlank()) closure.add(n.toUpperCase());
+        }
+        if (closure.isEmpty()) return closure;
+
+        // A2: one bulk pull for everything the dialect can batch.
+        Map<String, String> bulk = Collections.emptyMap();
+        try {
+            Map<String, String> fetched = downloader.fetchSourcesBulk(closure);
+            if (fetched != null) bulk = fetched;
+        } catch (Exception e) {
+            log.info("[Crawler] bulk source pull skipped: " + e.getMessage());
+        }
+        for (Map.Entry<String, String> e : bulk.entrySet()) {
+            // A4: parse immediately; do not wait for the rest of the wave.
+            pipelineParse(e.getKey(), e.getValue(), true);
+        }
+
+        // Per-object fan-out for the remainder (and all non-Oracle dialects). The task fetches and
+        // then parses in the same worker, so worker B keeps fetching while worker A parses.
+        Set<String> remaining = new java.util.LinkedHashSet<>(closure);
+        remaining.removeAll(bulk.keySet());
+        remaining.removeIf(n -> parseCache.containsKey(n) || knownMissingObjects.contains(n));
+        if (!remaining.isEmpty()) {
+            List<Runnable> tasks = new ArrayList<>(remaining.size());
+            for (String n : remaining) {
+                if (isBuiltInPackage(n)) continue;
+                tasks.add(() -> {
+                    try {
+                        String src = downloader.downloadAny(n);
+                        if (src == null) src = downloader.getCachedSource(n);
+                        if (src != null) pipelineParse(n, src, isPackageCached(n));
+                    } catch (Exception ignored) {
+                        // a failed wave fetch just means the BFS fetches it (again) on demand
+                    }
+                });
+            }
+            fanOut(tasks, sourceParallelism);
+        }
+
+        // Warm parseCache from disk for every name the wave fetched, so bulkPreResolveAllTables()
+        // (and the node-cache peek) see the full set — same guarantee as the old prefetchSources.
+        // Also prime knownObjectTypes so the node-cache peek probes the exact type (the skipped
+        // per-level prepareLevelCatalog would normally do this).
+        for (String n : closure) {
+            String[] snap = downloader.snapshotMeta(n);
+            if (snap != null && snap[1] != null) {
+                knownObjectTypes.put(n, snap[1]);
+            } else {
+                String t = downloader.getCachedType(n);
+                if (t != null) knownObjectTypes.put(n, t);
+            }
+        }
+        if (parseResultCache != null) {
+            int warmed = 0;
+            for (String n : closure) {
+                if (parseCache.containsKey(n)) continue;
+                String src = downloader.getCachedSource(n);
+                if (src == null) continue;
+                ParseResult pr = parseResultCache.get(src);
+                if (pr != null) {
+                    parseCache.put(n, pr);
+                    warmed++;
+                }
+            }
+            if (warmed > 0) log.info("[Crawler] ParseCache warmed from disk: {} entries", warmed);
+        }
+        log.info("[Crawler] Closure wave: {} bulk + {} per-object, {} sources cached",
+                bulk.size(), remaining.size(), countCached(closure));
+        return closure;
+    }
+
+    private int countCached(Collection<String> names) {
+        int n = 0;
+        for (String name : names) if (downloader.getCachedSource(name) != null) n++;
+        return n;
+    }
+
+    private boolean isPackageCached(String name) {
+        String type = downloader.getCachedType(name);
+        return type != null && type.toUpperCase().contains("PACKAGE");
+    }
+
+    /**
+     * A4: parse {@code source} now and store the result, so the BFS's {@code downloadAndParse}
+     * finds it in the content-addressed parse cache and skips ANTLR. Package results are also put
+     * in the name-keyed parseCache (the BFS's key for a package is the package name). Best-effort:
+     * a parse failure just leaves the BFS to parse it normally.
+     */
+    private void pipelineParse(String name, String source, boolean packageResult) {
+        if (source == null || source.isBlank()) return;
+        if (fastReRun && parseResultCache != null && parseResultCache.get(source) != null) {
+            return; // already parsed in a prior run — nothing to do (fast re-run only)
+        }
+        ParseResult result;
+        try {
+            synchronized (parseLock) {
+                result = parseSourceForDialect(source, name);
+            }
+        } catch (Exception e) {
+            return;
+        }
+        if (result == null) return;
+        if (parseResultCache != null) parseResultCache.put(source, result);
+        if (packageResult) parseCache.putIfAbsent(name.toUpperCase(), result);
+    }
+
+    /** Parse {@code source} with the dialect-appropriate parser (shared by BFS and the wave). */
+    private ParseResult parseSourceForDialect(String source, String objectName) {
+        if (downloader.getConnManager() != null && downloader.getConnManager().isMySQL()) {
+            return new MySqlProcedureParser().parse(source, objectName, downloader.getConnManager().getMySqlSchema());
+        } else if (downloader.getConnManager() != null && downloader.getConnManager().isSqlServer()) {
+            return new SqlServerProcedureParser().parse(source, objectName, downloader.getConnManager().getSqlServerSchema());
+        } else if (downloader.getConnManager() != null && downloader.getConnManager().isDB2()) {
+            return new Db2ProcedureParser().parse(source, objectName, downloader.getConnManager().getDb2Schema());
+        } else if (downloader.getConnManager() != null && downloader.getConnManager().isPostgres()) {
+            return new PostgresProcedureParser().parse(source, objectName, downloader.getConnManager().getPostgresSchema());
+        }
+        return engine.parseContent(source, objectName + ".sql");
+    }
+
     // ── Parallel per-level fan-out ──────────────────────────────────────────────────────────────
 
     /**
@@ -2165,6 +2410,34 @@ public class DependencyCrawler {
                 || parseCache.containsKey(n));
         if (names.isEmpty()) return meta;
 
+        // A3: when the fingerprint-guarded catalog snapshot is loaded, answer the whole level from
+        // memory — no ALL_OBJECTS query. The snapshot is refreshed whenever the catalog fingerprint
+        // changed, so a newly added/modified object is present here (and an absent name is genuinely
+        // absent). Same found/missing bookkeeping as the DB path below.
+        if (downloader.isCatalogSnapshotLoaded()) {
+            for (String n : names) {
+                String[] m = downloader.snapshotMeta(n);
+                if (m != null && m[1] != null) meta.put(n, m);
+            }
+            for (Map.Entry<String, String[]> e : meta.entrySet()) {
+                String name = e.getKey();
+                String[] v = e.getValue();
+                if (v[1] != null) knownObjectTypes.put(name, v[1]);
+                if (pendingResolve.contains(name)) {
+                    resolvedPresentObjects.add(name);
+                    schemaResolver.registerBatchResolution(name, v[0], v[1]);
+                }
+            }
+            for (String n : names) {
+                if (!meta.containsKey(n) && (pendingResolve.contains(n) || pendingMissing.contains(n))) {
+                    knownMissingObjects.add(n);
+                }
+            }
+            log.info("[Crawler] Level catalog (snapshot): checked={} found={} pendingResolve={} pendingMissing={}",
+                    names.size(), meta.size(), pendingResolve.size(), pendingMissing.size());
+            return meta;
+        }
+
         // Non-Oracle dialects have no ALL_OBJECTS; keep the previous "assume present" behaviour
         // (the downloader's own catalog fetch will decide) and issue no query.
         if (downloader.getConnManager() == null || !downloader.getConnManager().isOracle()) {
@@ -2280,7 +2553,7 @@ public class DependencyCrawler {
             // keeps the "no fetch" promise even though the level prefetch runs before the serial
             // loop's own registry check. Skipped items do NOT claim the dedupe slot, so a sibling
             // that does need fetching still gets its task.
-            if (registry != null && !forceRefresh) {
+            if (fastReRun && registry != null && !forceRefresh) {
                 String baseKey = buildVisitKey(item.schema, item.packageName, item.subprogramName);
                 if (registry.isSkippablePrefix(baseKey, downloader.getCatalogLastDdl(upper))) continue;
             }

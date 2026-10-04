@@ -42,6 +42,8 @@ public class ParserAnalysisExecutor {
         String dbType = (String) job.metadata.get("dbType");
         String connName = (String) job.metadata.get("connName");
         boolean forceRefresh = "true".equalsIgnoreCase(String.valueOf(job.metadata.get("forceRefresh")));
+        // Fresh-default switch: only an explicit "Fast re-run" tick reads the cross-run caches.
+        boolean fastReRun = "true".equalsIgnoreCase(String.valueOf(job.metadata.get("fastReRun")));
 
         progress(job, broadcast, "[1/3] Starting PL/SQL parse analysis: " + entryPoint);
         progress(job, broadcast, "[2/3] Running flow analysis...");
@@ -60,7 +62,7 @@ public class ParserAnalysisExecutor {
 
         String folderName;
         try {
-            folderName = analysisService.runAnalysis(entryPoint, owner, objectType, project, environment, dbType, connName, forceRefresh);
+            folderName = analysisService.runAnalysis(entryPoint, owner, objectType, project, environment, dbType, connName, forceRefresh, fastReRun);
         } finally {
             heartbeat.shutdownNow();
         }

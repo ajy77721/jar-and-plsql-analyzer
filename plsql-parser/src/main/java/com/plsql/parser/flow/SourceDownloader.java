@@ -119,6 +119,29 @@ public class SourceDownloader {
                 && sourceCacheIdentity != null && !sourceCacheIdentity.isEmpty();
     }
 
+    /**
+     * Whether cross-run cache READS are allowed. The fresh-default model turns them OFF for an
+     * analysis unless the user explicitly chose "Fast re-run": the persistent source cache, the
+     * trigger cache and the catalog snapshot are then never consulted, so every object is fetched
+     * and parsed fresh. Writes still run in both modes, so a later fast run has something to read.
+     *
+     * <p>Default is {@code true} to preserve the downloader's own contract for direct callers
+     * (tests, the trigger discoverer). The {@link DependencyCrawler} sets it explicitly from its
+     * {@code fastReRun} flag, which defaults to false — i.e. an analysis is fresh unless told
+     * otherwise.
+     */
+    private volatile boolean cacheReadEnabled = true;
+
+    /** Enable/disable cross-run cache reads. See {@link #cacheReadEnabled}. */
+    public void setCacheReadEnabled(boolean enabled) {
+        this.cacheReadEnabled = enabled;
+    }
+
+    /** True when cross-run cache reads are allowed. */
+    public boolean isCacheReadEnabled() {
+        return cacheReadEnabled;
+    }
+
     // ── Postgres / DB2 routine catalog + per-overload fetch (W1) ──────────────────────────────
     // A single catalog query per crawl lists every routine WITH its per-overload identity
     // (Postgres oid + pg_get_function_identity_arguments; DB2 SPECIFICNAME). The crawler uses it to
@@ -263,6 +286,7 @@ public class SourceDownloader {
 
     /** Cached trigger body for {@code owner.triggerName}, or null on miss. */
     public String getCachedTriggerSource(String owner, String triggerName) {
+        if (!cacheReadEnabled) return null; // fresh default: never read the trigger cache
         if (!hasSourceCache() || owner == null || triggerName == null) return null;
         ArtifactKey file = triggerCacheKey(owner, triggerName);
         try (InputStream in = sourceCacheStore.read(file)) {
@@ -318,6 +342,7 @@ public class SourceDownloader {
      * changed" and still reuses the entry). Returns null on any miss/staleness/IO error.
      */
     private String trySourceCache(String objectName, String objectType) {
+        if (!cacheReadEnabled) return null; // fresh default: never read the source cache
         if (!hasSourceCache() || objectName == null || objectType == null) return null;
         String upper = objectName.toUpperCase();
         String owner = cacheOwner(upper);
@@ -387,6 +412,290 @@ public class SourceDownloader {
             return sb.toString();
         } catch (NoSuchAlgorithmException e) {
             return Integer.toHexString(input.hashCode());
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // A3 — catalog snapshot cache
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // The estate's object map (name -> {owner, objectType, LAST_DDL}) is captured ONCE per crawl
+    // and reused for every per-level discovery lookup, so a re-crawl costs near-zero catalog
+    // queries (the source cache already skips the fetches; this skips the DISCOVERY queries too).
+    //
+    // Correctness is guarded by a CHEAP FRESHNESS FINGERPRINT, not the TTL: at the start of every
+    // crawl ONE aggregate query computes a fingerprint of the schema's catalog (row count, max
+    // LAST_DDL and a hash of every (name,type,last_ddl) tuple). A different fingerprint — i.e. any
+    // object added, dropped or modified — forces a FULL snapshot refresh, so a newly created
+    // procedure appears on the very next crawl. The TTL is only a secondary optimization: it lets
+    // a cached snapshot survive when the fingerprint probe itself cannot run (probe failure).
+    // Explicit invalidation (connection change / operator refresh) is exposed via
+    // {@link #invalidateCatalogSnapshot()}.
+
+    /** Oracle catalog object types captured by the snapshot. */
+    private static final String SNAPSHOT_TYPES =
+            "'PACKAGE','PACKAGE BODY','PROCEDURE','FUNCTION','TABLE','VIEW','MATERIALIZED VIEW','TRIGGER'";
+
+    /** Secondary-only TTL for the snapshot; the fingerprint probe is the real freshness guard. */
+    private static final long CATALOG_SNAPSHOT_TTL_MS = 6L * 60 * 60 * 1000L; // 6 hours
+
+    /**
+     * Pluggable catalog access for the snapshot. The default implementation queries Oracle's
+     * ALL_OBJECTS; tests inject a fake to exercise the fingerprint/refresh logic without a DB.
+     */
+    public interface CatalogSnapshotSource {
+        /** One cheap aggregate query over the schema's catalog. Never returns null. */
+        String fingerprint(List<String> schemas) throws SQLException;
+        /** The full snapshot: rows of {owner, objectName, objectType, lastDdl}. */
+        List<String[]> fetchRows(List<String> schemas) throws SQLException;
+    }
+
+    /** On-disk shape of a persisted snapshot. Public for Jackson. */
+    public static final class CatalogSnapshotFile {
+        public String fingerprint;
+        public long loadedAtMs;
+        public List<String[]> rows;
+        public CatalogSnapshotFile() {}
+    }
+
+    private volatile CatalogSnapshotSource catalogSnapshotSource;
+    private final Map<String, String[]> catalogSnapshot = new ConcurrentHashMap<>();
+    private volatile String catalogSnapshotFingerprint;
+    private volatile boolean catalogSnapshotLoaded = false;
+    private volatile long catalogSnapshotLoadedAtMs = 0L;
+
+    /** Inject a snapshot source (tests); null restores the default Oracle ALL_OBJECTS source. */
+    public void setCatalogSnapshotSource(CatalogSnapshotSource source) {
+        this.catalogSnapshotSource = source;
+    }
+
+    private CatalogSnapshotSource defaultSnapshotSource() {
+        if (connManager == null || !connManager.isOracle()) return null;
+        return new CatalogSnapshotSource() {
+            @Override
+            public String fingerprint(List<String> schemas) throws SQLException {
+                String sql = "SELECT COUNT(*) c, "
+                        + "TO_CHAR(MAX(last_ddl_time),'YYYY-MM-DD HH24:MI:SS') m, "
+                        + "SUM(ORA_HASH(object_name||'|'||object_type||'|'||"
+                        + "TO_CHAR(last_ddl_time,'YYYY-MM-DD HH24:MI:SS'))) h "
+                        + "FROM all_objects WHERE owner IN (" + schemaList(schemas) + ") "
+                        + "AND object_type IN (" + SNAPSHOT_TYPES + ")";
+                Connection conn = null;
+                try {
+                    conn = connManager.getAnyConnection();
+                    try (PreparedStatement ps = connManager.prepareStatement(conn, sql);
+                         ResultSet rs = ps.executeQuery()) {
+                        connManager.incrementDbCalls();
+                        if (rs.next()) {
+                            return rs.getString("c") + "|" + rs.getString("m") + "|" + rs.getString("h");
+                        }
+                    }
+                    connManager.noteQuerySuccess();
+                    connManager.returnToPool(conn);
+                    conn = null;
+                } catch (SQLException e) {
+                    connManager.closeAndDiscard(conn);
+                    conn = null;
+                    connManager.noteQueryFailure();
+                    throw e;
+                } finally {
+                    if (conn != null) connManager.closeAndDiscard(conn);
+                }
+                return "0|null|null";
+            }
+
+            @Override
+            public List<String[]> fetchRows(List<String> schemas) throws SQLException {
+                String sql = "SELECT owner, object_name, object_type, "
+                        + "TO_CHAR(last_ddl_time,'YYYY-MM-DD HH24:MI:SS') ddl "
+                        + "FROM all_objects WHERE owner IN (" + schemaList(schemas) + ") "
+                        + "AND object_type IN (" + SNAPSHOT_TYPES + ")";
+                List<String[]> rows = new ArrayList<>();
+                Connection conn = null;
+                try {
+                    conn = connManager.getAnyConnection();
+                    try (PreparedStatement ps = connManager.prepareStatement(conn, sql);
+                         ResultSet rs = ps.executeQuery()) {
+                        connManager.incrementDbCalls();
+                        while (rs.next()) {
+                            rows.add(new String[]{
+                                    rs.getString("owner"),
+                                    rs.getString("object_name"),
+                                    rs.getString("object_type"),
+                                    rs.getString("ddl")});
+                        }
+                    }
+                    connManager.noteQuerySuccess();
+                    connManager.returnToPool(conn);
+                    conn = null;
+                } catch (SQLException e) {
+                    connManager.closeAndDiscard(conn);
+                    conn = null;
+                    connManager.noteQueryFailure();
+                    throw e;
+                } finally {
+                    if (conn != null) connManager.closeAndDiscard(conn);
+                }
+                return rows;
+            }
+        };
+    }
+
+    private CatalogSnapshotSource snapshotSource() {
+        CatalogSnapshotSource s = catalogSnapshotSource;
+        return s != null ? s : defaultSnapshotSource();
+    }
+
+    private static String schemaList(List<String> schemas) {
+        StringBuilder sb = new StringBuilder();
+        if (schemas != null) {
+            for (int i = 0; i < schemas.size(); i++) {
+                if (i > 0) sb.append(",");
+                sb.append("'").append(schemas.get(i).replace("'", "''")).append("'");
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Ensure a fresh catalog snapshot for this crawl. Returns true when a snapshot is available.
+     * The fingerprint probe runs on every call; a changed fingerprint refreshes the full snapshot.
+     * On probe failure the TTL (and then the persisted snapshot) is the fallback. Best-effort:
+     * any failure leaves the caller to fall back to per-object discovery.
+     */
+    public boolean ensureCatalogSnapshot() {
+        CatalogSnapshotSource src = snapshotSource();
+        if (src == null) return false;
+        List<String> schemas = connManager != null ? connManager.getAvailableSchemas() : Collections.emptyList();
+
+        String fp = null;
+        try {
+            fp = src.fingerprint(schemas);
+        } catch (SQLException e) {
+            log.debug("[SourceDownloader] Catalog fingerprint probe failed: {}", e.getMessage());
+        }
+
+        if (catalogSnapshotLoaded && fp != null && fp.equals(catalogSnapshotFingerprint)) {
+            catalogSnapshotLoadedAtMs = System.currentTimeMillis();
+            log.info("[SourceDownloader] Catalog snapshot FRESH (fingerprint={}, {} objects)",
+                    fp, catalogSnapshot.size());
+            return true;
+        }
+        if (fp != null) {
+            try {
+                List<String[]> rows = src.fetchRows(schemas);
+                Map<String, String[]> fresh = new ConcurrentHashMap<>();
+                for (String[] r : rows) {
+                    if (r == null || r.length < 4 || r[1] == null) continue;
+                    fresh.put(r[1].toUpperCase(), new String[]{r[0], r[2], r[3]});
+                }
+                catalogSnapshot.clear();
+                catalogSnapshot.putAll(fresh);
+                catalogSnapshotFingerprint = fp;
+                catalogSnapshotLoaded = true;
+                catalogSnapshotLoadedAtMs = System.currentTimeMillis();
+                persistCatalogSnapshot();
+                log.info("[SourceDownloader] Catalog snapshot REFRESHED (fingerprint={}, {} objects)",
+                        fp, fresh.size());
+                return true;
+            } catch (SQLException e) {
+                log.warn("[SourceDownloader] Catalog snapshot full refresh failed: {}", e.getMessage());
+            }
+        }
+
+        // Fingerprint probe unavailable: TTL-only fallback (secondary optimization only).
+        if (catalogSnapshotLoaded && !catalogSnapshotExpired()) return true;
+        if (loadCatalogSnapshotFromDisk() && !catalogSnapshotExpired()) return true;
+        return catalogSnapshotLoaded;
+    }
+
+    private boolean catalogSnapshotExpired() {
+        return catalogSnapshotLoadedAtMs <= 0
+                || (System.currentTimeMillis() - catalogSnapshotLoadedAtMs) > CATALOG_SNAPSHOT_TTL_MS;
+    }
+
+    /**
+     * True when the snapshot may be READ for discovery. Like {@link #snapshotMeta}, this is
+     * false under the fresh-default model ({@code cacheReadEnabled == false}) so a fresh analysis
+     * always rediscovers from the catalog rather than trusting a cached snapshot; the snapshot is
+     * still captured and persisted (see {@link #ensureCatalogSnapshot()}) so a later fast re-run
+     * has something to read.
+     */
+    public boolean isCatalogSnapshotLoaded() {
+        return catalogSnapshotLoaded && cacheReadEnabled;
+    }
+
+    /** The object's {owner, objectType, lastDdl} from the snapshot, or null when absent/not loaded. */
+    public String[] snapshotMeta(String objectName) {
+        if (!cacheReadEnabled) return null; // fresh default: snapshot is a fast-rerun-only aid
+        if (objectName == null || !catalogSnapshotLoaded) return null;
+        String[] v = catalogSnapshot.get(objectName.toUpperCase());
+        return v == null ? null : new String[]{v[0], v[1], v[2]};
+    }
+
+    /** The fingerprint the in-memory snapshot was captured at, or null. */
+    public String getCatalogSnapshotFingerprint() {
+        return catalogSnapshotFingerprint;
+    }
+
+    /** Drop the in-memory AND persisted snapshot (connection change / explicit operator refresh). */
+    public void invalidateCatalogSnapshot() {
+        catalogSnapshot.clear();
+        catalogSnapshotFingerprint = null;
+        catalogSnapshotLoaded = false;
+        catalogSnapshotLoadedAtMs = 0L;
+        if (hasSourceCache()) {
+            try {
+                sourceCacheStore.delete(catalogSnapshotKey());
+            } catch (Exception e) {
+                log.debug("[SourceDownloader] Snapshot invalidation failed: {}", e.getMessage());
+            }
+        }
+    }
+
+    private ArtifactKey catalogSnapshotKey() {
+        String scope = (sourceCacheIdentity == null ? "" : sourceCacheIdentity) + "|"
+                + (connManager == null ? "" : String.join(",", connManager.getAvailableSchemas()));
+        return sourceCacheDir.resolve(".catalog-snapshot." + shortHash(scope) + ".json");
+    }
+
+    private void persistCatalogSnapshot() {
+        if (!hasSourceCache() || !catalogSnapshotLoaded) return;
+        try (OutputStream out = sourceCacheStore.write(catalogSnapshotKey())) {
+            CatalogSnapshotFile file = new CatalogSnapshotFile();
+            file.fingerprint = catalogSnapshotFingerprint;
+            file.loadedAtMs = catalogSnapshotLoadedAtMs;
+            file.rows = new ArrayList<>();
+            for (Map.Entry<String, String[]> e : catalogSnapshot.entrySet()) {
+                String[] v = e.getValue();
+                file.rows.add(new String[]{v[0], e.getKey(), v[1], v[2]});
+            }
+            sourceCacheMapper.writeValue(out, file);
+        } catch (IOException e) {
+            log.debug("[SourceDownloader] Snapshot persist failed: {}", e.getMessage());
+        }
+    }
+
+    private boolean loadCatalogSnapshotFromDisk() {
+        if (!hasSourceCache()) return false;
+        ArtifactKey key = catalogSnapshotKey();
+        try (InputStream in = sourceCacheStore.read(key)) {
+            CatalogSnapshotFile file = sourceCacheMapper.readValue(in, CatalogSnapshotFile.class);
+            if (file == null || file.rows == null) return false;
+            Map<String, String[]> fresh = new ConcurrentHashMap<>();
+            for (String[] r : file.rows) {
+                if (r == null || r.length < 4 || r[1] == null) continue;
+                fresh.put(r[1].toUpperCase(), new String[]{r[0], r[2], r[3]});
+            }
+            catalogSnapshot.clear();
+            catalogSnapshot.putAll(fresh);
+            catalogSnapshotFingerprint = file.fingerprint;
+            catalogSnapshotLoaded = true;
+            catalogSnapshotLoadedAtMs = file.loadedAtMs > 0 ? file.loadedAtMs : System.currentTimeMillis();
+            log.info("[SourceDownloader] Catalog snapshot loaded from disk: {} objects", fresh.size());
+            return true;
+        } catch (IOException e) {
+            return false; // absent (the common miss) or unreadable
         }
     }
 
@@ -716,6 +1025,222 @@ public class SourceDownloader {
                         type, objectName, owner, source.length());
                 return new String[]{type, source};
             }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // A2 — bulk source pull
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // The closure wave fetches MANY sources at once. Where the dialect allows, they are pulled in
+    // BATCHES instead of one round trip per object:
+    //   • Oracle: ALL_SOURCE is multi-row (one row per source LINE), so a chunk of object tuples
+    //     is fetched in ONE query — `WHERE (OWNER, NAME, TYPE) IN ((?,?,?),…)` when the catalog
+    //     snapshot supplies owner+type, else `WHERE NAME IN (…) AND TYPE IN (…)`. 500 tuples per
+    //     query, so a 2,000-object wave costs 4 queries instead of 2,000.
+    //   • MySQL / Postgres / Db2 / SQL Server: their sources are not exposed as a multi-row text
+    //     catalog in a way that batches cheaply across routines (per-routine
+    //     pg_get_functiondef / SYSCAT / SHOW CREATE), so this returns an empty map and the caller
+    //     falls back to the per-object parallel fan-out. That fallback is still bounded and
+    //     context-correct (the existing fan-out pool).
+    //
+    // Bulk queries go through the SAME connManager.prepareStatement / getAnyConnection path, so the
+    // W3 QPS limiter, statement timeout, read-only guard and global breaker all still apply — and
+    // the DB impact is strictly better (fewer, larger queries).
+
+    /** One (owner, name, type) tuple for the Oracle bulk ALL_SOURCE pull. */
+    public static final class BulkRef {
+        public final String name, owner, type;
+        public BulkRef(String name, String owner, String type) {
+            this.name = name; this.owner = owner; this.type = type;
+        }
+    }
+
+    private static final int BULK_TUPLE_CHUNK = 500;
+
+    private static boolean isSourceType(String t) {
+        if (t == null) return false;
+        String u = t.toUpperCase();
+        return u.equals("PACKAGE") || u.equals("PACKAGE BODY")
+                || u.equals("PROCEDURE") || u.equals("FUNCTION");
+    }
+
+    /**
+     * Bulk-fetch as many of {@code names} as the dialect allows in one or few queries. Returns a
+     * name(upper) -> source map for every object the bulk pull resolved; an empty map means the
+     * caller must fall back to the per-object parallel fetch (non-Oracle, or nothing to do).
+     */
+    public Map<String, String> fetchSourcesBulk(Collection<String> names) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (names == null || names.isEmpty() || connManager == null || !isOracleConn()) return out;
+
+        List<String> pending = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String n : names) {
+            if (n == null || n.isBlank()) continue;
+            String upper = n.toUpperCase();
+            if (!seen.add(upper)) continue;
+            if (getCachedSource(upper) != null) continue; // already in memory
+            pending.add(upper);
+        }
+        if (pending.isEmpty()) return out;
+
+        List<String> schemas = connManager.getAvailableSchemas();
+        String ownerIn = schemaList(schemas);
+
+        // Snapshot-keyed tuples where possible; name-only for the rest.
+        List<BulkRef> typed = new ArrayList<>();
+        List<String> untyped = new ArrayList<>();
+        for (String n : pending) {
+            String[] meta = snapshotMeta(n);
+            if (meta != null && meta[0] != null && isSourceType(meta[1])) {
+                typed.add(new BulkRef(n, meta[0], meta[1]));
+            } else {
+                untyped.add(n);
+            }
+        }
+
+        int queries = 0;
+        for (int i = 0; i < typed.size(); i += BULK_TUPLE_CHUNK) {
+            queries += bulkQueryTyped(typed.subList(i, Math.min(i + BULK_TUPLE_CHUNK, typed.size())), out);
+        }
+        for (int i = 0; i < untyped.size(); i += BULK_TUPLE_CHUNK) {
+            queries += bulkQueryByName(untyped.subList(i, Math.min(i + BULK_TUPLE_CHUNK, untyped.size())),
+                    ownerIn, out);
+        }
+        if (queries > 0) {
+            log.info("[SourceDownloader] Bulk source pull: {} names in {} quer{} -> {} sources",
+                    pending.size(), queries, queries == 1 ? "y" : "ies", out.size());
+        }
+        return out;
+    }
+
+    private int bulkQueryTyped(List<BulkRef> refs, Map<String, String> out) {
+        StringBuilder tuples = new StringBuilder();
+        for (int i = 0; i < refs.size(); i++) {
+            if (i > 0) tuples.append(",");
+            tuples.append("(?,?,?)");
+        }
+        String sql = "SELECT OWNER, NAME, TYPE, LINE, TEXT FROM ALL_SOURCE "
+                + "WHERE (OWNER, NAME, TYPE) IN (" + tuples + ") "
+                + "ORDER BY NAME, OWNER, TYPE, LINE";
+        Connection conn = null;
+        try {
+            conn = connManager.getAnyConnection();
+            try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
+                int p = 1;
+                for (BulkRef r : refs) {
+                    ps.setString(p++, r.owner);
+                    ps.setString(p++, r.name);
+                    ps.setString(p++, r.type);
+                }
+                ps.setFetchSize(10000);
+                connManager.incrementDbCalls();
+                try (ResultSet rs = ps.executeQuery()) {
+                    assembleBulkRows(rs, out);
+                }
+            }
+            connManager.noteQuerySuccess();
+            connManager.returnToPool(conn);
+            conn = null;
+            return 1;
+        } catch (SQLException e) {
+            connManager.closeAndDiscard(conn);
+            conn = null;
+            connManager.noteQueryFailure();
+            log.warn("[SourceDownloader] Bulk typed pull failed ({} refs): {}", refs.size(), e.getMessage());
+            return 0;
+        } finally {
+            if (conn != null) connManager.closeAndDiscard(conn);
+        }
+    }
+
+    private int bulkQueryByName(List<String> names, String ownerIn, Map<String, String> out) {
+        StringBuilder ph = new StringBuilder();
+        for (int i = 0; i < names.size(); i++) {
+            if (i > 0) ph.append(",");
+            ph.append("?");
+        }
+        String ownerClause = ownerIn.isEmpty() ? "" : " AND OWNER IN (" + ownerIn + ")";
+        String sql = "SELECT OWNER, NAME, TYPE, LINE, TEXT FROM ALL_SOURCE "
+                + "WHERE NAME IN (" + ph + ") "
+                + "AND TYPE IN ('PACKAGE BODY','PROCEDURE','FUNCTION','PACKAGE')"
+                + ownerClause
+                + " ORDER BY NAME, OWNER, TYPE, LINE";
+        Connection conn = null;
+        try {
+            conn = connManager.getAnyConnection();
+            try (PreparedStatement ps = connManager.prepareStatement(conn, sql)) {
+                for (int i = 0; i < names.size(); i++) ps.setString(i + 1, names.get(i));
+                ps.setFetchSize(10000);
+                connManager.incrementDbCalls();
+                try (ResultSet rs = ps.executeQuery()) {
+                    assembleBulkRows(rs, out);
+                }
+            }
+            connManager.noteQuerySuccess();
+            connManager.returnToPool(conn);
+            conn = null;
+            return 1;
+        } catch (SQLException e) {
+            connManager.closeAndDiscard(conn);
+            conn = null;
+            connManager.noteQueryFailure();
+            log.warn("[SourceDownloader] Bulk name pull failed ({} names): {}", names.size(), e.getMessage());
+            return 0;
+        } finally {
+            if (conn != null) connManager.closeAndDiscard(conn);
+        }
+    }
+
+    /** Group multi-row ALL_SOURCE rows into one source per name, best type wins; cache + store. */
+    private void assembleBulkRows(ResultSet rs, Map<String, String> out) throws SQLException {
+        Map<String, StringBuilder> bodies = new LinkedHashMap<>();
+        Map<String, String[]> keyMeta = new LinkedHashMap<>(); // key -> {owner, name, type}
+        while (rs.next()) {
+            String owner = rs.getString("OWNER");
+            String name = rs.getString("NAME");
+            String type = rs.getString("TYPE");
+            if (name == null || type == null) continue;
+            String key = owner + "|" + name + "|" + type;
+            bodies.computeIfAbsent(key, k -> new StringBuilder()).append(rs.getString("TEXT"));
+            keyMeta.putIfAbsent(key, new String[]{owner, name, type});
+        }
+        if (keyMeta.isEmpty()) return;
+
+        Map<String, Integer> rank = new HashMap<>();
+        rank.put("PACKAGE BODY", 0); rank.put("PROCEDURE", 1); rank.put("FUNCTION", 2); rank.put("PACKAGE", 3);
+        Map<String, String> bestKeyByName = new HashMap<>();
+        for (Map.Entry<String, String[]> e : keyMeta.entrySet()) {
+            String key = e.getKey();
+            String name = e.getValue()[1].toUpperCase();
+            int r = rank.getOrDefault(e.getValue()[2].toUpperCase(), 9);
+            String cur = bestKeyByName.get(name);
+            if (cur == null || r < rank.getOrDefault(keyMeta.get(cur)[2].toUpperCase(), 9)) {
+                bestKeyByName.put(name, key);
+            }
+        }
+        for (Map.Entry<String, String> e : bestKeyByName.entrySet()) {
+            String name = e.getKey();
+            String[] m = keyMeta.get(e.getValue());
+            String owner = m[0];
+            String type = m[2].toUpperCase();
+            String source = "CREATE OR REPLACE " + bodies.get(e.getValue()).toString();
+            if (looksLikeTruncated(source)) {
+                // Let the per-object path apply its DBMS_METADATA fallback rather than cache a stub.
+                log.info("[SourceDownloader] Bulk pull skipped truncated {} {}", type, name);
+                continue;
+            }
+            if (source.contains(" wrapped") || source.contains("0000000")) {
+                String head = source.length() > 200 ? source.substring(0, 200) : source;
+                if (head.toUpperCase().contains("WRAPPED") || head.matches("(?s).*\\b[0-9a-f]{8,}\\b.*")) {
+                    wrappedObjects.add(name);
+                }
+            }
+            sourceCache.put(type + ":" + name, source);
+            if (owner != null) ownerCache.put(name, owner.toUpperCase());
+            storeSourceCache(name, type, source);
+            out.put(name, source);
         }
     }
 

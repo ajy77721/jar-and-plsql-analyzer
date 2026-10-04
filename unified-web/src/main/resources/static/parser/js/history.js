@@ -55,6 +55,8 @@ PA.quickSubmit = {
             // Forward dialect context so non-Oracle batches are not treated as Oracle.
             if (formData.dbType) body.dbType = formData.dbType;
             if (formData.connName) body.connName = formData.connName;
+            // Fresh-default: only forward the fast-rerun opt-in when the user ticked it.
+            if (formData.fastReRun) body.fastReRun = 'true';
             // Use the selected object type; only default to PACKAGE for Oracle.
             body.objectType = formData.objectType
                 || ((formData.dbType && formData.dbType !== 'ORACLE') ? 'PROCEDURE' : 'PACKAGE');
@@ -359,6 +361,8 @@ PA.startAnalysis = async function() {
         if (formData.environment) body.environment = formData.environment;
         if (formData.dbType)      body.dbType      = formData.dbType;
         if (formData.connName)    body.connName    = formData.connName;
+        // Fresh-default: only forward the fast-rerun opt-in when the user ticked it.
+        if (formData.fastReRun)   body.fastReRun   = 'true';
 
         var resp = await PA.api.runAnalysis(entryPoint, body);
         if (resp && resp.error) { if (prog) prog.style.display = 'none'; PA.toast(resp.error, 'error'); return; }

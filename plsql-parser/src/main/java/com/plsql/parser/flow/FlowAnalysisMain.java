@@ -68,6 +68,15 @@ public class FlowAnalysisMain {
         public boolean forceRefresh = false;
 
         /**
+         * Fast re-run: reuse the persistent source/parse caches and the analysis registry to skip
+         * objects unchanged since the last run. {@code false} (the default) is a complete FRESH
+         * crawl — no cross-run cache reads, no registry skips. Wired from the analyze form's
+         * "Fast re-run (skip unchanged)" checkbox via
+         * {@link DependencyCrawler#setFastReRun(boolean)}; {@code --fast-re-run} on the CLI.
+         */
+        public boolean fastReRun = false;
+
+        /**
          * W3 DB-impact safety knobs. Defaults are deliberately gentle; the web layer wires them
          * from {@code app.crawl.db.qps} / {@code app.crawl.db.timeout-seconds} /
          * {@code app.crawl.db.circuit-breaker-threshold}.
@@ -192,6 +201,9 @@ public class FlowAnalysisMain {
                     break;
                 case "--force-refresh":
                     o.forceRefresh = true;
+                    break;
+                case "--fast-re-run":
+                    o.fastReRun = true;
                     break;
                 case "--db-qps":
                     if (i + 1 < args.length) {
@@ -335,6 +347,8 @@ public class FlowAnalysisMain {
             crawler.setMaxDepth(opts.maxDepth);
             crawler.setAllowEmptyAnalysis(opts.allowEmptyAnalysis);
             crawler.setForceRefresh(opts.forceRefresh);
+            // Fresh by default: only an explicit fast re-run reads the cross-run caches/registry.
+            crawler.setFastReRun(opts.fastReRun);
             // Advisory: lets the depth-0 lookup fall back from e.g. PROCEDURE to PACKAGE and name
             // what it tried when it still finds nothing (Fix C).
             crawler.setEntryObjectType(opts.entryObjectType);

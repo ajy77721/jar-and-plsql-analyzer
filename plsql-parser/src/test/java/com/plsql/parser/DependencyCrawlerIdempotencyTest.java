@@ -79,9 +79,18 @@ class DependencyCrawlerIdempotencyTest {
 
     /** A fresh crawler per crawl (a real re-run is a new instance with an empty in-memory cache). */
     private DependencyCrawler newCrawler() {
+        return newCrawler(true);
+    }
+
+    /**
+     * @param fastReRun the fresh-default switch. {@code true} = the fast re-run path these tests
+     *                  exercise (registry + caches read). {@code false} = a complete fresh crawl.
+     */
+    private DependencyCrawler newCrawler(boolean fastReRun) {
         DependencyCrawler c = new DependencyCrawler(engine, downloader, schemaResolver);
         c.setMaxDepth(5);
         c.setTimeoutPerEntryMs(60_000);
+        c.setFastReRun(fastReRun);
         c.setOutputDir(store, OUT);
         c.setOutputFolderName("PKG");
         try {
@@ -160,6 +169,21 @@ class DependencyCrawlerIdempotencyTest {
         forced.setForceRefresh(true);
         forced.crawl("PKG");
 
+        verify(downloader, atLeastOnce()).downloadAny(anyString());
+    }
+
+    @Test
+    @DisplayName("FRESH DEFAULT: a re-run without fast-re-run re-fetches even an unchanged object")
+    void freshDefaultNeverReadsCaches() {
+        newCrawler(true).crawl("PKG"); // populate the registry + node cache
+
+        AnalysisRegistry.resetCommittedForTest(OUT);
+        clearInvocations(downloader);
+
+        // Default (fastReRun = false): no registry skip, no cache read — a complete fresh crawl.
+        FlowResult fresh = newCrawler(false).crawl("PKG");
+
+        assertEquals(1, fresh.getTotalObjectsCrawled(), "the object is still analysed");
         verify(downloader, atLeastOnce()).downloadAny(anyString());
     }
 
