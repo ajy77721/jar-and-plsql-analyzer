@@ -5,6 +5,7 @@ import com.analyzer.queue.QueueJob;
 import com.analyzer.storage.AnalysisRepository;
 import com.analyzer.storage.page.Cursor;
 import com.analyzer.storage.repo.AnalysisQuery;
+import com.analyzer.storage.sso.NotAuthenticatedException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.plsqlanalyzer.web.page.FacetPageResponder;
@@ -179,6 +180,10 @@ public class ParserAnalysisController {
             return facets.respondStreaming(rows.iterator(), HistoryFacet.SPEC, params, null);
         } catch (IllegalArgumentException | Cursor.InvalidCursorException e) {
             return FacetPageResponder.badRequest(mapper, e.getMessage());
+        } catch (NotAuthenticatedException e) {
+            // An expired/absent SSO session is an auth failure, not a server fault: let it reach the
+            // web layer's 401 handler so the UI prompts for sign-in instead of showing a 500.
+            throw e;
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }

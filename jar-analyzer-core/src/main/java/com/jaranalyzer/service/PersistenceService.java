@@ -1519,11 +1519,19 @@ public class PersistenceService {
      * can never mistake "the store could not be read" for "you have no analyses": the failure is
      * raised as {@link StorageListingException} and mapped to a non-2xx body by the web layer. The
      * lenient {@link #listJars()} remains for internal callers that want a degraded screen.
+     *
+     * <p>An <b>expired or absent SSO session</b> is deliberately not a {@link StorageListingException}.
+     * The credential resolver raises {@link com.analyzer.storage.sso.NotAuthenticatedException} when a
+     * session has no usable token; wrapping that here (as the generic catch used to) reported an
+     * expired login as a 503 "store unreachable" and the UI could never offer "sign in again". The
+     * auth failure must reach the web layer's 401 handler unchanged.
      */
     public List<Map<String, Object>> listJarsStrict() {
         try {
             return scanJarsFromStore();
         } catch (StorageListingException e) {
+            throw e;
+        } catch (com.analyzer.storage.sso.NotAuthenticatedException e) {
             throw e;
         } catch (Exception e) {
             log.warn("Store-backed listJars failed: {}", e.toString());
