@@ -98,6 +98,12 @@ public class DependencyCrawler {
     // PACKAGE.SUBPROGRAM (upper) for package members; both are recorded per node.
     private final Map<String, String> crawledNodeIds = new ConcurrentHashMap<>();
 
+    // Source-parsed TRIGGER node id keyed SCHEMA.NAME (upper). The post-crawl catalog-trigger pass
+    // must not emit a SECOND node for a trigger that the BFS already crawled from source: this map
+    // is the dedup guard, so such a trigger stays ONE node (source-parsed wins the body, the catalog
+    // record supplies status/triggerType through api/tables/index.json).
+    private final Map<String, String> crawledTriggerNodeIds = new ConcurrentHashMap<>();
+
     // Visited set to avoid infinite loops: "PACKAGE.SUBPROGRAM" or "STANDALONE_NAME"
     private final Set<String> visited = Collections.synchronizedSet(new LinkedHashSet<>());
 
@@ -245,6 +251,7 @@ public class DependencyCrawler {
         // Reset state
         visited.clear();
         dmlRefs.clear();
+        crawledTriggerNodeIds.clear();
         pendingResolveCheck.clear();
         resolvedPresentObjects.clear();
         knownObjectTypes.clear();
@@ -405,6 +412,7 @@ public class DependencyCrawler {
                         orderCounter++;
                         restored.setOrder(orderCounter);
                         restored.setDepth(item.depth);
+                        recordCrawledTriggerNodeId(crawledTriggerNodeIds, restored);
                         if (item.depth == 0 && restored.getSchema() != null) {
                             entrySchema = restored.getSchema();
                         }
@@ -525,6 +533,7 @@ public class DependencyCrawler {
                             orderCounter++;
                             cachedNode.setOrder(orderCounter);
                             cachedNode.setDepth(item.depth);
+                            recordCrawledTriggerNodeId(crawledTriggerNodeIds, cachedNode);
                             if (item.depth > maxDepthReached) maxDepthReached = item.depth;
                             if (item.depth == 0 && cachedNode.getSchema() != null) {
                                 entrySchema = cachedNode.getSchema();
@@ -1033,6 +1042,7 @@ public class DependencyCrawler {
                 // member) PACKAGE.SUBPROGRAM, so a post-crawl caller can resolve a routine name to
                 // the node it became — see resolveTriggerCallNodeIds.
                 recordCrawledNodeId(crawledNodeIds, node);
+                recordCrawledTriggerNodeId(crawledTriggerNodeIds, node);
 
                 // Record this node's write-DML (INSERT/UPDATE/DELETE/MERGE) so trigger edges can
                 // be attached later from the exact routine that performs the firing statement.
@@ -1237,11 +1247,25 @@ public class DependencyCrawler {
     private static String trigStr(Object o) { return o == null ? null : o.toString(); }
 
     /**
-     * Turn discovered DB triggers into call-tree nodes + additive edges. For every reachable
-     * routine whose write-DML (INSERT/UPDATE/DELETE/MERGE) targets a trigger's table with a
-     * matching event, add a FIRES_TRIGGER edge routine -> trigger. For PostgreSQL, also add a
-     * TRIGGER_FN edge trigger -> handler-function and a node for that function so its logic
-     * enters the tree. Purely additive: normal CALL edges/nodes are untouched.
+     * Turn every catalog-discovered DB trigger into a first-class node, plus its additive edges.
+     *
+     * <p>EVERY discovered trigger becomes a node ({@code SCHEMA$TRG$NAME}) carrying its parsed body
+     * calls (resolved to the crawled callee's node id), timing/event/level/WHEN and the catalog's
+     * triggerType/status. Persisting the node is what lets the estate trigger facet serve
+     * {@code bodyCalls}, per-node trigger detail, and lets the trigger's calls join the call graph
+     * (a trigger -> callee CALL edge per resolved callee). Before this only triggers whose
+     * triggering_event matched a DML actually recorded in the crawl became nodes, so a
+     * catalog-discovered trigger whose firing statement lives outside the walked graph (or whose
+     * event simply was not exercised) was silently invisible.
+     *
+     * <p>Edges remain event-gated where that is the correct semantic: a FIRES_TRIGGER edge
+     * routine -> trigger is added only for a routine whose write-DML on the trigger's table matches
+     * the trigger's own event (a trigger that never fires has no firing routine). For PostgreSQL a
+     * TRIGGER_FN edge trigger -> handler-function is added and the handler becomes a node.
+     *
+     * <p>Dedup: a trigger that is BOTH source-parsed (a crawled TRIGGER node) and catalog-discovered
+     * yields ONE node — the source-parsed node wins (it already carries the body and its own CALL
+     * edges), the catalog record supplies status/triggerType via api/tables/index.json.
      */
     private void emitTriggerNodesAndEdges(List<Map<String, Object>> triggers,
                                           ChunkedFlowWriter writer, List<String> errors, int startOrder) {
@@ -1264,11 +1288,10 @@ public class DependencyCrawler {
             java.util.Set<String> events = new java.util.LinkedHashSet<>();
             for (String e : eventU.split("[,/ ]+")) if (!e.isBlank()) events.add(e.trim());
 
-            // A trigger only ever fires if some reachable DML statement against its table
-            // actually performs an operation matching its own triggering_event. Skip the
-            // trigger entirely (node + edges) when no such DML exists in this call graph —
-            // otherwise it would appear as a spuriously "reachable" orphan node with a
-            // finite depth even though its triggering event never fires.
+            // Does any reachable DML against this table match the trigger's own event? This gates
+            // only the FIRES_TRIGGER edge (a routine fires this trigger) — NOT the node. A trigger
+            // is a real database object and must be served even when its firing statement was not
+            // walked (its body still calls routines, and its detail is still requested per node).
             boolean anyMatchingDml = false;
             for (String[] d : dmlRefs) {
                 if (!tableU.equals(d[2])) continue;
@@ -1278,7 +1301,6 @@ public class DependencyCrawler {
                     break;
                 }
             }
-            if (!anyMatchingDml) continue;
 
             // ── trigger node ──────────────────────────────────────────────────────────
             FlowNode tn = new FlowNode();
@@ -1289,13 +1311,18 @@ public class DependencyCrawler {
             tn.setTriggerTable(tableU);
             tn.setTriggerEvent(eventU);
             tn.setTriggerTiming(timing);
+            // Catalog metadata the source parser never sees (ALL_TRIGGERS TRIGGER_TYPE / STATUS).
+            tn.setTriggerType(trigStr(t.get("triggerType")));
+            tn.setTriggerStatus(trigStr(t.get("status")));
+            tn.setTriggerLevel(triggerLevelFromCatalog(trigStr(t.get("triggerType")), timing));
+            String when = trigStr(t.get("whenClause"));
+            if (when != null && !when.isBlank()) tn.setTriggerWhenClause(when);
             // The trigger body's outbound calls, extracted by TriggerDiscoverer from the parsed
             // body. Persisting them on the node is what lets the estate trigger facet expose
-            // bodyCalls (the cross-estate edge from a trigger into the routines it calls) — before
-            // this the trigger node carried no calls[] at all, so the facet field never appeared.
-            // The trigger itself is a catalog-discovered node, not a crawled one, so its body's
-            // callees arrive unresolved (type EXTERNAL); resolve each against the crawled estate
-            // and stamp the crawled target's node id on the call, so the UI can cross-link to it.
+            // bodyCalls (the cross-estate edge from a trigger into the routines it calls). The
+            // trigger itself is a catalog artefact, not a crawled one, so its body's callees arrive
+            // unresolved (type EXTERNAL); resolve each against the crawled estate and stamp the
+            // crawled target's node id on the call, so the UI can cross-link to it.
             List<CallInfo> triggerCalls = toCallInfos(t.get("calls"));
             resolveTriggerCallNodeIds(triggerCalls, crawledNodeIds);
             tn.setCalls(triggerCalls);
@@ -1308,44 +1335,75 @@ public class DependencyCrawler {
             tn.setDepth(1);
             tn.generateNodeId();
             String trigId = tn.getNodeId();
+
+            // Dedup against a source-parsed trigger node: reuse its id and emit no second chunk.
+            String sourceNodeId = crawledTriggerNodeIds.get(triggerDedupKey(schema, name));
+            boolean sourceParsed = sourceNodeId != null && !sourceNodeId.isBlank();
+            if (sourceParsed) trigId = sourceNodeId;
             if (!emittedTrig.add(trigId)) continue;
-            tn.setOrder(++order);
-            try {
-                if (def != null && !def.isBlank()) {
-                    tn.setLineStart(1);
-                    tn.setLineEnd(def.split("\\r?\\n").length);
-                    tn.setLinesOfCode(def.split("\\r?\\n").length);
-                    // Source filename must match the UI convention "schema.package.object.sql"
-                    // (dot-separated), NOT the "$"-separated nodeId, or "view source" 404s.
-                    writer.writeSourceFile((schema != null ? schema : "") + ".TRG." + name + ".sql", def);
+
+            if (!sourceParsed) {
+                tn.setOrder(++order);
+                try {
+                    if (def != null && !def.isBlank()) {
+                        tn.setLineStart(1);
+                        tn.setLineEnd(def.split("\\r?\\n").length);
+                        tn.setLinesOfCode(def.split("\\r?\\n").length);
+                        // Source filename must match the UI convention "schema.package.object.sql"
+                        // (dot-separated), NOT the "$"-separated nodeId, or "view source" 404s.
+                        writer.writeSourceFile((schema != null ? schema : "") + ".TRG." + name + ".sql", def);
+                    }
+                    writer.writeChunk(tn);
+                } catch (IOException ex) {
+                    errors.add("Trigger node write failed for " + name + ": " + ex.getMessage());
                 }
-                writer.writeChunk(tn);
-            } catch (IOException ex) {
-                errors.add("Trigger node write failed for " + name + ": " + ex.getMessage());
             }
 
-            // ── FIRES_TRIGGER edges from every routine whose matching DML hits this table ──
             List<FlowEdge> tedges = new ArrayList<>();
-            java.util.Set<String> seenFrom = new java.util.HashSet<>();
-            for (String[] d : dmlRefs) {
-                if (!tableU.equals(d[2])) continue;
-                String op = d[3];
-                boolean match = op.startsWith("MERGE") || events.isEmpty()
-                        || events.stream().anyMatch(op::startsWith);
-                if (!match) continue;
-                if (!seenFrom.add(d[0])) continue;
-                FlowEdge e = new FlowEdge();
-                e.setFromNodeId(d[0]);
-                e.setToNodeId(trigId);
-                e.setToSchema(schema);
-                e.setToObject(name);
-                e.setEdgeType("FIRES_TRIGGER");
-                e.setDepth(2);
-                tedges.add(e);
+
+            // ── FIRES_TRIGGER edges from every routine whose matching DML hits this table ──
+            if (anyMatchingDml) {
+                java.util.Set<String> seenFrom = new java.util.HashSet<>();
+                for (String[] d : dmlRefs) {
+                    if (!tableU.equals(d[2])) continue;
+                    String op = d[3];
+                    boolean match = op.startsWith("MERGE") || events.isEmpty()
+                            || events.stream().anyMatch(op::startsWith);
+                    if (!match) continue;
+                    if (!seenFrom.add(d[0])) continue;
+                    FlowEdge e = new FlowEdge();
+                    e.setFromNodeId(d[0]);
+                    e.setToNodeId(trigId);
+                    e.setToSchema(schema);
+                    e.setToObject(name);
+                    e.setEdgeType("FIRES_TRIGGER");
+                    e.setDepth(2);
+                    tedges.add(e);
+                }
+            }
+
+            // ── trigger -> each resolved callee: the body's calls join the call graph ──
+            // Only for a catalog-emitted node — a source-parsed trigger node already had its own
+            // CALL edges written by the BFS, so re-adding them here would double them.
+            if (!sourceParsed) {
+                java.util.Set<String> seenTo = new java.util.HashSet<>();
+                for (CallInfo c : triggerCalls) {
+                    if (c == null) continue;
+                    String toId = c.getNodeId();
+                    if (toId == null || toId.isBlank() || toId.equalsIgnoreCase(trigId)) continue;
+                    if (!seenTo.add(toId)) continue;
+                    FlowEdge ce = new FlowEdge();
+                    ce.setFromNodeId(trigId);
+                    ce.setToNodeId(toId);
+                    ce.setToSchema(c.getSchema());
+                    ce.setToObject(c.getName());
+                    ce.setDepth(2);
+                    tedges.add(ce);
+                }
             }
 
             // ── PostgreSQL: trigger -> handler function (make the function a reachable node) ──
-            if (isPg) {
+            if (isPg && !sourceParsed) {
                 String fnName   = trigStr(t.get("functionName"));
                 String fnSchema = trigStr(t.get("functionSchema"));
                 if (fnName != null && !fnName.isBlank()) {
@@ -1390,6 +1448,17 @@ public class DependencyCrawler {
             }
         }
         log.info("[Crawler] Emitted trigger nodes+edges for " + emittedTrig.size() + " triggers");
+    }
+
+    /** The ROW/STATEMENT level implied by a catalog TRIGGER_TYPE (Oracle "AFTER EACH ROW" /
+     *  "AFTER STATEMENT", etc.), or null when the catalog does not say. */
+    static String triggerLevelFromCatalog(String triggerType, String timing) {
+        String tt = triggerType != null ? triggerType.toUpperCase(Locale.ROOT)
+                : (timing != null ? timing.toUpperCase(Locale.ROOT) : null);
+        if (tt == null) return null;
+        if (tt.contains("STATEMENT")) return "STATEMENT";
+        if (tt.contains("EACH ROW") || tt.endsWith("ROW")) return "ROW";
+        return null;
     }
 
     /**
@@ -1439,6 +1508,27 @@ public class DependencyCrawler {
             into.putIfAbsent((pkg + "." + obj).toUpperCase(Locale.ROOT), id);
         }
         into.putIfAbsent(obj.toUpperCase(Locale.ROOT), id);
+    }
+
+    /**
+     * Records a SOURCE-PARSED trigger node's id keyed {@code SCHEMA.NAME} (upper) so the later
+     * catalog-trigger pass can recognise a trigger it must not emit a second node for. Non-trigger
+     * nodes and nodes without an id/name are ignored.
+     */
+    static void recordCrawledTriggerNodeId(Map<String, String> into, FlowNode node) {
+        if (into == null || node == null) return;
+        if (!"TRIGGER".equalsIgnoreCase(node.getObjectType())) return;
+        String key = triggerDedupKey(node.getSchema(), node.getObjectName());
+        String id = node.getNodeId();
+        if (key == null || id == null || id.isEmpty()) return;
+        into.putIfAbsent(key, id);
+    }
+
+    /** The dedup key shared by the crawler's trigger-node registry and the catalog-trigger pass:
+     *  {@code SCHEMA.NAME} upper, or null when the name is blank. */
+    static String triggerDedupKey(String schema, String name) {
+        if (name == null || name.isBlank()) return null;
+        return (schema == null ? "" : schema.toUpperCase(Locale.ROOT)) + "." + name.toUpperCase(Locale.ROOT);
     }
 
     /**

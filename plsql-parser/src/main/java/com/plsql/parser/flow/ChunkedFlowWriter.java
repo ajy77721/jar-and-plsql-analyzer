@@ -890,6 +890,8 @@ public class ChunkedFlowWriter {
             if (node.getTriggerWhenClause() != null) idx.put("triggerWhenClause", node.getTriggerWhenClause());
             if (node.getTriggerLevel() != null) idx.put("triggerLevel", node.getTriggerLevel());
             if (node.getTriggerBody() != null) idx.put("triggerBody", node.getTriggerBody());
+            if (node.getTriggerType() != null) idx.put("triggerType", node.getTriggerType());
+            if (node.getTriggerStatus() != null) idx.put("triggerStatus", node.getTriggerStatus());
             idx.put("lineStart", node.getLineStart());
             idx.put("lineEnd", node.getLineEnd());
             idx.put("linesOfCode", node.getLinesOfCode());
@@ -1195,6 +1197,10 @@ public class ChunkedFlowWriter {
             if (node.getTriggerWhenClause() != null) detail.put("triggerWhenClause", node.getTriggerWhenClause());
             if (node.getTriggerLevel() != null) detail.put("triggerLevel", node.getTriggerLevel());
             if (node.getTriggerBody() != null) detail.put("triggerBody", node.getTriggerBody());
+            // Catalog-only metadata (ALL_TRIGGERS TRIGGER_TYPE / STATUS) on a catalog-discovered
+            // trigger node — additive, null for every non-catalog trigger node.
+            if (node.getTriggerType() != null) detail.put("triggerType", node.getTriggerType());
+            if (node.getTriggerStatus() != null) detail.put("triggerStatus", node.getTriggerStatus());
 
             // Package-global DECLARATIONS (PACKAGE_BODY/PACKAGE_SPEC nodes only) — the estate
             // globals facet's declared variables (name/dataType/defaultValue/constant). Each
@@ -2006,6 +2012,16 @@ public class ChunkedFlowWriter {
         return sb.toString().toUpperCase();
     }
 
+    /** Fills {@code key} on a table-index map only when the current value is absent or blank — so a
+     *  richer source-parsed value is never overwritten by the catalog's. Null/blank values are
+     *  ignored. */
+    private static void putIfAbsent(Map<String, Object> m, String key, Object value) {
+        if (m == null || value == null) return;
+        if (value instanceof String s && s.isBlank()) return;
+        Object cur = m.get(key);
+        if (cur == null || (cur instanceof String cs && cs.isBlank())) m.put(key, value);
+    }
+
     @SuppressWarnings("unchecked")
     private int writeTableIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
         ArtifactKey tablesDir = apiDir.resolve("tables");
@@ -2186,11 +2202,28 @@ public class ChunkedFlowWriter {
                         List<Map<String, Object>> triggers = (List<Map<String, Object>>) entry.getValue()
                                 .computeIfAbsent("triggers", k -> new ArrayList<Map<String, Object>>());
 
-                        // Deduplicate: skip if trigger with same name already attached from source parsing
+                        // A trigger already present from source parsing (or from a
+                        // catalog-discovered TRIGGER node written above) is the SAME trigger: do not
+                        // add a duplicate row. Instead let the catalog fill the metadata only it
+                        // knows (status/triggerType/event/timing) — the source-parsed body/definition
+                        // and nodeId win because putIfAbsent never overwrites a present value.
                         String trigName = (String) dbTrig.get("name");
-                        boolean exists = triggers.stream().anyMatch(t ->
-                                trigName != null && trigName.equalsIgnoreCase((String) t.get("name")));
-                        if (exists) continue;
+                        Map<String, Object> existing = null;
+                        if (trigName != null) {
+                            for (Map<String, Object> t : triggers) {
+                                if (trigName.equalsIgnoreCase((String) t.get("name"))) { existing = t; break; }
+                            }
+                        }
+                        if (existing != null) {
+                            putIfAbsent(existing, "triggerType", dbTrig.get("triggerType"));
+                            putIfAbsent(existing, "status", dbTrig.get("status"));
+                            putIfAbsent(existing, "event", dbTrig.get("event"));
+                            putIfAbsent(existing, "timing", dbTrig.get("timing"));
+                            putIfAbsent(existing, "tableOps", dbTrig.get("tableOps"));
+                            putIfAbsent(existing, "sequences", dbTrig.get("sequences"));
+                            putIfAbsent(existing, "definition", dbTrig.get("definition"));
+                            continue;
+                        }
 
                         Map<String, Object> trigInfo = new LinkedHashMap<>();
                         trigInfo.put("name", trigName);

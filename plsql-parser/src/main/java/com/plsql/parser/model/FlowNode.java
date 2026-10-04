@@ -54,6 +54,11 @@ public class FlowNode {
     private String triggerWhenClause;
     private String triggerLevel;
     private String triggerBody;
+    // Catalog-only trigger metadata (ALL_TRIGGERS TRIGGER_TYPE / STATUS), carried on a
+    // catalog-discovered trigger node so its per-node detail reports them alongside the
+    // parsed timing/event/level. Null for every other node → serialisation is unchanged.
+    private String triggerType;
+    private String triggerStatus;
     /**
      * Package-level variable DECLARATIONS ({@code name/dataType/defaultValue/constant}) for a node
      * that is a package (PACKAGE_BODY/PACKAGE_SPEC). Must live on FlowNode, not only on
@@ -217,6 +222,10 @@ public class FlowNode {
     public void setTriggerLevel(String triggerLevel) { this.triggerLevel = triggerLevel; }
     public String getTriggerBody() { return triggerBody; }
     public void setTriggerBody(String triggerBody) { this.triggerBody = triggerBody; }
+    public String getTriggerType() { return triggerType; }
+    public void setTriggerType(String triggerType) { this.triggerType = triggerType; }
+    public String getTriggerStatus() { return triggerStatus; }
+    public void setTriggerStatus(String triggerStatus) { this.triggerStatus = triggerStatus; }
     public List<VariableInfo> getPackageVariables() { return packageVariables; }
     public void setPackageVariables(List<VariableInfo> packageVariables) { this.packageVariables = packageVariables; }
 
