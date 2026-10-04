@@ -30,6 +30,16 @@ public class TriggerDiscoverer {
             Pattern.MULTILINE);
     private static final Pattern SEQ_PATTERN = Pattern.compile(
             "(?i)([A-Z_][A-Z0-9_]*(?:\\.[A-Z_][A-Z0-9_]*)?)\\.(NEXTVAL|CURRVAL)\\b");
+    /**
+     * The {@code TRIGGER <name> … ON <table> …} header Oracle's ALL_SOURCE prepends to a trigger
+     * body (see {@link #normalizeTriggerBody}). Matches the header only, up to the optional
+     * {@code REFERENCING} / {@code FOR EACH ROW} / {@code WHEN (…)} clauses; the body follows.
+     */
+    private static final Pattern TRIGGER_HEADER = Pattern.compile(
+            "(?is)^\\s*TRIGGER\\s+\\S+.*?\\bON\\b\\s+[\\w$#.]+"
+            + "(?:\\s+REFERENCING\\s+\\S+\\s+\\S+)*"
+            + "(?:\\s+FOR\\s+EACH\\s+ROW)?"
+            + "(?:\\s+WHEN\\s*\\([^)]*\\))?\\s*");
 
     /**
      * Number of trigger bodies the grammar parse could not handle, i.e. the number of times the
@@ -919,15 +929,17 @@ public class TriggerDiscoverer {
      */
     private List<ParsedObject> parseBodyWithGrammar(String body) {
         if (body == null || body.isBlank()) return null;
+        String normalized = normalizeTriggerBody(body);
+        if (normalized == null || normalized.isBlank()) return null;
         try {
             // DBA_TRIGGERS.TRIGGER_BODY is only the block ([DECLARE] BEGIN … END;), which is a
             // valid *statement* but not a schema object, so the visitor produces no ParsedObject
             // for it on its own. Wrapping it as the body of a synthetic procedure makes it a
             // parseable unit without altering any of the statements inside it (a nested block is
             // legal PL/SQL). A body that already carries its own CREATE header is parsed as-is.
-            String source = body.stripLeading().toUpperCase().startsWith("CREATE")
-                    ? body
-                    : "CREATE OR REPLACE PROCEDURE JAR$TRIGGER_BODY IS\nBEGIN\n" + body + "\nEND;\n";
+            String source = normalized.stripLeading().toUpperCase().startsWith("CREATE")
+                    ? normalized
+                    : "CREATE OR REPLACE PROCEDURE JAR$TRIGGER_BODY IS\nBEGIN\n" + normalized + "\nEND;\n";
             ParseResult result = new PlSqlParserEngine().parseContent(source, "trigger_body.sql");
             if (result == null || result.getObjects() == null || result.getObjects().isEmpty()) {
                 return null;
@@ -937,6 +949,132 @@ public class TriggerDiscoverer {
         } catch (Exception | StackOverflowError e) {
             return null;
         }
+    }
+
+    /**
+     * Normalize a raw catalog trigger body into a shape the dialect parser accepts, before it is
+     * handed to {@link #parseBodyWithGrammar}.
+     *
+     * <p>The body shape a LIVE catalog returns differs from the idealized fixture. Oracle's
+     * {@code ALL_SOURCE} stores a trigger WITHOUT the leading {@code CREATE OR REPLACE}: the text
+     * begins at the {@code TRIGGER} keyword and carries the whole header, e.g.
+     * <pre>
+     * TRIGGER erp_trg_so_stmt_ad
+     * AFTER DELETE ON erp_sales_order
+     * BEGIN
+     *   erp_usp_write_audit_trail('SO_DELETE', …);
+     * END erp_trg_so_stmt_ad;
+     * </pre>
+     * Fed to the parser verbatim — or wrapped in the synthetic procedure below — that fails at the
+     * {@code TRIGGER} keyword, so the body yielded no calls / DML / sequences at all. Strip the
+     * header and keep the block.
+     *
+     * <p>Shapes handled:
+     * <ul>
+     *   <li>a full {@code CREATE …} DDL (DBMS_METADATA fallback) — parsed as-is, unchanged;</li>
+     *   <li>the Oracle {@code ALL_SOURCE} {@code TRIGGER …header… BEGIN … END} — header stripped,
+     *       the block kept;</li>
+     *   <li>a bare {@code [DECLARE] BEGIN … END} block — already valid, returned unchanged (no
+     *       double-wrap);</li>
+     *   <li>bare statements with no enclosing block — wrapped in a synthetic {@code BEGIN … END}
+     *       (the same technique the dynamic-SQL recursive parse uses);</li>
+     *   <li>a {@code NULL} / empty body — left to yield zero calls honestly.</li>
+     * </ul>
+     */
+    static String normalizeTriggerBody(String body) {
+        if (body == null) return null;
+        String text = body.strip();
+        if (text.isEmpty()) return text;
+
+        // Full DDL already carries its own CREATE header — the existing path parses it as-is.
+        if (startsWithKeyword(text, "CREATE")) return text;
+
+        // Oracle ALL_SOURCE trigger text: "TRIGGER <name> … ON <table> … <block>".
+        if (startsWithKeyword(text, "TRIGGER")) {
+            int block = indexOfTopLevelBegin(text);
+            if (block >= 0) return text.substring(block);
+            // Header with no BEGIN (e.g. a bare CALL body): drop the header, wrap the remainder.
+            String rest = stripTriggerHeader(text);
+            return rest.isBlank() ? text : "BEGIN\n" + rest + "\nEND;";
+        }
+
+        // A real block (BEGIN … or DECLARE … BEGIN …) is already parseable — leave it alone.
+        if (indexOfTopLevelBegin(text) >= 0) return text;
+
+        // Bare statements with no enclosing block: synthesize one.
+        return "BEGIN\n" + text + "\nEND;";
+    }
+
+    /** Keyword match at index 0 with a word boundary (so {@code TRIGGER} ≠ {@code TRIGGERED}). */
+    private static boolean startsWithKeyword(String text, String keyword) {
+        return text.regionMatches(true, 0, keyword, 0, keyword.length())
+                && (text.length() == keyword.length()
+                    || !Character.isLetterOrDigit(text.charAt(keyword.length())));
+    }
+
+    /** Keyword match at {@code idx} with a word boundary on both sides. */
+    private static boolean keywordAt(String text, int idx, String keyword) {
+        int end = idx + keyword.length();
+        if (end > text.length()) return false;
+        if (!text.regionMatches(true, idx, keyword, 0, keyword.length())) return false;
+        boolean leftOk = idx == 0 || !Character.isLetterOrDigit(text.charAt(idx - 1))
+                && text.charAt(idx - 1) != '_';
+        boolean rightOk = end == text.length()
+                || !Character.isLetterOrDigit(text.charAt(end)) && text.charAt(end) != '_';
+        return leftOk && rightOk;
+    }
+
+    /**
+     * Index of the first top-level {@code BEGIN} keyword, or {@code -1}. "Top-level" means not
+     * inside a single-quoted literal, a {@code --} line comment, a {@code /* … *}{@code /} block
+     * comment, nor nested in parentheses — so the {@code BEGIN} that opens the trigger's own block
+     * is found (not one inside a {@code WHEN (…)} guard or a string).
+     */
+    private static int indexOfTopLevelBegin(String text) {
+        int paren = 0;
+        int i = 0;
+        int n = text.length();
+        while (i < n) {
+            char c = text.charAt(i);
+            if (c == '\'') {                                   // single-quoted literal
+                i++;
+                while (i < n) {
+                    if (text.charAt(i) == '\'') {
+                        if (i + 1 < n && text.charAt(i + 1) == '\'') { i += 2; continue; }
+                        i++;
+                        break;
+                    }
+                    i++;
+                }
+                continue;
+            }
+            if (c == '-' && i + 1 < n && text.charAt(i + 1) == '-') {   // line comment
+                i += 2;
+                while (i < n && text.charAt(i) != '\n') i++;
+                continue;
+            }
+            if (c == '/' && i + 1 < n && text.charAt(i + 1) == '*') {   // block comment
+                i += 2;
+                while (i + 1 < n && !(text.charAt(i) == '*' && text.charAt(i + 1) == '/')) i++;
+                i = Math.min(n, i + 2);
+                continue;
+            }
+            if (c == '(') { paren++; i++; continue; }
+            if (c == ')') { if (paren > 0) paren--; i++; continue; }
+            if (paren == 0 && (c == 'B' || c == 'b') && keywordAt(text, i, "BEGIN")) return i;
+            i++;
+        }
+        return -1;
+    }
+
+    /**
+     * Remove the {@code TRIGGER <name> … ON <table> [REFERENCING …] [FOR EACH ROW] [WHEN (…)]}
+     * header from a trigger text, returning the statement body that follows. Only used for the
+     * rare header-with-no-BEGIN shape; the normal header+BEGIN case is cut at the BEGIN instead.
+     */
+    private static String stripTriggerHeader(String text) {
+        Matcher m = TRIGGER_HEADER.matcher(text);
+        return m.find() ? text.substring(m.end()) : text;
     }
 
     private List<TableOperationInfo> collectTableOperations(List<ParsedObject> objects) {
