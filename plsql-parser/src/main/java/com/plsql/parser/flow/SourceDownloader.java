@@ -379,6 +379,58 @@ public class SourceDownloader {
         }
     }
 
+    /**
+     * Persist a freshly fetched source as the per-object {@code sources/<SCHEMA>.<NAME>.<ext>}
+     * artifact — the SAME artifact the per-object crawl path writes (see
+     * {@code DependencyCrawler#writeNodeSource}) and the UI's {@code /source/<name>.<ext>} endpoint
+     * serves, and the same naming {@link #checkLocalCache} reads back on a fast re-run.
+     *
+     * <p>This is the write the A2 bulk pull was missing: it returned the fetched texts to the
+     * parser but never materialised them under {@code sources/}, so bulk-pulled procedures had no
+     * {@code .prc} artifact and the UI's source panel 404'd. Every source-acquisition path (bulk,
+     * per-object, DBMS_METADATA fallback) funnels through here so the artifact set is complete no
+     * matter which path resolved the text.
+     *
+     * <p>Best-effort and idempotent: a missing store/dir/owner, an already-present artifact or any
+     * IO error is a no-op — a failed persistence must never fail a crawl. The extension follows
+     * {@link #typeToExtension} ({@code .prc}/{@code .fnc}/{@code .pkb}/{@code .pks}/{@code .sql}),
+     * exactly mirroring the per-object writer's extension choice.
+     */
+    void persistSourceArtifact(String objectName, String objectType, String source) {
+        if (store == null || localCacheDir == null || objectName == null || objectType == null
+                || source == null || source.isBlank()) {
+            return;
+        }
+        String upper = objectName.toUpperCase();
+        String owner = cacheOwner(upper);
+        // Mirror the per-object writer: an unknown owner is materialised as "UNKNOWN" rather than
+        // dropping the artifact, so every fetched object still gets a sources/ file.
+        String schema = owner != null ? owner : "UNKNOWN";
+        String ext = typeToExtension(objectType.toUpperCase());
+        // Defensive: the catalog should never yield a path separator, but a stray one must not let
+        // a write escape the sources/ prefix.
+        if (schema.indexOf('/') >= 0 || schema.indexOf('\\') >= 0
+                || upper.indexOf('/') >= 0 || upper.indexOf('\\') >= 0) {
+            return;
+        }
+        ArtifactKey file = localCacheDir.resolve(schema + "." + upper + "." + ext);
+        try {
+            if (store.exists(file)) return;
+            byte[] bytes = source.getBytes(StandardCharsets.UTF_8);
+            try (OutputStream out = store.write(file, bytes.length)) {
+                out.write(bytes);
+            }
+            // A lazily-built local-cache index would not see the new leaf; drop it so the next
+            // lookup re-lists and finds this artifact.
+            localCacheIndex = null;
+            log.debug("[SourceDownloader] Wrote sources/{} artifact for {} {}",
+                    file.leaf(), objectType, upper);
+        } catch (IOException e) {
+            log.debug("[SourceDownloader] Source artifact store failed for {} {}: {}",
+                    objectType, upper, e.getMessage());
+        }
+    }
+
     /** Owner to key the source cache by: the known owner, else the catalog's, else null (disabled). */
     private String cacheOwner(String upperName) {
         String owner = ownerCache.get(upperName);
@@ -751,6 +803,7 @@ public class SourceDownloader {
             if (source != null) {
                 sourceCache.put(key, source);
                 storeSourceCache(objectName, objectType, source);
+                persistSourceArtifact(objectName, objectType, source);
                 connManager.recordSuccess(objectName);
             }
             connManager.noteQuerySuccess();
@@ -896,6 +949,7 @@ public class SourceDownloader {
                 if (source != null) {
                     sourceCache.put(key, source);
                     storeSourceCache(objectName, type, source);
+                    persistSourceArtifact(objectName, type, source);
                     connManager.recordSuccess(objectName);
                     connManager.returnToPool(conn);
                     conn = null;
@@ -955,6 +1009,7 @@ public class SourceDownloader {
             if (typeAndSource != null) {
                 sourceCache.put(typeAndSource[0] + ":" + objectName, typeAndSource[1]);
                 storeSourceCache(objectName, typeAndSource[0], typeAndSource[1]);
+                persistSourceArtifact(objectName, typeAndSource[0], typeAndSource[1]);
                 connManager.recordSuccess(objectName);
                 connManager.noteQuerySuccess();
                 return typeAndSource[1];
@@ -1240,6 +1295,11 @@ public class SourceDownloader {
             sourceCache.put(type + ":" + name, source);
             if (owner != null) ownerCache.put(name, owner.toUpperCase());
             storeSourceCache(name, type, source);
+            // The A2 bulk pull must materialise the SAME per-object sources/ artifact the
+            // per-object path does, or the bulk-pulled objects (e.g. every .prc) have no source
+            // file and the UI's source panel 404s. Persist here, from the already-fetched text —
+            // no re-fetch.
+            persistSourceArtifact(name, type, source);
             out.put(name, source);
         }
     }
