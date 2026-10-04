@@ -164,6 +164,9 @@ public class PostgresProcedureParser implements StoredProcedureParser {
             ti.setLine(op.getLine());
             // Carried through for the shared TableOperationEnricher.
             ti.setSqlText(op.getSqlText());
+            // TEMP classification set by the CREATE TEMP|TEMPORARY TABLE visitor.
+            ti.setTableKind(op.getTableKind());
+            ti.setTempScope(op.getTempScope());
             if (op.getReturningColumns() != null && !op.getReturningColumns().isEmpty()) {
                 ti.setReturningColumns(new ArrayList<>(op.getReturningColumns()));
             }

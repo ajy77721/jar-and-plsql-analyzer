@@ -2560,6 +2560,8 @@ public class DependencyCrawler {
             rt.setColumnUsages(op.getColumnUsages());
             rt.setDdl(op.getDdl());
             rt.setObjectType(op.getObjectType());
+            rt.setTableKind(op.getTableKind());
+            rt.setTempScope(op.getTempScope());
             rt.setSubqueryContext(op.getSubqueryContext());
             rt.setDbLink(op.getDbLink());
             rt.setMergeClause(op.getMergeClause());
@@ -2623,6 +2625,15 @@ public class DependencyCrawler {
                 sti.setObjectType(objType != null ? objType : "TABLE");
                 return sti;
             });
+
+            // TEMP as the fourth table kind: a parse-time temp classification on any op for this
+            // table (from the dialect visitor) is carried onto the aggregate entry. It never
+            // overrides a VIEW/MATERIALIZED_VIEW catalog type, but a temp table has no catalog row
+            // anyway, so there is nothing to conflict with.
+            if (op.getTableKind() != null) {
+                info.setTableKind(op.getTableKind());
+                if (op.getTempScope() != null) info.setTempScope(op.getTempScope());
+            }
 
             if (op.getOperation() != null) {
                 info.getOperations().add(op.getOperation().toUpperCase());

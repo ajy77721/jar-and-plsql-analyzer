@@ -8,6 +8,19 @@ public class SchemaTableInfo {
     private String schema;
     private String tableName;
     private String objectType;
+
+    /**
+     * The true table kind — {@code TABLE} / {@code VIEW} / {@code MATERIALIZED_VIEW} / {@code TEMP}
+     * — established at parse time by the dialect visitors (see
+     * {@link TableOperationInfo#getTableKind()}). {@code @JsonInclude(NON_EMPTY)} keeps it out of
+     * the intermediate artifact for the default TABLE kind, so rows written before this field
+     * existed stay byte-identical.
+     */
+    private String tableKind;
+
+    /** The temp table's lifetime scope ({@code ON COMMIT PRESERVE ROWS} etc.); null unless TEMP. */
+    private String tempScope;
+
     private Set<String> operations = new LinkedHashSet<>();
     private List<Integer> lines = new ArrayList<>();
     private Set<String> referencedBy = new LinkedHashSet<>();
@@ -30,6 +43,10 @@ public class SchemaTableInfo {
     public void setTableName(String tableName) { this.tableName = tableName; }
     public String getObjectType() { return objectType; }
     public void setObjectType(String objectType) { this.objectType = objectType; }
+    public String getTableKind() { return tableKind; }
+    public void setTableKind(String tableKind) { this.tableKind = tableKind; }
+    public String getTempScope() { return tempScope; }
+    public void setTempScope(String tempScope) { this.tempScope = tempScope; }
     public Set<String> getOperations() { return operations; }
     public void setOperations(Set<String> operations) { this.operations = operations; }
     public List<Integer> getLines() { return lines; }

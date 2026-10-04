@@ -278,6 +278,10 @@ PA.api = {
                 tableName: t.name,
                 tableSchema: t.schema || '',
                 objectType: t.objectType || 'TABLE',
+                // The true kind (TABLE/VIEW/MATERIALIZED_VIEW/TEMP) + its scope, so the left panel
+                // can badge a temp table rather than only reading its objectType.
+                kind: t.kind || t.objectType || 'TABLE',
+                tempScope: t.tempScope || null,
                 operations: t.operations || [],
                 accessCount: t.accessCount || 0
             }));

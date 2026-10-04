@@ -850,10 +850,21 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
     // from the same extractTableName/extractTableSchema helpers every other DML op uses.
     @Override
     public Void visitCreateTableStmt(PostgresParser.CreateTableStmtContext ctx) {
-        String child = recordCreateTable(ctx.tableRef(), ctx);
+        String child = recordCreateTable(ctx.tableRef(), ctx, isTempTable(ctx.createTempModifier()));
         recordInherits(child, ctx.createTableTailItem(), ctx);
         visitCtasQuery(ctx.createTableTailItem());
         return null;   // rest of the body consumed opaquely, exactly as before
+    }
+
+    /**
+     * Whether a Postgres {@code createTempModifier} marks a TEMP/TEMPORARY table. {@code UNLOGGED}
+     * is deliberately NOT temp — it is a persistent table with different durability — so it is left
+     * as an ordinary TABLE. The modifier is a real parse-tree node, so this is grammar-first.
+     */
+    private static boolean isTempTable(PostgresParser.CreateTempModifierContext mod) {
+        if (mod == null) return false;
+        String t = mod.getText().toUpperCase(java.util.Locale.ROOT);
+        return t.contains("TEMP");
     }
 
     // Top-level `CREATE TABLE t (...)` — a standalone schema script rather than a statement in a
@@ -864,7 +875,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
     // top-level branch of visitAlterTable does for ALTER TABLE.
     @Override
     public Void visitCreateTableTop(PostgresParser.CreateTableTopContext ctx) {
-        String tableName = recordCreateTable(ctx.tableRef(), ctx);
+        String tableName = recordCreateTable(ctx.tableRef(), ctx, isTempTable(ctx.createTempModifier()));
         recordInherits(tableName, ctx.createTableTailItem(), ctx);
 
         result.setType(PostgresRoutineInfo.RoutineType.CREATE_TABLE);
@@ -900,13 +911,16 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      * @return the table's name, or {@code null} if it could not be read.
      */
     private String recordCreateTable(PostgresParser.TableRefContext ref,
-                                     org.antlr.v4.runtime.ParserRuleContext stmt) {
+                                     org.antlr.v4.runtime.ParserRuleContext stmt,
+                                     boolean isTemp) {
         PostgresTableOpInfo op = new PostgresTableOpInfo();
         op.setDmlType(PostgresTableOpInfo.DmlType.CREATE);
         op.setSchemaName(extractTableSchema(ref));
         op.setTableName(extractTableName(ref));
         op.setLine(stmt.getStart().getLine());
         op.setSqlText(originalText(stmt));
+        // TEMP as the fourth table kind — set from the grammar's own createTempModifier node.
+        if (isTemp) { op.setTableKind("TEMP"); op.setTempScope("SESSION"); }
         result.getTableOps().add(op);
         return op.getTableName();
     }

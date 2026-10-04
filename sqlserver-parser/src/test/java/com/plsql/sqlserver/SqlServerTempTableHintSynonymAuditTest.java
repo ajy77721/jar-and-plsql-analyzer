@@ -320,4 +320,45 @@ public class SqlServerTempTableHintSynonymAuditTest {
         assertTrue(foundRealTable, "real ORDERS table must be captured from a bare 3-part reference");
         assertFalse(foundPhantomDboFragment, "no phantom DBO fragment table should be produced");
     }
+
+    /**
+     * Golden: TEMP as the FOURTH table kind. SQL Server's temp objects are session-local and are
+     * never in the catalog, so the name prefix itself (#/##/@) is the classification signal — a
+     * parse-side, grammar-adjacent decision (the name comes off the parse tree), never a lookup.
+     */
+    @Test
+    @DisplayName("TEMP kind: #local, ##global and @table-variable are classified TEMP with their scope")
+    void tempKindIsClassified() {
+        SqlServerRoutineInfo r = parse("CREATE PROCEDURE p_tmp\n"
+                + "AS\n"
+                + "BEGIN\n"
+                + "  CREATE TABLE #stage (id INT, val INT);\n"
+                + "  CREATE TABLE ##globalstage (id INT);\n"
+                + "  DECLARE @ids TABLE (id INT);\n"
+                + "  SELECT id FROM @ids;\n"
+                + "  SELECT id FROM RealTable;\n"
+                + "END");
+
+        SqlServerTableOpInfo local = r.getTableOps().stream()
+                .filter(t -> "#stage".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        assertNotNull(local, "#stage must be captured as a table op");
+        assertEquals("TEMP", local.getTableKind(), "#local must be classified TEMP");
+        assertEquals("SESSION", local.getTempScope());
+
+        SqlServerTableOpInfo global = r.getTableOps().stream()
+                .filter(t -> "##globalstage".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        assertNotNull(global, "##globalstage must be captured as a table op");
+        assertEquals("TEMP", global.getTableKind(), "##global must be classified TEMP");
+        assertEquals("GLOBAL SESSION", global.getTempScope());
+
+        SqlServerTableOpInfo var = r.getTableOps().stream()
+                .filter(t -> "@ids".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        assertNotNull(var, "@ids table variable must be captured as a table op");
+        assertEquals("TEMP", var.getTableKind(), "@table-variable must be classified TEMP");
+        assertEquals("BATCH", var.getTempScope());
+
+        // A real persistent table is untouched.
+        assertTrue(r.getTableOps().stream().anyMatch(t -> t.getTableKind() == null),
+                "an ordinary persistent table must keep a null tableKind (defaults to TABLE)");
+    }
 }

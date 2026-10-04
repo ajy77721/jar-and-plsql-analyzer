@@ -415,9 +415,16 @@ PA._renderLeftProcItem = function(n) {
     // view/materialized view is never mislabeled "T" (table) in this list.
     var objType = t.objectType || 'TABLE';
     var isMv = objType === 'MATERIALIZED VIEW' || objType === 'MATERIALIZED_VIEW';
-    var typeCls = objType === 'VIEW' ? 'view' : isMv ? 'mv' : 'table';
-    var typeLabel = objType === 'VIEW' ? 'V' : isMv ? 'MV' : 'T';
-    var typeTip = objType === 'VIEW' ? 'VIEW' : isMv ? 'MATERIALIZED VIEW' : 'TABLE';
+    // TEMP (the fourth table kind) takes precedence over the objectType badge: a temp table is
+    // session-scoped and not persisted, which the reader should see at a glance.
+    var isTemp = t.kind === 'TEMP' || t.tableKind === 'TEMP';
+    var typeCls = isTemp ? 'temp' : objType === 'VIEW' ? 'view' : isMv ? 'mv' : 'table';
+    var typeLabel = isTemp ? 'TMP' : objType === 'VIEW' ? 'V' : isMv ? 'MV' : 'T';
+    var typeTip = isTemp
+        ? 'TEMP' + (t.tempScope ? ' — ' + t.tempScope : '')
+            + ' — session-scoped, not persisted. Modernization note: replace with application-memory '
+            + 'or the target stack\'s own temp handling.'
+        : objType === 'VIEW' ? 'VIEW' : isMv ? 'MATERIALIZED VIEW' : 'TABLE';
 
     var html = '<div class="lp-item" data-filter="' + PA.escAttr(t.tableName || '') + '" onclick="PA.tableDetail.open(\'' + PA.escJs(t.tableName || '') + '\', \'\')" style="cursor:pointer">';
     html += '<span class="to-type-badge ' + typeCls + '" style="font-size:7px;min-width:12px;text-align:center" title="' + typeTip + '">' + typeLabel + '</span>';

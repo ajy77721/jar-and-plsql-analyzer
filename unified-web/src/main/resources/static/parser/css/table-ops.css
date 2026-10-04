@@ -64,6 +64,8 @@
 .op-filter-pill.CREATE { color: var(--badge-teal); background: var(--badge-teal-bg); }
 .op-filter-pill.TRUNCATE { color: var(--badge-orange); background: var(--badge-orange-bg); }
 .op-filter-pill.DROP { color: var(--badge-red); background: var(--badge-red-bg); }
+/* TEMP is a table KIND, not an operation, but shares the pill mechanism (types=TEMP). */
+.op-filter-pill.TEMP { color: var(--badge-orange); background: var(--badge-orange-bg); }
 .op-filter-clear { font-size: 9px; color: var(--text-muted); cursor: pointer; text-decoration: underline; margin-left: 4px; }
 .op-filter-clear:hover { color: var(--accent); }
 
@@ -107,6 +109,7 @@ th.sort-desc::after { border-top: 5px solid var(--accent); }
 .to-type-badge.table { background: var(--badge-teal-bg); color: var(--badge-teal); }
 .to-type-badge.view { background: var(--badge-blue-bg); color: var(--badge-blue); }
 .to-type-badge.mv { background: var(--badge-purple-bg); color: var(--badge-purple); }
+.to-type-badge.temp { background: var(--badge-orange-bg); color: var(--badge-orange); }
 
 .to-trigger-count {
     display: inline-block; padding: 2px 8px; border-radius: var(--radius-lg); cursor: pointer;

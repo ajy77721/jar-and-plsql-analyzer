@@ -174,6 +174,9 @@ public class Db2ProcedureParser implements StoredProcedureParser {
             ti.setLine(op.getLine());
             // Carried through for the shared TableOperationEnricher.
             ti.setSqlText(op.getSqlText());
+            // TEMP classification set by the DECLARE GLOBAL TEMPORARY TABLE visitor.
+            ti.setTableKind(op.getTableKind());
+            ti.setTempScope(op.getTempScope());
             if (op.getJoins() != null && !op.getJoins().isEmpty()) {
                 List<JoinInfo> joins = new ArrayList<>();
                 for (Db2JoinInfo j : op.getJoins()) {

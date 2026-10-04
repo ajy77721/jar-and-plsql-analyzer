@@ -3974,6 +3974,17 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         t.setSchemaName(schema);
         t.setTableName(name);
         t.setLine(line);
+        // TEMP as the fourth table kind. The name's own prefix IS the signal T-SQL uses to make a
+        // table session-local — `#name` (local temp), `##name` (global temp), `@name` (table
+        // variable) — so this is a parse-side classification, never a catalog lookup (temp tables
+        // and table variables are absent from sys.objects by construction). A schema-qualified
+        // reference can never be a temp table (temp objects are always unqualified), so only the
+        // bare name is classified.
+        if (schema == null && !name.isEmpty()) {
+            if (name.startsWith("##")) { t.setTableKind("TEMP"); t.setTempScope("GLOBAL SESSION"); }
+            else if (name.startsWith("#")) { t.setTableKind("TEMP"); t.setTempScope("SESSION"); }
+            else if (name.startsWith("@")) { t.setTableKind("TEMP"); t.setTempScope("BATCH"); }
+        }
         result.getTableOps().add(t);
         return t;
     }

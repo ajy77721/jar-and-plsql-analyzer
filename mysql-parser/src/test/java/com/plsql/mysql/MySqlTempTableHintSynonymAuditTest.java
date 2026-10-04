@@ -309,4 +309,32 @@ public class MySqlTempTableHintSynonymAuditTest {
                 + "anywhere in mysql-parser's grammar or visitor, consistent with MySQL itself "
                 + "having no CREATE SYNONYM statement");
     }
+
+    /**
+     * Golden: TEMP as the FOURTH table kind. The grammar rule accepts an OPTIONAL TEMPORARY
+     * keyword, so only the TEMPORARY form is temp — a plain CREATE TABLE must stay unclassified.
+     */
+    @Test
+    @DisplayName("TEMP kind: CREATE TEMPORARY TABLE classified TEMP (SESSION), plain CREATE TABLE not")
+    void tempKindIsClassified() {
+        MySqlGrammarEngine engine = new MySqlGrammarEngine();
+        String sql =
+                "CREATE PROCEDURE proc_tmp_kind()\n" +
+                "BEGIN\n" +
+                "  CREATE TEMPORARY TABLE tmp_ids (id INT);\n" +
+                "  CREATE TABLE perm_t (id INT);\n" +
+                "END";
+        MySqlRoutineInfo r = engine.parse(sql, "proc_tmp_kind", null);
+
+        MySqlTableOpInfo tmp = r.getTableOps().stream()
+                .filter(t -> "tmp_ids".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        assertNotNull(tmp, "tmp_ids must be captured as a CREATE table op");
+        assertEquals("TEMP", tmp.getTableKind());
+        assertEquals("SESSION", tmp.getTempScope());
+
+        MySqlTableOpInfo perm = r.getTableOps().stream()
+                .filter(t -> "perm_t".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        assertNotNull(perm, "perm_t must be captured");
+        assertNull(perm.getTableKind(), "a plain CREATE TABLE must not be classified TEMP");
+    }
 }

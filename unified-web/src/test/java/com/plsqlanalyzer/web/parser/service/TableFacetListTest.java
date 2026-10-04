@@ -177,4 +177,49 @@ class TableFacetListTest {
                             + tree.get(i).path("name").asText());
         }
     }
+
+    /**
+     * TEMP as the FOURTH table kind, served through {@code /tables/list}: a row the parser flagged
+     * TEMP (with its lifetime scope) carries {@code kind=TEMP}; a row with no flag defaults to its
+     * objectType (TABLE/VIEW), byte-compatible with artifacts written before the field existed.
+     */
+    @Test
+    void exposesTempKindAndScope() throws IOException {
+        tablesIndex("""
+                {"tables":[
+                  {"name":"GTT_STAGING","schema":"APP","objectType":"TABLE","tableKind":"TEMP",
+                   "tempScope":"ON COMMIT DELETE ROWS","allOperations":["DDL"],"usedBy":[]},
+                  {"name":"ORDERS","schema":"APP","objectType":"TABLE","allOperations":["SELECT"],"usedBy":[]},
+                  {"name":"V_ORDERS","schema":"APP","objectType":"VIEW","allOperations":["SELECT"],"usedBy":[]}]}""");
+
+        JsonNode rows = rowsOf(reader.getTablesList(ANALYSIS));
+        JsonNode gtt = rows.get(0);
+        assertEquals("TEMP", gtt.path("kind").asText(), "a parse-flagged temp table must serve kind=TEMP");
+        assertEquals("ON COMMIT DELETE ROWS", gtt.path("tempScope").asText());
+
+        JsonNode orders = rows.get(1);
+        assertEquals("TABLE", orders.path("kind").asText(), "an un-flagged row defaults to TABLE");
+        assertFalse(orders.has("tempScope"), "a non-temp row carries no tempScope");
+
+        JsonNode view = rows.get(2);
+        assertEquals("VIEW", view.path("kind").asText(), "a view row defaults to its objectType");
+    }
+
+    /** The header breakdown: per-kind counts from the same single streaming pass as the total. */
+    @Test
+    void summaryCountsKindsIncludingTemp() throws IOException {
+        tablesIndex("""
+                {"totalTables":4,"tables":[
+                  {"name":"GTT_A","objectType":"TABLE","tableKind":"TEMP","allOperations":["DDL"],"usedBy":[]},
+                  {"name":"T1","objectType":"TABLE","allOperations":["SELECT"],"usedBy":[]},
+                  {"name":"V1","objectType":"VIEW","allOperations":["SELECT"],"usedBy":[]},
+                  {"name":"MV1","objectType":"MATERIALIZED_VIEW","allOperations":["SELECT"],"usedBy":[]}]}""");
+
+        JsonNode s = reader.getTablesSummary(ANALYSIS);
+        assertEquals(4, s.path("validatedTableCount").asInt());
+        assertEquals(1, s.path("tempTableCount").asInt(), "one temp table");
+        assertEquals(1, s.path("tableCount").asInt(), "one real table");
+        assertEquals(2, s.path("viewCount").asInt(), "a view + a materialized view");
+        assertEquals(1, s.path("tableKindCounts").path("TEMP").asInt());
+    }
 }

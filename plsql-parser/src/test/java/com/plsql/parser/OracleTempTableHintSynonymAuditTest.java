@@ -75,6 +75,10 @@ public class OracleTempTableHintSynonymAuditTest extends ParserTestBase {
         org.junit.jupiter.api.Assertions.assertNotNull(op,
                 "standalone CREATE GLOBAL TEMPORARY TABLE must produce a table op");
         org.junit.jupiter.api.Assertions.assertEquals("DDL", op.getOperation());
+        // Golden: TEMP as the FOURTH table kind, with the ON COMMIT lifetime scope.
+        org.junit.jupiter.api.Assertions.assertEquals("TEMP", op.getTableKind(),
+                "CREATE GLOBAL TEMPORARY TABLE must be classified TEMP");
+        org.junit.jupiter.api.Assertions.assertEquals("ON COMMIT DELETE ROWS", op.getTempScope());
     }
 
     @Test
@@ -101,6 +105,9 @@ public class OracleTempTableHintSynonymAuditTest extends ParserTestBase {
         org.junit.jupiter.api.Assertions.assertNotNull(op,
                 "EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE ...' must be extracted as DDL, same as a plain dynamic CREATE TABLE");
         org.junit.jupiter.api.Assertions.assertEquals("DDL", op.getOperation());
+        // Golden: a dynamic GTT is classified TEMP too, with its ON COMMIT PRESERVE ROWS scope.
+        org.junit.jupiter.api.Assertions.assertEquals("TEMP", op.getTableKind());
+        org.junit.jupiter.api.Assertions.assertEquals("ON COMMIT PRESERVE ROWS", op.getTempScope());
     }
 
     @Test

@@ -162,7 +162,11 @@ PA.tableOps = {
     _initOpPills: function() {
         var container = document.getElementById('toOpPills');
         if (!container) return;
-        var ops = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'CREATE', 'TRUNCATE', 'DROP'];
+        // TEMP is a fourth, filterable category alongside the operations: the server's tables
+        // facet exposes the row's true kind as a `types` value, so the same pill mechanism filters
+        // to temp tables (`types=TEMP`) with no extra request parameter. Selecting it with an
+        // operation is an OR, exactly as selecting two operations already is.
+        var ops = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'CREATE', 'TRUNCATE', 'DROP', 'TEMP'];
         var html = '';
         for (var i = 0; i < ops.length; i++) {
             var op = ops[i];
@@ -254,8 +258,20 @@ PA.tableOps = {
         // see PA.classifyTableKind's own doc comment (shared/tableFramework.js) for why this
         // matters (found live: #stage6/##g103/@ids105 all mixed into one "tables" list with no way
         // to tell them apart from a real table at a glance).
-        var kind = PA.classifyTableKind(t.tableName);
-        var kindBadge = kind.code === 'TABLE' ? '' : '<span class="kind-badge ' + kind.cls + '" title="' + esc(kind.label) + '">' + esc(kind.label) + '</span>';
+        // Prefer the parse-time classification (tableKind) — it covers every dialect's temp syntax
+        // (Oracle GLOBAL TEMPORARY, Db2 DECLARE GLOBAL TEMPORARY, Postgres/MySQL TEMPORARY), not
+        // just SQL Server's #/##/@ name prefixes. Fall back to the name-pattern classifier for
+        // rows written before the field existed.
+        var kind;
+        if (t.tableKind === 'TEMP' || t.kind === 'TEMP') {
+            var scope = t.tempScope ? (' — ' + t.tempScope) : '';
+            kind = { code: 'TEMP', label: 'TEMP', cls: 'kind-temp',
+                     tip: 'TEMP' + scope + ' — session-scoped, not persisted. Modernization note: '
+                        + 'replace with application-memory or the target stack\'s own temp handling.' };
+        } else {
+            kind = PA.classifyTableKind(t.tableName);
+        }
+        var kindBadge = kind.code === 'TABLE' ? '' : '<span class="kind-badge ' + kind.cls + '" title="' + esc(kind.tip || kind.label) + '">' + esc(kind.label) + '</span>';
 
         var html = '<tr class="to-row" onclick="PA.tf.toggleDetail(\'to\',' + idx + ')">';
         html += '<td><span style="color:var(--text-muted)">' + esc(t.tableSchema || '-') + '</span></td>';

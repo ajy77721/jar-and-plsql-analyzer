@@ -302,4 +302,41 @@ class PostgresTempTableHintSynonymAuditTest {
         org.junit.jupiter.api.Assertions.assertTrue(ordersCapturedCorrectly,
                 "3-part db.schema.table reference must resolve to schema='billing' table='orders'");
     }
+
+    /**
+     * Golden: TEMP as the FOURTH table kind, set from the grammar's own createTempModifier node.
+     * A plain CREATE TABLE (and UNLOGGED, which is persistent) must stay unclassified.
+     */
+    @Test
+    @DisplayName("TEMP kind: CREATE TEMP/TEMPORARY TABLE classified TEMP, plain CREATE TABLE not")
+    void tempKindIsClassified() {
+        String src =
+                "CREATE OR REPLACE FUNCTION fn_temp_kind()\n" +
+                "RETURNS VOID\n" +
+                "LANGUAGE plpgsql AS $$\n" +
+                "BEGIN\n" +
+                "  CREATE TEMP TABLE tmp_a (id INT);\n" +
+                "  CREATE TEMPORARY TABLE tmp_b (id INT);\n" +
+                "  CREATE TABLE perm_t (id INT);\n" +
+                "END;\n" +
+                "$$;\n";
+        PostgresRoutineInfo r = engine.parse(src, "fn_temp_kind", null);
+
+        PostgresTableOpInfo a = r.getTableOps().stream()
+                .filter(t -> "tmp_a".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        org.junit.jupiter.api.Assertions.assertNotNull(a, "tmp_a must be captured");
+        org.junit.jupiter.api.Assertions.assertEquals("TEMP", a.getTableKind());
+        org.junit.jupiter.api.Assertions.assertEquals("SESSION", a.getTempScope());
+
+        PostgresTableOpInfo b = r.getTableOps().stream()
+                .filter(t -> "tmp_b".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        org.junit.jupiter.api.Assertions.assertNotNull(b, "tmp_b must be captured");
+        org.junit.jupiter.api.Assertions.assertEquals("TEMP", b.getTableKind());
+
+        PostgresTableOpInfo perm = r.getTableOps().stream()
+                .filter(t -> "perm_t".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        org.junit.jupiter.api.Assertions.assertNotNull(perm, "perm_t must be captured");
+        org.junit.jupiter.api.Assertions.assertNull(perm.getTableKind(),
+                "a plain CREATE TABLE must not be classified TEMP");
+    }
 }

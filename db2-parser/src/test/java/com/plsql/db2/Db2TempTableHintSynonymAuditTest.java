@@ -365,4 +365,20 @@ class Db2TempTableHintSynonymAuditTest {
         assertNotNull(op);
         assertEquals("MYSCHEMA", op.getSchemaName());
     }
+
+    /**
+     * Golden: TEMP as the FOURTH table kind, with the Db2 lifetime scope (ON COMMIT PRESERVE/DELETE
+     * ROWS) read from the same parsed DECLARE GLOBAL TEMPORARY TABLE statement.
+     */
+    @Test
+    @DisplayName("TEMP kind: DECLARE GLOBAL TEMPORARY TABLE classified TEMP with ON COMMIT scope")
+    void tempKindIsClassified() {
+        Db2RoutineInfo r = engine.parse(TEMP_TABLE_JOIN_SRC, "p_temp_kind", null);
+        assertTrue(r.getErrors().isEmpty(), "unexpected parse errors: " + r.getErrors());
+        Db2TableOpInfo op = r.getTableOps().stream()
+                .filter(t -> "TMP_ORDERS".equalsIgnoreCase(t.getTableName())).findFirst().orElse(null);
+        assertNotNull(op, "the declared temp table must be captured as a CREATE table op");
+        assertEquals("TEMP", op.getTableKind(), "DECLARE GLOBAL TEMPORARY TABLE must be TEMP");
+        assertEquals("ON COMMIT PRESERVE ROWS", op.getTempScope());
+    }
 }

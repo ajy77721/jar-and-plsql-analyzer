@@ -1140,6 +1140,18 @@ public class ChunkedFlowWriter {
         }
         indexRoot.put("overloads", overloads);
 
+        // Truthful per-type node counts. `totalNodes` stays the raw node count (every node),
+        // but the UI's header badges need the breakdown: PROCEDURE/FUNCTION (the "Procs" badge),
+        // TRIGGER (its own), plus packages/jobs/views-as-nodes which were previously lumped in.
+        // Additive: a client that only knows totalNodes is unaffected.
+        Map<String, Integer> typeCounts = new LinkedHashMap<>();
+        for (Map<String, Object> idx : indexNodes) {
+            Object ot = idx.get("objectType");
+            String t = ot == null ? "PROCEDURE" : ot.toString().toUpperCase(Locale.ROOT);
+            typeCounts.merge(t, 1, Integer::sum);
+        }
+        indexRoot.put("typeCounts", typeCounts);
+
         indexRoot.put("nodes", indexNodes);
 
         ArtifactKey indexKey = apiDir.resolve("index.json");
@@ -2027,12 +2039,21 @@ public class ChunkedFlowWriter {
         ArtifactKey tablesDir = apiDir.resolve("tables");
 
         Map<String, String> tableObjectTypes = new LinkedHashMap<>();
+        // TEMP as the fourth table kind: the parse-time tableKind/tempScope (set by the dialect
+        // visitors) carried from the intermediate tables.json, keyed the same way (SCHEMA.NAME).
+        // Only TEMP is stamped onto the entry, so rows that are not temp stay byte-identical.
+        Map<String, String> tableTempKinds = new LinkedHashMap<>();
+        Map<String, String> tableTempScopes = new LinkedHashMap<>();
         if (store.exists(tablesKey)) {
             try (InputStream in = store.read(tablesKey)) {
                 Map<String, SchemaTableInfo> tableMap = mapper.readValue(in,
                         mapper.getTypeFactory().constructMapType(LinkedHashMap.class, String.class, SchemaTableInfo.class));
                 for (var e : tableMap.entrySet()) {
                     if (e.getValue().getObjectType() != null) tableObjectTypes.put(e.getKey(), e.getValue().getObjectType());
+                    if (e.getValue().getTableKind() != null) {
+                        tableTempKinds.put(e.getKey(), e.getValue().getTableKind());
+                        if (e.getValue().getTempScope() != null) tableTempScopes.put(e.getKey(), e.getValue().getTempScope());
+                    }
                 }
             } catch (Exception ignored) {}
         }
@@ -2049,6 +2070,9 @@ public class ChunkedFlowWriter {
 
             // Group this node's table ops by table name, deduplicating line numbers
             Map<String, Map<String, Set<Integer>>> nodeTableOps = new LinkedHashMap<>();
+            // {tableKey -> [tableKind, tempScope]} for any temp table this node names — the
+            // node-op fallback for a temp classification the intermediate table map may not have.
+            Map<String, String[]> nodeTempKinds = new LinkedHashMap<>();
             // MID-021 (§138): TableOperationInfo.whereFilters was always produced by the analyser
             // (see its own doc comment) but dropped right here — only the line number survived into
             // nodeTableOps above. Carried through per table key, deduplicated on the filter's own
@@ -2062,6 +2086,9 @@ public class ChunkedFlowWriter {
             for (TableOperationInfo top : node.getTableOperations()) {
                 String key = tableKey(top);
                 if (key == null) continue; // no real table (e.g. `SELECT @x = ...`) — see tableKey() doc
+                if (top.getTableKind() != null && !nodeTempKinds.containsKey(key)) {
+                    nodeTempKinds.put(key, new String[]{top.getTableKind(), top.getTempScope()});
+                }
                 nodeTableOps.computeIfAbsent(key, k -> new LinkedHashMap<>())
                         .computeIfAbsent(top.getOperation(), k -> new LinkedHashSet<>())
                         .add(top.getLine());
@@ -2091,6 +2118,17 @@ public class ChunkedFlowWriter {
                     }
                     String ot = tableObjectTypes.get(tableKey);
                     m.put("objectType", ot != null ? ot : "TABLE");
+                    // TEMP as the fourth table kind. Emitted ONLY for temp tables so a non-temp row
+                    // is byte-identical to before this field existed; the read side defaults a
+                    // missing tableKind to the row's objectType (TABLE/VIEW/MATERIALIZED_VIEW).
+                    String tk = tableTempKinds.get(tableKey);
+                    String ts = tableTempScopes.get(tableKey);
+                    String[] ntk = nodeTempKinds.get(tableKey);
+                    if (tk == null && ntk != null) { tk = ntk[0]; ts = ntk[1]; }
+                    if (tk != null) {
+                        m.put("tableKind", tk);
+                        if (ts != null) m.put("tempScope", ts);
+                    }
                     m.put("allOperations", new LinkedHashSet<String>());
                     m.put("usedBy", new ArrayList<Map<String, Object>>());
                     return m;

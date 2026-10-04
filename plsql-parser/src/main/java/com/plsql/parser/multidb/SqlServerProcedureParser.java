@@ -200,6 +200,10 @@ public class SqlServerProcedureParser implements StoredProcedureParser {
             ti.setLine(op.getLine());
             // Carried through for the shared TableOperationEnricher.
             ti.setSqlText(op.getSqlText());
+            // TEMP classification is set at parse time from the name prefix (#/##/@); carry it
+            // through so the tables index can tag the row as TEMP rather than a persistent table.
+            ti.setTableKind(op.getTableKind());
+            ti.setTempScope(op.getTempScope());
             if (op.getJoins() != null && !op.getJoins().isEmpty()) {
                 List<JoinInfo> joins = new ArrayList<>();
                 for (SqlServerJoinInfo j : op.getJoins()) {

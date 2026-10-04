@@ -64,6 +64,28 @@ final class ParserFacetSpecs {
     }
 
     /**
+     * The tables facet's filterable values: the operations the row carries PLUS its true
+     * {@code kind} ({@code TABLE}/{@code VIEW}/{@code MATERIALIZED_VIEW}/{@code TEMP}). Adding the
+     * kind lets the grid's existing pill mechanism filter to temp tables with {@code types=TEMP} —
+     * no new request parameter — while the operation pills keep working unchanged. A row written
+     * before the {@code kind} field existed defaults to its {@code objectType}.
+     */
+    private static List<String> tableTypeValues(JsonNode row) {
+        List<String> out = new java.util.ArrayList<>(FacetSpec.stringArray(row, "allOperations"));
+        String kind = row.path("kind").asText("");
+        if (kind.isEmpty() && "TEMP".equalsIgnoreCase(row.path("tableKind").asText(""))) {
+            kind = "TEMP";
+        }
+        if (kind.isEmpty()) {
+            String ot = row.path("objectType").asText("");
+            kind = ot.contains("MATERIALIZED") ? "MATERIALIZED_VIEW"
+                    : ot.contains("VIEW") ? "VIEW" : "TABLE";
+        }
+        if (!out.contains(kind)) out.add(kind);
+        return out;
+    }
+
+    /**
      * Table operations.
      *
      * <h2>Why this one reads different field names</h2>
@@ -104,13 +126,14 @@ final class ParserFacetSpecs {
             row -> {
                 StringBuilder b = new StringBuilder();
                 b.append(row.path("name").asText("")).append(' ')
-                 .append(row.path("objectType").asText("")).append(' ');
+                 .append(row.path("objectType").asText("")).append(' ')
+                 .append(row.path("kind").asText("")).append(' ');
                 for (JsonNode u : row.path("usedBy")) {
                     b.append(u.path("nodeName").asText("")).append(' ');
                 }
                 return lower(b.toString());
             },
-            row -> FacetSpec.stringArray(row, "allOperations"),
+            ParserFacetSpecs::tableTypeValues,
             ParserFacetSpecs::tableProcedureIds,
             Map.of("0", FacetSpec.scalarColumn("schema", ""),
                    "1", FacetSpec.scalarColumn("name", null),

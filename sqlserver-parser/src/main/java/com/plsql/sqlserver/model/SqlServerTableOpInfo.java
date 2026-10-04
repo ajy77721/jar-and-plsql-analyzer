@@ -14,6 +14,17 @@ public class SqlServerTableOpInfo {
     private int     line;
     private List<SqlServerJoinInfo> joins = new ArrayList<>();
 
+    /**
+     * {@code TEMP} for a {@code #name} / {@code ##name} temp table or an {@code @name} table
+     * variable; null for an ordinary persistent table. Detected at parse time from the name's
+     * prefix — the exact signal T-SQL itself uses — and never from the catalog (a temp table is
+     * session-local and is never in {@code sys.objects}).
+     */
+    private String  tableKind;
+
+    /** {@code SESSION} ({@code #}), {@code GLOBAL SESSION} ({@code ##}) or {@code BATCH} ({@code @}). */
+    private String  tempScope;
+
     public DmlType getDmlType()    { return dmlType; }
     public void    setDmlType(DmlType dmlType)     { this.dmlType = dmlType; }
     public String  getTableName()  { return tableName; }
@@ -26,6 +37,11 @@ public class SqlServerTableOpInfo {
     public void    setLine(int line)               { this.line = line; }
     public List<SqlServerJoinInfo> getJoins()      { return joins; }
     public void    setJoins(List<SqlServerJoinInfo> joins) { this.joins = joins; }
+
+    public String getTableKind() { return tableKind; }
+    public void   setTableKind(String tableKind) { this.tableKind = tableKind; }
+    public String getTempScope() { return tempScope; }
+    public void   setTempScope(String tempScope) { this.tempScope = tempScope; }
 
     public String qualifiedTable() {
         return schemaName != null ? schemaName + "." + tableName : tableName;

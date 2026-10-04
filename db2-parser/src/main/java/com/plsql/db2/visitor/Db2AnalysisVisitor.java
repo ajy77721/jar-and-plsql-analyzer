@@ -1794,9 +1794,28 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
             }
             op.setLine(ctx.getStart().getLine());
             op.setDmlType(Db2TableOpInfo.DmlType.CREATE);
+            // TEMP as the fourth table kind (grammar-first): DECLARE GLOBAL TEMPORARY TABLE is a
+            // session-scoped temporary table; the ON COMMIT PRESERVE/DELETE ROWS clause of the same
+            // parsed statement gives its lifetime (Db2's default is DELETE ROWS when omitted).
+            op.setTableKind("TEMP");
+            op.setTempScope(db2TempScope(ctx.getText()));
             result.getTableOps().add(op);
         }
         return null;
+    }
+
+    /**
+     * The Db2 declared-temp-table lifetime spelled out by an {@code ON COMMIT ... ROWS} clause of
+     * an already-parsed DECLARE GLOBAL TEMPORARY TABLE statement. Db2's default when the clause is
+     * omitted is {@code DELETE ROWS}.
+     */
+    private static String db2TempScope(String ddl) {
+        if (ddl == null) return "ON COMMIT DELETE ROWS";
+        // ctx.getText() concatenates tokens without whitespace, so strip all whitespace before
+        // matching the (spaced) clause.
+        String u = ddl.replaceAll("\\s+", "").toUpperCase(java.util.Locale.ROOT);
+        if (u.contains("ONCOMMITPRESERVEROWS")) return "ON COMMIT PRESERVE ROWS";
+        return "ON COMMIT DELETE ROWS";
     }
 
     @Override

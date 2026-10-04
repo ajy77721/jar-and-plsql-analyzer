@@ -14,6 +14,16 @@ public class PostgresTableOpInfo {
     private int     line;
     private final List<PostgresJoinInfo> joins = new ArrayList<>();
 
+    /** {@code TEMP} for a {@code CREATE TEMP|TEMPORARY TABLE}; null otherwise (parse-time only). */
+    private String  tableKind;
+    /** {@code SESSION} for a Postgres temp table; null for non-temp kinds. */
+    private String  tempScope;
+
+    public String getTableKind() { return tableKind; }
+    public void   setTableKind(String tableKind) { this.tableKind = tableKind; }
+    public String getTempScope() { return tempScope; }
+    public void   setTempScope(String tempScope) { this.tempScope = tempScope; }
+
     public String getAlias() { return alias; }
     public void   setAlias(String alias) { this.alias = alias; }
 

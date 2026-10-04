@@ -24,6 +24,16 @@ public class MySqlTableOpInfo {
     private int     line;
     private final List<MySqlJoinInfo> joins = new ArrayList<>();
 
+    /** {@code TEMP} for a {@code CREATE TEMPORARY TABLE}; null otherwise (parse-time only). */
+    private String  tableKind;
+    /** {@code SESSION} for a MySQL temp table; null for non-temp kinds. */
+    private String  tempScope;
+
+    public String getTableKind() { return tableKind; }
+    public void   setTableKind(String tableKind) { this.tableKind = tableKind; }
+    public String getTempScope() { return tempScope; }
+    public void   setTempScope(String tempScope) { this.tempScope = tempScope; }
+
     /**
      * The statement's SQL as written, untruncated.
      *

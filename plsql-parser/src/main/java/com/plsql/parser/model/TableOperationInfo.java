@@ -12,6 +12,25 @@ public class TableOperationInfo {
     private String objectType;
     private String alias;
     private String subqueryContext;
+
+    /**
+     * The true table kind for this operation's target: {@code TABLE}, {@code VIEW},
+     * {@code MATERIALIZED_VIEW} or {@code TEMP}. Set at PARSE time by the dialect visitors where
+     * the DDL grammar exposes it (Oracle {@code CREATE GLOBAL TEMPORARY TABLE}, Db2
+     * {@code DECLARE GLOBAL TEMPORARY TABLE}, Postgres/MySQL {@code CREATE [TEMPORARY] TABLE}, SQL
+     * Server's {@code #}/{@code ##}/{@code @} name prefix) — never guessed from the catalog. Null
+     * means "not established here"; read-side defaults it to {@code TABLE} (byte-compatible with
+     * rows written before this field existed).
+     */
+    private String tableKind;
+
+    /**
+     * The temp table's lifetime scope where the dialect exposes one: {@code ON COMMIT PRESERVE
+     * ROWS} / {@code ON COMMIT DELETE ROWS} (Oracle, Db2), or {@code SESSION} / {@code GLOBAL
+     * SESSION} / {@code BATCH} (SQL Server {@code #}/{@code ##}/{@code @}). Null for non-temp kinds.
+     */
+    private String tempScope;
+
     private List<JoinInfo> joins = new ArrayList<>();
     private String dbLink;
     private String mergeClause;
@@ -99,6 +118,10 @@ public class TableOperationInfo {
     public void setLine(int line) { this.line = line; }
     public String getObjectType() { return objectType; }
     public void setObjectType(String objectType) { this.objectType = objectType; }
+    public String getTableKind() { return tableKind; }
+    public void setTableKind(String tableKind) { this.tableKind = tableKind; }
+    public String getTempScope() { return tempScope; }
+    public void setTempScope(String tempScope) { this.tempScope = tempScope; }
     public String getAlias() { return alias; }
     public void setAlias(String alias) { this.alias = alias; }
     public String getSubqueryContext() { return subqueryContext; }

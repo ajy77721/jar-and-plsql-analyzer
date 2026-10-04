@@ -1290,7 +1290,14 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     public Void visitStmtCreateTmpTable(MySqlParser.StmtCreateTmpTableContext ctx) {
         MySqlParser.CreateTmpTableStatementContext t = ctx.createTmpTableStatement();
         if (t != null) {
-            addTableOp(t.tableRef(0), MySqlTableOpInfo.DmlType.CREATE, ctx.getStart().getLine());
+            MySqlTableOpInfo op = addTableOp(t.tableRef(0), MySqlTableOpInfo.DmlType.CREATE, ctx.getStart().getLine());
+            // TEMP as the fourth table kind (grammar-first): the rule accepts an OPTIONAL TEMPORARY
+            // keyword, so a plain CREATE TABLE reaches it too — only the TEMPORARY form is temp. A
+            // MySQL temp table is session-scoped (dropped at connection end).
+            if (op != null && t.TEMPORARY() != null) {
+                op.setTableKind("TEMP");
+                op.setTempScope("SESSION");
+            }
         }
         return visitChildren(ctx);
     }

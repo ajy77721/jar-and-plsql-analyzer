@@ -163,6 +163,9 @@ public class MySqlProcedureParser implements StoredProcedureParser {
             ti.setLine(op.getLine());
             // Carried through so the shared TableOperationEnricher can derive column-level detail.
             ti.setSqlText(op.getSqlText());
+            // TEMP classification set by the CREATE TEMPORARY TABLE visitor.
+            ti.setTableKind(op.getTableKind());
+            ti.setTempScope(op.getTempScope());
             if (op.getJoins() != null && !op.getJoins().isEmpty()) {
                 List<JoinInfo> joins = new ArrayList<>();
                 for (MySqlJoinInfo j : op.getJoins()) {

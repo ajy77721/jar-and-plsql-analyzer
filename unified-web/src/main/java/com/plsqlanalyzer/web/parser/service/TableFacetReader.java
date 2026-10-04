@@ -50,13 +50,19 @@ class TableFacetReader {
             if (full != null) {
                 copyScalars(full, out);
                 if (full.has("tables") && full.get("tables").isArray()) {
+                    Map<String, Integer> kinds = new LinkedHashMap<>();
                     int visible = 0;
                     for (JsonNode t : full.get("tables")) {
                         boolean hidden = t.path("dbValidated").asBoolean(false)
                                 && !t.path("dbFound").asBoolean(true);
-                        if (!hidden) visible++;
+                        if (!hidden) {
+                            visible++;
+                            kinds.merge(normalizeKind(t.path("objectType").asText(null),
+                                    t.path("tableKind").asText(null)), 1, Integer::sum);
+                        }
                     }
                     out.put("validatedTableCount", visible);
+                    writeKindCounts(out, kinds, visible);
                     if (!out.has("totalTables")) out.put("totalTables", full.get("tables").size());
                 }
             }
@@ -75,7 +81,12 @@ class TableFacetReader {
                     // the raw `totalTables` here would silently change a displayed number — the
                     // filter drops a table only when it was validated against the database and not
                     // found (api.js getTablesIndex: dbValidated !== true || dbFound !== false).
-                    out.put("validatedTableCount", countVisibleTables(parser));
+                    Map<String, Integer> kinds = new LinkedHashMap<>();
+                    int visible = countVisibleTables(parser, kinds);
+                    out.put("validatedTableCount", visible);
+                    // Truthful per-kind counts (the "Tables 2 · Views 6" header breakdown) from the
+                    // same single streaming pass — no extra read of the document.
+                    writeKindCounts(out, kinds, visible);
                     continue;
                 }
                 if (t == com.fasterxml.jackson.core.JsonToken.START_ARRAY
@@ -95,13 +106,44 @@ class TableFacetReader {
     }
 
     /**
+     * The true kind of a tables-index row: {@code TEMP} when the parse-time {@code tableKind} says
+     * so, else the row's {@code objectType} normalized to {@code TABLE} / {@code VIEW} /
+     * {@code MATERIALIZED_VIEW}. A row written before {@code tableKind} existed has no such field,
+     * so it defaults to its objectType (byte-compatible).
+     */
+    static String normalizeKind(String objectType, String tableKind) {
+        if ("TEMP".equalsIgnoreCase(tableKind)) return "TEMP";
+        if (objectType == null || objectType.isBlank()) return "TABLE";
+        String ot = objectType.toUpperCase(Locale.ROOT);
+        if (ot.contains("MATERIALIZED")) return "MATERIALIZED_VIEW";
+        if (ot.contains("VIEW")) return "VIEW";
+        return "TABLE";
+    }
+
+    /** Writes {@code tableKindCounts} + convenience scalars for the UI header breakdown. */
+    private static void writeKindCounts(com.fasterxml.jackson.databind.node.ObjectNode out,
+                                        Map<String, Integer> kinds, int visible) {
+        com.fasterxml.jackson.databind.node.ObjectNode kc = out.putObject("tableKindCounts");
+        for (String k : new String[]{"TABLE", "VIEW", "MATERIALIZED_VIEW", "TEMP"}) {
+            kc.put(k, kinds.getOrDefault(k, 0));
+        }
+        int tables = kinds.getOrDefault("TABLE", 0);
+        int views = kinds.getOrDefault("VIEW", 0) + kinds.getOrDefault("MATERIALIZED_VIEW", 0);
+        out.put("tableCount", tables);
+        out.put("viewCount", views);
+        out.put("tempTableCount", kinds.getOrDefault("TEMP", 0));
+        out.put("validatedTableCount", visible);
+    }
+
+    /**
      * Counts table entries the UI would display, streaming one element at a time.
      *
      * <p>Mirrors the client-side predicate exactly: an entry is hidden only when
      * {@code dbValidated == true && dbFound == false}. Memory stays constant regardless of how many
      * tables there are, which is the reason for doing this here rather than counting a parsed array.
      */
-    private static int countVisibleTables(com.fasterxml.jackson.core.JsonParser parser)
+    private static int countVisibleTables(com.fasterxml.jackson.core.JsonParser parser,
+                                          Map<String, Integer> kinds)
             throws IOException {
         int visible = 0;
         while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_ARRAY) {
@@ -111,6 +153,8 @@ class TableFacetReader {
             }
             Boolean dbValidated = null;
             Boolean dbFound = null;
+            String objectType = null;
+            String tableKind = null;
             while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
                 String f = parser.currentName();
                 com.fasterxml.jackson.core.JsonToken v = parser.nextToken();
@@ -121,10 +165,19 @@ class TableFacetReader {
                     dbValidated = parser.getBooleanValue();
                 } else if ("dbFound".equals(f)) {
                     dbFound = parser.getBooleanValue();
+                } else if ("objectType".equals(f)) {
+                    objectType = parser.getValueAsString();
+                } else if ("tableKind".equals(f)) {
+                    tableKind = parser.getValueAsString();
                 }
             }
             boolean hidden = Boolean.TRUE.equals(dbValidated) && Boolean.FALSE.equals(dbFound);
-            if (!hidden) visible++;
+            if (!hidden) {
+                visible++;
+                if (kinds != null) {
+                    kinds.merge(normalizeKind(objectType, tableKind), 1, Integer::sum);
+                }
+            }
         }
         return visible;
     }
@@ -214,13 +267,29 @@ class TableFacetReader {
         long accessCount = 0;
         Boolean dbValidated = null;
         Boolean dbFound = null;
+        String objectType = null;
+        String tableKind = null;
+        String tempScope = null;
 
         while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
             String f = parser.currentName();
             com.fasterxml.jackson.core.JsonToken v = parser.nextToken();
             switch (f == null ? "" : f) {
                 case "name", "schema", "objectType" -> {
-                    if (v.isScalarValue()) row.put(f, parser.getValueAsString());
+                    if (v.isScalarValue()) {
+                        String val = parser.getValueAsString();
+                        row.put(f, val);
+                        if ("objectType".equals(f)) objectType = val;
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                case "tableKind" -> {
+                    if (v.isScalarValue()) tableKind = parser.getValueAsString();
+                    else parser.skipChildren();
+                }
+                case "tempScope" -> {
+                    if (v.isScalarValue()) tempScope = parser.getValueAsString();
                     else parser.skipChildren();
                 }
                 case "allOperations" -> {
@@ -247,6 +316,11 @@ class TableFacetReader {
         if (Boolean.TRUE.equals(dbValidated) && Boolean.FALSE.equals(dbFound)) return null;
         row.set("operations", ops);
         row.put("accessCount", accessCount);
+        // The true kind (additive): TEMP when the parse-time flag says so, else the row's own
+        // objectType. The TEMP scope is carried only for a temp row, so a non-temp row is unchanged.
+        String kind = normalizeKind(objectType, tableKind);
+        row.put("kind", kind);
+        if ("TEMP".equals(kind) && tempScope != null) row.put("tempScope", tempScope);
         return row;
     }
 
@@ -304,7 +378,13 @@ class TableFacetReader {
         ObjectNode row = mapper.createObjectNode();
         row.put("name", textOrDefault(t, "name", ""));
         row.put("schema", textOrDefault(t, "schema", ""));
-        row.put("objectType", textOrDefault(t, "objectType", "TABLE"));
+        String objectType = textOrDefault(t, "objectType", "TABLE");
+        row.put("objectType", objectType);
+        String kind = normalizeKind(objectType, t.hasNonNull("tableKind") ? t.get("tableKind").asText() : null);
+        row.put("kind", kind);
+        if ("TEMP".equals(kind) && t.hasNonNull("tempScope")) {
+            row.put("tempScope", t.get("tempScope").asText());
+        }
         ArrayNode ops = row.putArray("operations");
         if (t.has("allOperations") && t.get("allOperations").isArray()) {
             // Guard against a JSON-null array element: unguarded o.asText() would turn it into the

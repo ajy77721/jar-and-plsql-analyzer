@@ -201,13 +201,29 @@ PA._dhRenderStats = async function() {
     var s = await PA._dhComputeStats();
     if (!s) return;
 
+    // Truthful breakdown: where the analysis index carries per-type node counts (typeCounts) and
+    // the tables index per-kind counts (tableKindCounts), show procedures+functions / triggers /
+    // tables / views separately instead of labelling the raw node total "Procs".
+    var idx0 = PA.analysisData || {};
+    var fullScope = (s.mode === 'full' || s.mode === 'pkg_root');
+    var tc = idx0.typeCounts || {};
+    var hasTypes = fullScope && (tc.PROCEDURE != null || tc.FUNCTION != null);
+    var procsFuncs = hasTypes ? ((tc.PROCEDURE || 0) + (tc.FUNCTION || 0)) : s.procs;
+    var trigCount = hasTypes ? (tc.TRIGGER || 0) : (s.triggers || 0);
+    var kc = idx0.tableKindCounts || {};
+    var hasKinds = fullScope && (typeof kc.TABLE === 'number');
+    var realTables = hasKinds ? kc.TABLE : s.tables;
+    var viewCount = hasKinds ? ((kc.VIEW || 0) + (kc.MATERIALIZED_VIEW || 0)) : null;
+
     var html = '';
-    html += PA._dhStatBox(s.procs, 'Procs', 'accent', 'Total procedures and functions analyzed in the call tree');
+    html += PA._dhStatBox(procsFuncs, 'Procs', 'accent', 'Procedures and functions' + (hasTypes ? ' (excludes triggers, tables and views)' : ' analyzed in the call tree'));
     html += PA._dhStatBox(s.loc.toLocaleString(), 'LOC', '', 'Total lines of source code across all procedures');
     html += PA._dhStatBox(s.totalCalls, 'Call Edges', 'blue', 'Unique caller→callee pairs in the dependency graph');
     html += PA._dhStatBox(s.intCalls, 'INT', 'blue', 'Internal calls: calls to procedures within the same package');
     html += PA._dhStatBox(s.extCalls, 'EXT', 'orange', 'External calls: calls to procedures in other packages');
-    html += PA._dhStatBox(s.tables, 'Tables', 'teal', 'Total unique database tables accessed by all procedures');
+    html += PA._dhStatBox(realTables, 'Tables', 'teal', 'Persistent database tables accessed by all procedures');
+    html += PA._dhStatBox(trigCount, 'Triggers', 'orange', 'Triggers in the analysis');
+    if (viewCount != null) html += PA._dhStatBox(viewCount, 'Views', 'blue', 'Views and materialized views');
 
     statsEl.innerHTML = html;
 
@@ -215,9 +231,17 @@ PA._dhRenderStats = async function() {
     if (totalsEl) {
         var idx = PA.analysisData;
         if (idx && s.mode !== 'direct') {
+            var tcx = idx.typeCounts || {};
+            var pf = (tcx.PROCEDURE != null || tcx.FUNCTION != null) ? ((tcx.PROCEDURE || 0) + (tcx.FUNCTION || 0)) : null;
+            var tr = (tcx.TRIGGER != null) ? tcx.TRIGGER : null;
+            var kcx = idx.tableKindCounts || {};
+            var tb = (typeof kcx.TABLE === 'number') ? kcx.TABLE : null;
+            var vw = (typeof kcx.VIEW === 'number') ? ((kcx.VIEW || 0) + (kcx.MATERIALIZED_VIEW || 0)) : null;
             var th = '<span class="dh-totals-label" title="Aggregate counts across the entire analysis">Analysis Totals</span>';
-            th += '<span class="dh-totals-item accent" title="Total procedures and functions in the full analysis">' + (idx.totalNodes || 0) + '<small>procs</small></span>';
-            th += '<span class="dh-totals-item teal" title="Total unique database tables accessed">' + (idx.totalTables || 0) + '<small>tables</small></span>';
+            th += '<span class="dh-totals-item accent" title="Procedures and functions">' + (pf != null ? pf : (idx.totalNodes || 0)) + '<small>procs</small></span>';
+            if (tr != null) th += '<span class="dh-totals-item orange" title="Triggers">' + tr + '<small>triggers</small></span>';
+            th += '<span class="dh-totals-item teal" title="Persistent database tables">' + (tb != null ? tb : (idx.totalTables || 0)) + '<small>tables</small></span>';
+            if (vw != null) th += '<span class="dh-totals-item blue" title="Views and materialized views">' + vw + '<small>views</small></span>';
             th += '<span class="dh-totals-item" title="Total lines of source code">' + (idx.totalLinesOfCode || 0).toLocaleString() + '<small>LOC</small></span>';
             th += '<span class="dh-totals-item" title="Unique caller→callee pairs in the dependency graph">' + (idx.uniqueEdges || idx.totalEdges || 0) + '<small>edges</small></span>';
             totalsEl.innerHTML = th;

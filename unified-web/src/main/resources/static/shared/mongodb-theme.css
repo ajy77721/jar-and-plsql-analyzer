@@ -613,3 +613,6 @@
 .kind-badge.kind-local-temp  { background: var(--badge-orange-bg); color: var(--badge-orange); }
 .kind-badge.kind-global-temp { background: var(--badge-purple-bg); color: var(--badge-purple); }
 .kind-badge.kind-variable    { background: var(--badge-blue-bg);   color: var(--badge-blue); }
+/* The fourth table kind, detected per dialect at parse time (Oracle GLOBAL TEMPORARY, Db2
+   DECLARE GLOBAL TEMPORARY, Postgres/MySQL TEMPORARY, SQL Server #/##/@). */
+.kind-badge.kind-temp        { background: var(--badge-orange-bg); color: var(--badge-orange); }

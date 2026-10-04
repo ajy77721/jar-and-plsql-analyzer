@@ -1345,12 +1345,34 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             toi.setLine(getStartLine(ctx));
             toi.setOperation("DDL");
             toi.setSqlText(fullText(ctx));
+            // TEMP as the fourth table kind (grammar-first): the GLOBAL/PRIVATE TEMPORARY qualifier
+            // is a real token in create_table, and the ON COMMIT PRESERVE/DELETE ROWS lifetime is
+            // spelled out in the same parsed statement. An ordinary CREATE TABLE stays null (the
+            // read side defaults it to TABLE), so existing artifacts are unaffected.
+            if ((ctx.GLOBAL() != null || ctx.PRIVATE() != null) && ctx.TEMPORARY() != null) {
+                toi.setTableKind("TEMP");
+                toi.setTempScope(oracleTempScope(fullText(ctx)));
+            }
             addTableOperation(toi);
         }
 
         Void result = visitChildren(ctx);
         popContext();
         return result;
+    }
+
+    /**
+     * The Oracle/Db2 temp-table lifetime spelled out by an {@code ON COMMIT ... ROWS} clause of an
+     * already-parsed DDL statement. Oracle's GTT default when the clause is omitted is
+     * {@code DELETE ROWS}; returned as a normalized token the UI can label directly.
+     */
+    private static String oracleTempScope(String ddl) {
+        if (ddl == null) return "ON COMMIT DELETE ROWS";
+        // Whitespace-insensitive: some callers pass original text, others a token-concatenated
+        // string, so normalize before matching the spaced clause.
+        String u = ddl.replaceAll("\\s+", "").toUpperCase(java.util.Locale.ROOT);
+        if (u.contains("ONCOMMITPRESERVEROWS")) return "ON COMMIT PRESERVE ROWS";
+        return "ON COMMIT DELETE ROWS";
     }
 
     // ---------------------------------------------------------------
@@ -5385,6 +5407,14 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 int semi = stmtText.indexOf(';');
                 if (semi >= 0) stmtText = stmtText.substring(0, semi);
                 toi.setSqlText(stmtText.trim());
+                // The recovery path can also see a dynamic GTT/PVT (`CREATE GLOBAL TEMPORARY TABLE
+                // gtt_dyn …`) the grammar path already classifies — mirror it here so the kind does
+                // not depend on which path attributed the table.
+                String verbUpper = verb.toUpperCase(java.util.Locale.ROOT);
+                if (verbUpper.contains("GLOBAL TEMPORARY") || verbUpper.contains("PRIVATE TEMPORARY")) {
+                    toi.setTableKind("TEMP");
+                    toi.setTempScope(oracleTempScope(stmtText));
+                }
             } else {
                 toi.setOperation("DYNAMIC");
             }
@@ -5520,6 +5550,9 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
                 String stmt = src.getSqlText();
                 toi.setSqlText(stmt != null && !stmt.isBlank() ? stmt.trim() : text.trim());
             }
+            // Carry the nested parse's TEMP classification (a dynamic GTT/PVT is still TEMP).
+            toi.setTableKind(src.getTableKind());
+            toi.setTempScope(src.getTempScope());
             addTableOperation(toi);
         }
     }

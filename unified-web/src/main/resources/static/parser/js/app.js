@@ -94,6 +94,10 @@ PA._syncTopbarTableCount = function() {
         var n = (typeof d.validatedTableCount === 'number') ? d.validatedTableCount : d.totalTables;
         if (typeof n === 'number') {
             PA.analysisData.totalTables = n;
+            // Truthful header breakdown: per-kind counts from the same single streaming pass
+            // (TABLE / VIEW / MATERIALIZED_VIEW / TEMP). Kept on analysisData so the sync topbar
+            // and the Analysis Totals line can render the real split.
+            if (d.tableKindCounts) PA.analysisData.tableKindCounts = d.tableKindCounts;
             PA.updateTopbar(PA.analysisData);
         }
     }).catch(function() { /* topbar keeps the count from the index; not worth a toast */ });
@@ -124,8 +128,26 @@ PA.updateTopbar = function(result) {
     if (!title || !stats) return;
     title.textContent = result.entryPoint || result.name || '';
     var html = '';
-    html += '<span style="margin-right:6px" title="Total procedures and functions analyzed in the call tree">' + (result.totalNodes || 0) + ' procs</span>';
-    html += '<span style="margin-right:6px" title="Total unique database tables accessed by all procedures">' + (result.totalTables || 0) + ' tables</span>';
+    // Truthful per-type labels: `totalNodes` is the raw node count (procedures + functions +
+    // triggers + packages + jobs + views-as-nodes lumped), which used to be shown as "N procs" —
+    // the "51 Procs" defect. Where the analysis index carries the per-type breakdown (typeCounts)
+    // show the real split; the raw total stays available (title) and is the fallback for older
+    // artifacts. Tables/Views come from the tables index (tableKindCounts), synced separately.
+    var tc = result.typeCounts || {};
+    var pf = (tc.PROCEDURE || 0) + (tc.FUNCTION || 0);
+    var trg = tc.TRIGGER || 0;
+    var kc = result.tableKindCounts || {};
+    var tbl = (typeof kc.TABLE === 'number') ? kc.TABLE : result.totalTables || 0;
+    var vw = (typeof kc.VIEW === 'number') ? (kc.VIEW + (kc.MATERIALIZED_VIEW || 0)) : null;
+    var rawNodes = result.totalNodes || 0;
+    var procsLabel = (tc.PROCEDURE != null || tc.FUNCTION != null) ? pf : rawNodes;
+    var procsTitle = (tc.PROCEDURE != null || tc.FUNCTION != null)
+        ? (pf + ' procedures and functions (' + rawNodes + ' total nodes incl. triggers/packages)')
+        : 'Total procedures and functions analyzed in the call tree';
+    html += '<span style="margin-right:6px" title="' + procsTitle + '">' + procsLabel + ' procs</span>';
+    if (trg > 0) html += '<span style="margin-right:6px" title="Triggers in the analysis">' + trg + ' triggers</span>';
+    html += '<span style="margin-right:6px" title="Persistent database tables accessed by all procedures">' + tbl + ' tables</span>';
+    if (vw != null) html += '<span style="margin-right:6px" title="Views and materialized views">' + vw + ' views</span>';
     html += '<span style="margin-right:6px" title="Unique caller→callee pairs in the dependency graph">' + (result.uniqueEdges || result.totalEdges || 0) + ' edges</span>';
     html += '<span style="margin-right:6px" title="Total lines of PL/SQL source code across all procedures">' + (result.totalLinesOfCode || 0).toLocaleString() + ' LOC</span>';
     html += '<span style="margin-right:6px" title="Maximum call depth — deepest nesting level in the call tree">depth ' + (result.maxDepth || 0) + '</span>';
