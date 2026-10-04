@@ -48,6 +48,10 @@
 
 | # | Task | Source audit | Priority |
 |---|---|---|---|
+| 48 | ✅ DONE: TEMP tables = the fourth kind (all 5 dialects, grammar-first, scopes, the modernization tooltip) + the truthful per-type count labels (Procs+Funcs/Triggers/Tables/Views) | user ask | ca04369 |
+
+| # | Task | Source audit | Priority |
+|---|---|---|---|
 | 24 | ✅ **DONE (feat/scheduled-entry-points)** — **Scheduled/infra entry points** (DBMS_SCHEDULER / SQL Agent / pg_cron / EVENTS): fetch strategies + a JOB unit type + SCHEDULES edges; stop suppressing as builtins | construct matrix | **AC:** a scheduled job appears as a node with a SCHEDULES edge to its target proc in EVERY dialect fixture; the suppression no longer hides it; facet/API visible; suites green |
 | 25 | **Anonymous/DO blocks end-to-end** (Postgres plumbing + the Oracle splitter) | construct matrix | **AC:** a DO $$ block becomes an analyzable unit (Postgres); a DECLARE…BEGIN script section becomes a unit (Oracle); their table ops/calls captured; suites green |
 | 26 | **Result-set-returning procs marker** | construct matrix | **AC:** a returnsResultSet/resultSets field on the routine model per dialect (SQLServer implicit SELECTs count, Db2 WITH RETURN, Oracle REF CURSOR OUT, Postgres refcursor/SETOF); visible in the cursors facet + UI; golden tests |
