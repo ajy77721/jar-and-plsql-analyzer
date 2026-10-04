@@ -3,6 +3,8 @@ package com.plsql.parser.flow;
 import com.analyzer.storage.ArtifactEntry;
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
+import com.analyzer.storage.sso.CapturedSsoContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.plsql.parser.model.*;
@@ -11,6 +13,11 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -35,6 +42,31 @@ public class ChunkedFlowWriter {
     private final ArtifactKey tablesKey;
     private final ObjectMapper mapper;
     private final AtomicInteger chunkCounter = new AtomicInteger(0);
+
+    /**
+     * Bounded width of the concurrent artifact-write pool the save pass uses for the artifacts that
+     * are independent of one another — the per-node detail files and the per-facet indexes. Eight is
+     * the same width {@code WriteBehindStore.DEFAULT_THREADS} uses, so the pool never submits more
+     * concurrent store writes than the write-behind's own upload pool can absorb; over a store
+     * without write-behind it is simply the fan-out that turns one sequential round trip per
+     * artifact into eight.
+     */
+    private static final int SAVE_WRITE_THREADS = 8;
+
+    /**
+     * One artifact a concurrent save task wrote, handed back to the calling thread so the layout
+     * manifest can be updated in the writer's original, deterministic order after every task has
+     * joined — never from the pool threads themselves, whose completion order is not the manifest's
+     * insertion order.
+     */
+    private record Written(ArtifactKey key, long bytes, Long rows) {}
+
+    /**
+     * A node's original (pre-dedup) id plus its resolved {@link LightNode}. Promoted from a local
+     * record to class scope so the per-node detail write can be extracted into its own method and
+     * run on the concurrent save pool.
+     */
+    private record ResolvedNode(String originalId, LightNode light) {}
 
     /**
      * Layout manifest (plan 1f) — built incrementally as this writer emits artifacts, written last.
@@ -117,6 +149,90 @@ public class ChunkedFlowWriter {
         return bytes;
     }
 
+    /**
+     * {@link #writeJson} without manifest registration — the concurrent save phase's write
+     * primitive. The manifest is updated only on the calling thread, in write order, after every
+     * task has joined (see {@link #runConcurrently}); a pool thread must never touch its
+     * insertion-ordered maps.
+     */
+    private long writeJsonUnrecorded(ArtifactKey key, Object value) throws IOException {
+        try (CountingOutputStream out = new CountingOutputStream(store.write(key))) {
+            mapper.writeValue(out, value);
+            return out.count();
+        }
+    }
+
+    /**
+     * Serialises a <b>known-small</b> document into memory so its exact length reaches the store —
+     * the same shape {@code jar-analyzer-core/FragmentStore} uses for its per-endpoint fragments.
+     * A declared content length is what keeps the write on {@link com.analyzer.storage.WriteBehindStore}'s
+     * buffered asynchronous path (small) instead of treating it as a potential multi-MB body that
+     * must roll over; the bytes are produced once and handed over. Deliberately used only for the
+     * per-node detail files, which are KBs by construction — a large facet document keeps streaming
+     * through {@link #writeJsonUnrecorded} so it is never buffered whole.
+     */
+    private long writeSmallJsonUnrecorded(ArtifactKey key, Object value) throws IOException {
+        byte[] bytes = mapper.writeValueAsBytes(value);
+        try (OutputStream out = store.write(key, bytes.length)) {
+            out.write(bytes);
+        }
+        return bytes.length;
+    }
+
+    /**
+     * Runs independent artifact writes concurrently on a bounded pool, carrying the submitting
+     * thread's SSO snapshot and routed-store scope to every worker. This is the same invariant
+     * {@code DependencyCrawler.fanOut} establishes for the crawl pools: the save runs on a worker
+     * whose installed job context resolves the user's stores and credentials, while these fresh pool
+     * threads have neither — so the context is captured HERE, before the pool exists, and installed
+     * per task. Null-safe: with nothing captured, install is a no-op and the legacy/CLI path is
+     * unchanged.
+     *
+     * <p>Results are returned in submission order, so the caller can register them in the layout
+     * manifest deterministically. The first failure is rethrown so a save never silently drops an
+     * artifact.
+     */
+    private <T> List<T> runConcurrently(List<Callable<T>> tasks) throws IOException {
+        if (tasks.isEmpty()) return List.of();
+        final CapturedSsoContext ctx = CapturedSsoContext.capture(null);
+        final RequestScopedArtifactStore.Scope scope = store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+        int threads = Math.max(1, Math.min(SAVE_WRITE_THREADS, tasks.size()));
+        ExecutorService pool = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r, "api-save-write");
+            t.setDaemon(true);
+            return t;
+        });
+        List<Future<T>> futures = new ArrayList<>(tasks.size());
+        for (Callable<T> task : tasks) {
+            futures.add(pool.submit(() -> {
+                try (AutoCloseable scoped = scope.install();
+                     AutoCloseable sso = ctx == null ? null : ctx.install()) {
+                    return task.call();
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }));
+        }
+        pool.shutdown();
+        try {
+            List<T> out = new ArrayList<>(tasks.size());
+            for (Future<T> f : futures) out.add(f.get());
+            return out;
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof UncheckedIOException u) throw u.getCause();
+            if (cause instanceof IOException io) throw io;
+            if (cause instanceof RuntimeException r) throw r;
+            throw new IOException(cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("interrupted while waiting for concurrent artifact writes", e);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private <T> T readJson(ArtifactKey key, Class<T> type) throws IOException {
         try (InputStream in = store.read(key)) {
             return mapper.readValue(in, type);
@@ -125,7 +241,9 @@ public class ChunkedFlowWriter {
 
     private void writeString(ArtifactKey key, String content) throws IOException {
         byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
-        try (OutputStream out = store.write(key)) {
+        // Declared length: the source files under sources/ are the other known-small write family,
+        // so they ride the same buffered path as the jar-side fragments.
+        try (OutputStream out = store.write(key, bytes.length)) {
             out.write(bytes);
         }
         manifest.recordArtifact(key, bytes.length);
@@ -189,11 +307,12 @@ public class ChunkedFlowWriter {
     }
 
     /** Writes {@code api/globals/declarations.json} — package → declared variables. */
-    private void writeGlobalsDeclarations(ArtifactKey apiDir) throws IOException {
-        if (packageGlobalDeclarations.isEmpty()) return;
+    private Written writeGlobalsDeclarations(ArtifactKey apiDir) throws IOException {
+        if (packageGlobalDeclarations.isEmpty()) return null;
         Map<String, Object> doc = new LinkedHashMap<>();
         doc.put("declarations", packageGlobalDeclarations);
-        writeJson(apiDir.resolve("globals", "declarations.json"), doc);
+        ArtifactKey key = apiDir.resolve("globals", "declarations.json");
+        return new Written(key, writeJsonUnrecorded(key, doc), null);
     }
 
     public void setDiscoveredJobs(List<Map<String, Object>> jobs) {
@@ -305,26 +424,39 @@ public class ChunkedFlowWriter {
         result.setMaxDepthReached(maxDepthReached);
         result.setErrors(errors);
 
-        List<FlowNode> allNodes = new ArrayList<>();
-        for (ArtifactKey cf : listSorted(chunksKey, "chunk_")) {
-            // One corrupt/incompatible chunk must not discard every other node already read —
-            // mirrors NodeParseCache.get()'s self-healing pattern: log a warning naming the chunk
-            // and skip it, rather than letting the exception abort the whole merge (the incident
-            // this fixes: ExceptionHandlerInfo.getParentExceptionName() used to leak into chunk
-            // JSON and every subsequent readJson() here threw, wiping out the full result).
-            try {
-                allNodes.add(readJson(cf, FlowNode.class));
-            } catch (IOException e) {
-                String msg = "Skipping corrupt/unreadable chunk " + cf + ": " + e.getMessage();
-                log.warn("[ChunkedFlowWriter] " + msg, e);
-                if (errors != null) errors.add(msg);
+        // Chunk and edge reads are independent, so both families are read concurrently; each task
+        // catches its own corrupt-chunk failure and reports it, and the main thread folds the
+        // results back in chunk order — so allNodes and the errors list are exactly what the
+        // sequential loop produced (one corrupt/incompatible chunk still must not discard the rest).
+        List<ArtifactKey> chunkKeys = listSorted(chunksKey, "chunk_");
+        List<Callable<ChunkRead>> chunkTasks = new ArrayList<>(chunkKeys.size());
+        for (ArtifactKey cf : chunkKeys) {
+            chunkTasks.add(() -> {
+                try {
+                    return new ChunkRead(readJson(cf, FlowNode.class), null);
+                } catch (IOException e) {
+                    return new ChunkRead(null,
+                            "Skipping corrupt/unreadable chunk " + cf + ": " + e.getMessage());
+                }
+            });
+        }
+        List<FlowNode> allNodes = new ArrayList<>(chunkKeys.size());
+        for (ChunkRead r : runConcurrently(chunkTasks)) {
+            if (r.node() != null) {
+                allNodes.add(r.node());
+            } else {
+                log.warn("[ChunkedFlowWriter] " + r.error());
+                if (errors != null) errors.add(r.error());
             }
         }
         result.setFlowNodes(allNodes);
 
+        List<ArtifactKey> edgeKeys = listSorted(edgesDirKey, "edges_");
+        List<Callable<FlowEdge[]>> edgeTasks = new ArrayList<>(edgeKeys.size());
+        for (ArtifactKey ef : edgeKeys) edgeTasks.add(() -> readJson(ef, FlowEdge[].class));
         List<FlowEdge> allEdges = new ArrayList<>();
-        for (ArtifactKey ef : listSorted(edgesDirKey, "edges_")) {
-            allEdges.addAll(Arrays.asList(readJson(ef, FlowEdge[].class)));
+        for (FlowEdge[] arr : runConcurrently(edgeTasks)) {
+            allEdges.addAll(Arrays.asList(arr));
         }
         reconcileEdgeSchemas(allEdges, allNodes);
         result.setCallGraph(allEdges);
@@ -598,7 +730,7 @@ public class ChunkedFlowWriter {
      * LightNode}, so no extension was needed this time (unlike {@code writeTableIndex}'s own
      * {@code cursors} finding).
      */
-    private int writeStatementIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
+    private List<Written> writeStatementIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
         final int MAX_SQL_TEXT = 2000;
 
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -762,12 +894,12 @@ public class ChunkedFlowWriter {
         ArtifactKey offsetsKey = apiDir.resolve("statements", "index.offsets.json");
         RowArrayOffsetWriter.Result written =
                 RowArrayOffsetWriter.write(store, docKey, offsetsKey, leading, "statements", rows);
-        manifest.recordArtifact(docKey, written.docLength(), (long) written.rowCount());
-        manifest.recordArtifact(offsetsKey, written.offsetsLength(), (long) written.rowCount());
         System.err.println("[ChunkedFlowWriter] statements/index.json: " + rows.size()
                 + " rows, " + withColumns + " with column detail"
                 + " (+index.offsets.json, " + written.offsetsLength() + " bytes)");
-        return rows.size();
+        return List.of(
+                new Written(docKey, written.docLength(), (long) written.rowCount()),
+                new Written(offsetsKey, written.offsetsLength(), (long) written.rowCount()));
     }
 
     @SuppressWarnings("unchecked")
@@ -783,16 +915,19 @@ public class ChunkedFlowWriter {
         // subtree DFS, cycle detection, subtree table aggregation) only ever reads a node's own
         // {@code tableOperations}/{@code linesOfCode}/{@code packageName}/{@code objectName}/{@code
         // schema} — confirmed by reading each call site directly — so those run off the lightweight
-        // projection, read once here via `buildLightNodes()` and then discarded from disk (each
-        // chunk's full body is read again, one at a time, only where genuinely needed: the two
-        // per-node loops below and the transaction-aggregation loop, via `readNodeChunk()`, §174).
-        Map<String, ArtifactKey> chunkIndex = buildChunkIndex();
-        List<LightNode> rawLightNodes = buildLightNodes();
+        // projection, read once here and then discarded from disk (each chunk's full body is read
+        // again, one at a time, only where genuinely needed: the two per-node loops below and the
+        // transaction-aggregation loop, via `readNodeChunk()`, §174). One read of the chunk family
+        // feeds both the id→key index and the light projections, instead of the two full passes
+        // buildChunkIndex()/buildLightNodes() would each make.
+        ChunkScan chunkScan = scanChunks();
+        Map<String, ArtifactKey> chunkIndex = chunkScan.chunkIndex();
+        List<LightNode> rawLightNodes = chunkScan.lightNodes();
 
         // Deduplicate short IDs: if two nodes share SCHEMA$PKG$OBJ, append $2, $3... — same
         // algorithm as before, now computed over the lightweight list (a list, not a map, so a
         // genuine raw-id collision is still counted correctly here even though `buildChunkIndex`'s
-        // own map could only resolve one of them back to a chunk — see `buildLightNodes`'s own doc
+        // own map could only resolve one of them back to a chunk — see `scanChunks`'s own doc
         // comment). Produces new `LightNode` copies with the resolved id instead of mutating
         // `FlowNode` in place, since records are immutable and nothing here holds a `FlowNode`
         // anyway until a per-node loop below re-reads one from its chunk.
@@ -801,7 +936,6 @@ public class ChunkedFlowWriter {
             shortIdCount.merge(safeNodeId(n), 1, Integer::sum);
         }
         Map<String, Integer> shortIdSeq = new HashMap<>();
-        record ResolvedNode(String originalId, LightNode light) {}
         List<ResolvedNode> resolvedNodes = new ArrayList<>(rawLightNodes.size());
         for (LightNode n : rawLightNodes) {
             String shortId = safeNodeId(n);
@@ -859,138 +993,17 @@ public class ChunkedFlowWriter {
         // `List<FlowNode>`. `node.setNodeId(rn.light().getNodeId())` applies the short-id dedup
         // resolution to this loop's own throwaway instance — safe because it is never shared with
         // any other loop or held past this iteration, unlike the old shared-mutation approach.
-        List<Map<String, Object>> indexNodes = new ArrayList<>();
+        // Each index row is independent — built from its own chunk, sharing only read-only maps —
+        // so the per-node reads run concurrently. Order is preserved by collecting the results in
+        // submission order, so api/index.json is byte-identical to the sequential build.
+        List<Callable<Map<String, Object>>> indexTasks = new ArrayList<>(resolvedNodes.size());
         for (ResolvedNode rn : resolvedNodes) {
-            FlowNode node = readNodeChunk(rn.originalId(), chunkIndex);
-            if (node == null) continue; // dangling chunk reference, recorded nowhere else either
-            node.setNodeId(rn.light().getNodeId());
-            Map<String, Object> idx = new LinkedHashMap<>();
-            String nodeId = safeNodeId(node);
-            String pkg = node.getPackageName() != null ? node.getPackageName() : "";
-            String obj = node.getObjectName() != null ? node.getObjectName() : "";
-            String fullName = pkg.isEmpty() ? obj : pkg + "." + obj;
-
-            idx.put("nodeId", nodeId);
-            idx.put("order", node.getOrder());
-            idx.put("depth", node.getDepth());
-            idx.put("schema", node.getSchema());
-            idx.put("packageName", pkg.isEmpty() ? null : pkg);
-            idx.put("objectName", obj);
-            idx.put("name", fullName);
-            idx.put("objectType", node.getObjectType());
-            // Task #29: nested/local subprogram badge for the procedures facet. Additive — only
-            // emitted for nested nodes, so existing (non-nested) index.json is byte-identical.
-            if (node.isNested()) idx.put("nested", true);
-            if (node.getScopeDepth() > 0) idx.put("scopeDepth", node.getScopeDepth());
-            // Trigger metadata in the index summary so the UI can associate a trigger with its
-            // OWN table (otherwise every trigger node shows under every table/view).
-            if (node.getTriggerTable() != null)  idx.put("triggerTable", node.getTriggerTable());
-            if (node.getTriggerEvent() != null)  idx.put("triggerEvent", node.getTriggerEvent());
-            if (node.getTriggerTiming() != null) idx.put("triggerTiming", node.getTriggerTiming());
-            if (node.getTriggerWhenClause() != null) idx.put("triggerWhenClause", node.getTriggerWhenClause());
-            if (node.getTriggerLevel() != null) idx.put("triggerLevel", node.getTriggerLevel());
-            if (node.getTriggerBody() != null) idx.put("triggerBody", node.getTriggerBody());
-            if (node.getTriggerType() != null) idx.put("triggerType", node.getTriggerType());
-            if (node.getTriggerStatus() != null) idx.put("triggerStatus", node.getTriggerStatus());
-            idx.put("lineStart", node.getLineStart());
-            idx.put("lineEnd", node.getLineEnd());
-            idx.put("linesOfCode", node.getLinesOfCode());
-            // Tasks #26/#27: the procedures facet reads these off the index row (returnsResultSet /
-            // resultSets for the "returns data" filter; returnType/returnsColumns for the TVF shape).
-            if (node.isReturnsResultSet()) {
-                idx.put("returnsResultSet", true);
-                idx.put("resultSets", node.getResultSets());
-            }
-            if (node.getReturnType() != null) idx.put("returnType", node.getReturnType());
-            if (node.getReturnsColumns() != null && !node.getReturnsColumns().isEmpty()) {
-                idx.put("returnsColumns", node.getReturnsColumns());
-            }
-            idx.put("readable", node.isReadable());
-            if (node.getMessage() != null) idx.put("message", node.getMessage());
-            idx.put("parentNodeId", firstCallerMap.get(nodeId));
-            idx.put("callCount", nodeMetrics.getOrDefault(nodeId,
-                    EMPTY_NODE_METRICS).callCount());
-
-            // Counts only — details in nodes/{id}.json
-            int tableCount = node.getTableOperations() != null ? countDistinct(node.getTableOperations()) : 0;
-            // Counted with groupCalls()'s own key (below), so counts.callsOut equals the node
-            // detail's calls[] length — overloads split by arity instead of merging, and the
-            // schema/package qualification matches. The old name-only key under-counted every
-            // overloaded target (ERP_PKG_PLANNER.COMPUTE_TOTAL (1 args)/(2 args) collapsed to one),
-            // making complexity.callsOut 1 short of node.calls for the affected procedures.
-            int[] callCounts = countCallGroups(node.getCalls(), node.getPackageName(), node.getSchema());
-            int callCountOut = callCounts[0];
-            int internalCallCount = callCounts[1];
-            int externalCallCount = callCounts[2];
-            int varCount = node.getLocalVariables() != null ? node.getLocalVariables().size() : 0;
-            int cursorCount = node.getCursors() != null ? node.getCursors().size() : 0;
-            int paramCount = node.getParameters() != null ? node.getParameters().size() : 0;
-            int exHandlerCount = node.getExceptionHandlers() != null ? node.getExceptionHandlers().size() : 0;
-            int sequenceCount = 0;
-            if (node.getCalls() != null) {
-                Set<String> seqNames = new HashSet<>();
-                for (CallInfo c : node.getCalls()) {
-                    String cName = c.getName();
-                    if (cName != null && ("NEXTVAL".equals(cName) || "CURRVAL".equals(cName))
-                            && c.getPackageName() != null) {
-                        seqNames.add(c.getPackageName());
-                    }
-                }
-                sequenceCount = seqNames.size();
-            }
-
-            Map<String, Object> counts = new LinkedHashMap<>();
-            counts.put("tables", tableCount);
-            counts.put("callsOut", callCountOut);
-            counts.put("internalCalls", internalCallCount);
-            counts.put("externalCalls", externalCallCount);
-            counts.put("variables", varCount);
-            counts.put("cursors", cursorCount);
-            counts.put("parameters", paramCount);
-            counts.put("exceptionHandlers", exHandlerCount);
-            counts.put("sequences", sequenceCount);
-            counts.put("statements", nodeMetrics.getOrDefault(nodeId,
-                    EMPTY_NODE_METRICS).statementSummary());
-
-            // Subtree counts
-            Set<String> descendants = subtreeCache.getOrDefault(nodeId, Collections.emptySet());
-            Set<String> subtreeTableNames = new HashSet<>();
-            // Count tables from this node
-            if (node.getTableOperations() != null) {
-                for (TableOperationInfo t : node.getTableOperations()) {
-                    String key = tableKey(t);
-                    if (key != null) subtreeTableNames.add(key);
-                }
-            }
-            // Count tables from all descendants
-            for (String descId : descendants) {
-                LightNode descNode = nodeIndex.get(descId);
-                if (descNode != null && descNode.getTableOperations() != null) {
-                    for (TableOperationInfo t : descNode.getTableOperations()) {
-                        String key = tableKey(t);
-                        if (key != null) subtreeTableNames.add(key);
-                    }
-                }
-            }
-            counts.put("subtreeTablesCount", subtreeTableNames.size());
-            counts.put("subtreeNodesCount", descendants.size());
-
-            // Flow LOC: this node's LOC + all descendant LOC (full execution path)
-            int flowLoc = node.getLinesOfCode();
-            for (String descId : descendants) {
-                LightNode descNode = nodeIndex.get(descId);
-                if (descNode != null) flowLoc += descNode.getLinesOfCode();
-            }
-            counts.put("flowLinesOfCode", flowLoc);
-
-            idx.put("counts", counts);
-
-            // File references for on-demand loading
-            String sourceFile = buildSourceFileName(node);
-            if (sourceFile != null) idx.put("sourceFile", sourceFile);
-            idx.put("detailFile", "nodes/" + safeFileName(nodeId) + ".json");
-
-            indexNodes.add(idx);
+            indexTasks.add(() -> buildIndexNode(rn, chunkIndex, nodeMetrics, subtreeCache, nodeIndex, firstCallerMap));
+        }
+        List<Map<String, Object>> indexRows = runConcurrently(indexTasks);
+        List<Map<String, Object>> indexNodes = new ArrayList<>(indexRows.size());
+        for (Map<String, Object> row : indexRows) {
+            if (row != null) indexNodes.add(row);
         }
 
         // Compute total flow LOC from entry point's subtree
@@ -1057,32 +1070,22 @@ public class ChunkedFlowWriter {
 
         // Flow-wide transaction scope aggregate (Summary tile + Export) + full statement
         // list (Details "Transactions" sub-tab).
+        // Transaction statements are aggregated per node, so each node's chunk read runs
+        // concurrently; the per-node results are then folded in resolved-node order, keeping
+        // transactionStatements byte-identical to the sequential pass.
         int txCommits = 0, txRollbacks = 0, txSavepoints = 0, txAutonomousProcs = 0;
         List<Map<String, Object>> txnStatements = new ArrayList<>();
+        List<Callable<TxnNodeResult>> txnTasks = new ArrayList<>(resolvedNodes.size());
         for (ResolvedNode rn : resolvedNodes) {
-            FlowNode fn = readNodeChunk(rn.originalId(), chunkIndex);
-            if (fn == null) continue;
-            fn.setNodeId(rn.light().getNodeId());
-            if (fn.isAutonomousTransaction()) txAutonomousProcs++;
-            if (fn.getStatements() == null) continue;
-            for (StatementInfo s : fn.getStatements()) {
-                String t = s.getType();
-                if (t == null) continue;
-                String T = t.toUpperCase();
-                if (!T.equals("COMMIT") && !T.equals("ROLLBACK") && !T.equals("SAVEPOINT")) continue;
-                if (T.equals("COMMIT")) txCommits++;
-                else if (T.equals("ROLLBACK")) txRollbacks++;
-                else txSavepoints++;
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("nodeId", fn.getNodeId());
-                m.put("proc", fn.getObjectName());
-                m.put("schema", fn.getSchema());
-                m.put("type", T);
-                m.put("line", s.getLine());
-                if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) m.put("name", s.getSavepointName());
-                m.put("autonomous", fn.isAutonomousTransaction());
-                txnStatements.add(m);
-            }
+            txnTasks.add(() -> txnForNode(rn, chunkIndex));
+        }
+        for (TxnNodeResult r : runConcurrently(txnTasks)) {
+            if (r == null) continue;
+            if (r.autonomous()) txAutonomousProcs++;
+            txCommits += r.commits();
+            txRollbacks += r.rollbacks();
+            txSavepoints += r.savepoints();
+            txnStatements.addAll(r.statements());
         }
         Map<String, Object> txnSummary = new LinkedHashMap<>();
         txnSummary.put("commits", txCommits);
@@ -1163,360 +1166,67 @@ public class ChunkedFlowWriter {
         manifest.setListingScalars(listingScalars(indexRoot));
 
         // ── 2. nodes/{nodeId}.json: full detail per node (on-demand) ──
-        int nodeDetailCount = 0;
+        // Every detail file is independent of every other — built from its own chunk, written under
+        // its own key — so the whole family runs concurrently on the bounded save pool, each task
+        // carrying the submitting thread's SSO snapshot and routed-store scope. The order-dependent
+        // writes stay ordered: index.json above was written on this thread, and the manifest is
+        // registered after the join, in the writer's original order.
+        List<Callable<List<Written>>> saveTasks = new ArrayList<>(resolvedNodes.size() + 6);
         for (ResolvedNode rn : resolvedNodes) {
-            FlowNode node = readNodeChunk(rn.originalId(), chunkIndex);
-            if (node == null) continue;
-            node.setNodeId(rn.light().getNodeId());
-            String nodeId = safeNodeId(node);
-            Map<String, Object> detail = new LinkedHashMap<>();
-
-            detail.put("nodeId", nodeId);
-            String pkg = node.getPackageName() != null ? node.getPackageName() : "";
-            String obj = node.getObjectName() != null ? node.getObjectName() : "";
-            detail.put("name", pkg.isEmpty() ? obj : pkg + "." + obj);
-            // packageName/objectName are emitted so the estate globals facet can key a package's
-            // declaration list by its own package name (the display `name` is "PKG.SUB").
-            if (!pkg.isEmpty()) detail.put("packageName", pkg);
-            detail.put("objectName", obj);
-            detail.put("schema", node.getSchema());
-            detail.put("objectType", node.getObjectType());
-            // Task #29: nested/local subprogram marker on the node detail too (additive; omitted
-            // for ordinary nodes so existing node JSON is byte-identical).
-            if (node.isNested()) detail.put("nested", true);
-            if (node.getScopeDepth() > 0) detail.put("scopeDepth", node.getScopeDepth());
-            detail.put("depth", node.getDepth());
-            detail.put("lineStart", node.getLineStart());
-            detail.put("lineEnd", node.getLineEnd());
-            detail.put("linesOfCode", node.getLinesOfCode());
-
-            // Tasks #26/#27 — result-set marker + TVF/SETOF return shape. Scalars ride Mongo's
-            // Splitter into the parent document automatically; returnsColumns[] becomes its own
-            // child collection there, the same way cursors[] does.
-            if (node.isReturnsResultSet()) {
-                detail.put("returnsResultSet", true);
-                detail.put("resultSets", node.getResultSets());
-            }
-            if (node.getReturnType() != null) detail.put("returnType", node.getReturnType());
-            if (node.getReturnsColumns() != null && !node.getReturnsColumns().isEmpty()) {
-                detail.put("returnsColumns", node.getReturnsColumns());
-            }
-
-            // Trigger metadata (populated for TRIGGER nodes)
-            if (node.getTriggerTable() != null)  detail.put("triggerTable", node.getTriggerTable());
-            if (node.getTriggerEvent() != null)  detail.put("triggerEvent", node.getTriggerEvent());
-            if (node.getTriggerTiming() != null) detail.put("triggerTiming", node.getTriggerTiming());
-            if (node.getTriggerWhenClause() != null) detail.put("triggerWhenClause", node.getTriggerWhenClause());
-            if (node.getTriggerLevel() != null) detail.put("triggerLevel", node.getTriggerLevel());
-            if (node.getTriggerBody() != null) detail.put("triggerBody", node.getTriggerBody());
-            // Catalog-only metadata (ALL_TRIGGERS TRIGGER_TYPE / STATUS) on a catalog-discovered
-            // trigger node — additive, null for every non-catalog trigger node.
-            if (node.getTriggerType() != null) detail.put("triggerType", node.getTriggerType());
-            if (node.getTriggerStatus() != null) detail.put("triggerStatus", node.getTriggerStatus());
-
-            // Package-global DECLARATIONS (PACKAGE_BODY/PACKAGE_SPEC nodes only) — the estate
-            // globals facet's declared variables (name/dataType/defaultValue/constant). Each
-            // VariableInfo already carries exactly those fields.
-            if (node.getPackageVariables() != null && !node.getPackageVariables().isEmpty()) {
-                detail.put("packageGlobalDeclarations", node.getPackageVariables());
-            }
-
-            // Parameters
-            if (node.getParameters() != null && !node.getParameters().isEmpty()) {
-                List<Map<String, Object>> params = new ArrayList<>();
-                for (ParameterInfo p : node.getParameters()) {
-                    Map<String, Object> pm = new LinkedHashMap<>();
-                    pm.put("name", p.getName());
-                    pm.put("dataType", p.getDataType());
-                    pm.put("direction", p.getDirection());
-                    if (p.getDefaultValue() != null) pm.put("default", p.getDefaultValue());
-                    pm.put("line", p.getLine());
-                    params.add(pm);
-                }
-                detail.put("parameters", params);
-            }
-
-            // Variables — categorized
-            if (node.getLocalVariables() != null && !node.getLocalVariables().isEmpty()) {
-                detail.put("variables", categorizeVariables(node.getLocalVariables()));
-            }
-
-            // Tables — grouped by name with all operations and lines
-            if (node.getTableOperations() != null && !node.getTableOperations().isEmpty()) {
-                detail.put("tables", groupTableOps(node.getTableOperations()));
-                detail.put("directTables", groupTableOps(node.getTableOperations()));
-            }
-
-            // Subtree tables — aggregate from this node + all descendants
-            {
-                Set<String> descendants = subtreeCache.getOrDefault(nodeId, Collections.emptySet());
-                detail.put("subtreeTables", buildSubtreeTables(nodeId, descendants, nodeIndex));
-            }
-
-            // Cursors — enrich with OPEN/FETCH/CLOSE operations from statements
-            if (node.getCursors() != null && !node.getCursors().isEmpty()) {
-                // Build cursor name -> operations map from statements
-                Map<String, List<Map<String, Object>>> cursorOpsFromStmts = new LinkedHashMap<>();
-                if (node.getStatements() != null) {
-                    for (StatementInfo s : node.getStatements()) {
-                        String sType = s.getType();
-                        if (sType == null) continue;
-                        String cursorName = null;
-                        String opType = null;
-                        if ("OPEN_CURSOR".equals(sType) || "OPEN_FOR".equals(sType)) {
-                            opType = "OPEN";
-                            cursorName = extractCursorNameFromSql(s.getSqlText());
-                        } else if ("FETCH".equals(sType) || "BULK_COLLECT".equals(sType)) {
-                            opType = sType;
-                            cursorName = extractCursorNameFromSql(s.getSqlText());
-                        } else if ("CLOSE_CURSOR".equals(sType)) {
-                            opType = "CLOSE";
-                            cursorName = extractCursorNameFromSql(s.getSqlText());
-                        }
-                        if (cursorName != null && opType != null) {
-                            Map<String, Object> opInfo = new LinkedHashMap<>();
-                            opInfo.put("operation", opType);
-                            opInfo.put("line", s.getLine());
-                            cursorOpsFromStmts.computeIfAbsent(cursorName.toUpperCase(), k -> new ArrayList<>()).add(opInfo);
-                        }
-                    }
-                }
-
-                List<Map<String, Object>> cursors = new ArrayList<>();
-                for (CursorInfo c : node.getCursors()) {
-                    Map<String, Object> ci = new LinkedHashMap<>();
-                    ci.put("name", c.getName());
-                    ci.put("line", c.getLine());
-                    ci.put("lineEnd", c.getLineEnd());
-                    ci.put("forLoop", c.isForLoop());
-                    ci.put("refCursor", c.isRefCursor());
-                    // Task #26: the "returns data" marker the cursors facet surfaces. It is a
-                    // property of the owning node (a cursor lives in a routine that may return
-                    // result sets), emitted on each cursor row so the facet can show/filter it.
-                    ci.put("returnsData", node.isReturnsResultSet());
-                    ci.put("resultSets", node.getResultSets());
-                    if (c.getQuery() != null) ci.put("query", c.getQuery());
-                    if (c.getTables() != null) ci.put("tables", c.getTables());
-                    // Attach post-DECLARE lifecycle operations (OPEN/FETCH/CLOSE/DEALLOCATE).
-                    // Prefer the dialect parser's own CursorInfo.stmtOperations when it already
-                    // carried them (e.g. SQL Server's visitor matches OPEN/FETCH/CLOSE/DEALLOCATE
-                    // to the declaring cursor by name directly, including DEALLOCATE, which the
-                    // statement-derived fallback below has no vocabulary for at all). Fall back to
-                    // deriving from node.getStatements() only when the parser did not supply them,
-                    // which is the existing Oracle PL/SQL path (OPEN_CURSOR/FETCH/CLOSE_CURSOR).
-                    String cName = c.getName() != null ? c.getName().toUpperCase() : "";
-                    List<Map<String, Object>> stmtOps;
-                    if (c.getStmtOperations() != null && !c.getStmtOperations().isEmpty()) {
-                        stmtOps = new ArrayList<>();
-                        for (CursorInfo.StmtOp op : c.getStmtOperations()) {
-                            Map<String, Object> opInfo = new LinkedHashMap<>();
-                            opInfo.put("operation", op.getOperation());
-                            opInfo.put("line", op.getLine());
-                            stmtOps.add(opInfo);
-                        }
-                    } else {
-                        stmtOps = cursorOpsFromStmts.get(cName);
-                    }
-                    if (stmtOps != null && !stmtOps.isEmpty()) {
-                        // A cursor's lifecycle list is a SEQUENCE (OPEN → FETCH… → CLOSE), so it
-                        // is emitted in true source order regardless of how it was collected:
-                        // the statement-derived fallback groups by cursor name over a statement
-                        // list that, for a package-as-entry-point node, used to arrive with the
-                        // package initialization block's statements in front (see
-                        // DependencyCrawler's aggregation), and a dialect's own stmtOperations is
-                        // whatever order that visitor recorded. Stable sort — ties keep it.
-                        stmtOps = new ArrayList<>(stmtOps);
-                        stmtOps.sort(Comparator.comparingInt(o -> ((Number) o.get("line")).intValue()));
-                        ci.put("stmtOperations", stmtOps);
-                    }
-                    cursors.add(ci);
-                }
-                detail.put("cursors", cursors);
-            }
-
-            // Sequences — extracted from calls with NEXTVAL/CURRVAL
-            if (node.getCalls() != null && !node.getCalls().isEmpty()) {
-                List<Map<String, Object>> seqList = extractSequences(node.getCalls());
-                if (!seqList.isEmpty()) {
-                    detail.put("sequences", seqList);
-                }
-            }
-
-            // Calls — grouped by target (skip builtins)
-            if (node.getCalls() != null && !node.getCalls().isEmpty()) {
-                detail.put("calls", groupCalls(node.getCalls(), node.getPackageName(), node.getSchema()));
-            }
-
-            // Dynamic SQL
-            if (node.getDynamicSql() != null && !node.getDynamicSql().isEmpty()) {
-                List<Map<String, Object>> dynSql = new ArrayList<>();
-                for (DynamicSqlInfo ds : node.getDynamicSql()) {
-                    Map<String, Object> dm = new LinkedHashMap<>();
-                    dm.put("type", ds.getType());
-                    dm.put("line", ds.getLine());
-                    dm.put("sqlExpression", ds.getSqlExpression());
-                    if (ds.getUsingVariables() != null && !ds.getUsingVariables().isEmpty())
-                        dm.put("usingVariables", ds.getUsingVariables());
-                    dynSql.add(dm);
-                }
-                detail.put("dynamicSql", dynSql);
-            }
-
-            // Exception handlers
-            if (node.getExceptionHandlers() != null && !node.getExceptionHandlers().isEmpty()) {
-                List<Map<String, Object>> exHandlers = new ArrayList<>();
-                for (ExceptionHandlerInfo eh : node.getExceptionHandlers()) {
-                    Map<String, Object> em = new LinkedHashMap<>();
-                    if (eh.getExceptionName() != null) em.put("exception", eh.getExceptionName());
-                    em.put("line", eh.getLine());
-                    em.put("lineEnd", eh.getLineEnd());
-                    em.put("statementsCount", eh.getStatementsCount());
-                    exHandlers.add(em);
-                }
-                detail.put("exceptionHandlers", exHandlers);
-            }
-
-            // IDENTITY columns (SQL Server)
-            if (node.getIdentityColumns() != null && !node.getIdentityColumns().isEmpty()) {
-                List<Map<String, Object>> idCols = new ArrayList<>();
-                for (IdentityColumnInfo ic : node.getIdentityColumns()) {
-                    Map<String, Object> im = new LinkedHashMap<>();
-                    im.put("schema", ic.getSchema());
-                    im.put("tableName", ic.getTableName());
-                    im.put("columnName", ic.getColumnName());
-                    im.put("seed", ic.getSeed());
-                    im.put("increment", ic.getIncrement());
-                    im.put("line", ic.getLine());
-                    idCols.add(im);
-                }
-                detail.put("identityColumns", idCols);
-            }
-
-            // Declared FOREIGN KEY relationships. Written as explicit maps rather than serialized
-            // POJOs so the key names here are the contract the Mongo mapper and the UI read, and
-            // do not silently change if the model class is refactored.
-            if (node.getForeignKeys() != null && !node.getForeignKeys().isEmpty()) {
-                List<Map<String, Object>> fks = new ArrayList<>();
-                for (ForeignKeyInfo fk : node.getForeignKeys()) {
-                    Map<String, Object> fm = new LinkedHashMap<>();
-                    fm.put("constraintName", fk.getConstraintName());
-                    fm.put("schema", fk.getSchema());
-                    fm.put("tableName", fk.getTable());
-                    fm.put("columns", fk.getColumns());
-                    fm.put("referencedSchema", fk.getReferencedSchema());
-                    fm.put("referencedTable", fk.getReferencedTable());
-                    fm.put("referencedColumns", fk.getReferencedColumns());
-                    fm.put("line", fk.getLine());
-                    fks.add(fm);
-                }
-                detail.put("foreignKeys", fks);
-            }
-
-            // Statement summary
-            detail.put("statementSummary", nodeMetrics.getOrDefault(nodeId,
-                    EMPTY_NODE_METRICS).statementSummary());
-
-            // Transaction scope — COMMIT / ROLLBACK / SAVEPOINT + autonomous transaction
-            java.util.List<Map<String, Object>> txnStmts = new ArrayList<>();
-            int commits = 0, rollbacks = 0, savepoints = 0;
-            if (node.getStatements() != null) {
-                for (StatementInfo s : node.getStatements()) {
-                    String t = s.getType();
-                    if (t == null) continue;
-                    String T = t.toUpperCase();
-                    if (T.equals("COMMIT") || T.equals("ROLLBACK") || T.equals("SAVEPOINT")) {
-                        Map<String, Object> m = new LinkedHashMap<>();
-                        m.put("type", T);
-                        m.put("line", s.getLine());
-                        if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) {
-                            m.put("name", s.getSavepointName());
-                        }
-                        txnStmts.add(m);
-                        if (T.equals("COMMIT")) commits++;
-                        else if (T.equals("ROLLBACK")) rollbacks++;
-                        else savepoints++;
-                    }
-                }
-            }
-            // transactionScope.statements is read as the order the COMMIT/ROLLBACK/SAVEPOINTs
-            // execute in, so it is emitted in true source order rather than in the node's raw
-            // statement-list order (see the cursor stmtOperations note above and DependencyCrawler's
-            // package aggregation). Stable sort.
-            txnStmts.sort(Comparator.comparingInt(m -> ((Number) m.get("line")).intValue()));
-            if (!txnStmts.isEmpty() || node.isAutonomousTransaction()) {
-                Map<String, Object> ts = new LinkedHashMap<>();
-                ts.put("commits", commits);
-                ts.put("rollbacks", rollbacks);
-                ts.put("savepoints", savepoints);
-                ts.put("autonomous", node.isAutonomousTransaction());
-                ts.put("statements", txnStmts);
-                detail.put("transactionScope", ts);
-            }
-
-            // External package var refs
-            if (node.getExternalPackageVarRefs() != null && !node.getExternalPackageVarRefs().isEmpty()) {
-                detail.put("externalPackageVarRefs", node.getExternalPackageVarRefs());
-            }
-            if (node.getExternalPackageVarRefDetails() != null && !node.getExternalPackageVarRefDetails().isEmpty()) {
-                detail.put("externalPackageVarRefDetails", node.getExternalPackageVarRefDetails());
-            }
-
-            // Source file ref
-            String sourceFile = buildSourceFileName(node);
-            if (sourceFile != null) detail.put("sourceFile", sourceFile);
-
-            // Package members (package-as-entry-point aggregation only — see FlowNode#getMembers).
-            // Lets PackageTreeBuilder build the procedure drill-down tree straight from this one
-            // node's own detail, instead of a separate crawl/output folder per procedure.
-            if (node.getMembers() != null && !node.getMembers().isEmpty()) {
-                List<Map<String, Object>> members = new ArrayList<>();
-                for (SubprogramSummaryInfo m : node.getMembers()) {
-                    Map<String, Object> mm = new LinkedHashMap<>();
-                    mm.put("name", m.getName());
-                    mm.put("type", m.getType());
-                    mm.put("lineStart", m.getLineStart());
-                    mm.put("lineEnd", m.getLineEnd());
-                    // Task #29: nested member marker (omitted for ordinary members).
-                    if (m.isNested()) mm.put("nested", true);
-                    if (m.getScopeDepth() > 0) mm.put("scopeDepth", m.getScopeDepth());
-                    members.add(mm);
-                }
-                detail.put("members", members);
-            }
-
-            String safeId = safeFileName(nodeId);
-            writeJson(nodesDir.resolve(safeId + ".json"), detail);
-            nodeDetailCount++;
+            saveTasks.add(() -> {
+                Written w = writeNodeDetail(rn, chunkIndex, nodeMetrics, subtreeCache, nodeIndex, nodesDir);
+                return w == null ? List.of() : List.of(w);
+            });
         }
+        // The per-facet indexes are independent of one another and of the node details, so they
+        // share the same pool rather than queueing behind the node family.
+        //
+        // Cache invalidation (optimization 3): each write through {@code CachingArtifactStore}
+        // invalidates the key's own entry plus the cached listing at every ancestor — O(key depth)
+        // local deletes per write. That invalidation lives entirely in CachingArtifactStore
+        // (analyzer-storage, a different lane); it exposes no batch/coalesce flag a caller can pass,
+        // and the writer has no handle on it from here (the store may be local, Mongo or S3 behind
+        // it). The repeated deletes are idempotent local file operations on the same few ancestor
+        // listing files, not store round trips, so they are not on the remote-latency critical path;
+        // coalescing them would need a new store-level API and is deliberately left to that lane.
+        saveTasks.add(() -> List.of(writeTableIndex(apiDir, lightNodes)));
+        saveTasks.add(() -> {
+            Written g = writeGlobalsDeclarations(apiDir);
+            return g == null ? List.of() : List.of(g);
+        });
+        saveTasks.add(() -> List.of(writeJobsIndex(apiDir)));
+        saveTasks.add(() -> List.of(writeCallGraph(apiDir, edges, cycles)));
+        saveTasks.add(() -> List.of(writeNodeIdMap(apiDir, nodeIndex)));
+        saveTasks.add(() -> writeStatementIndex(apiDir, lightNodes));
 
-        // MID-026: `lightNodes`/`nodeIndex` are now built once, near the top of this method, and
-        // reused by every cross-node lookup above as well as the 3 consumers below — no second
-        // projection pass, no second id-keyed map. `mergeChunks` itself still builds the full
-        // `nodes` list unchanged (this remains additive, not a replacement of that).
+        List<List<Written>> written = runConcurrently(saveTasks);
 
-        // ── 3. tables/index.json: all tables, who uses them, which operations ──
-        int tableCount = writeTableIndex(apiDir, lightNodes);
-
-        // ── 3a. globals/declarations.json: parse-time package-global declarations ──
-        // A dedicated artifact (not a per-node section) so the declarations survive a crawl that
-        // produced no PACKAGE_BODY/PACKAGE_SPEC node — see recordPackageGlobals.
-        writeGlobalsDeclarations(apiDir);
-
-        // ── 3b. jobs/index.json: discovered scheduled jobs (job, schedule, enabled, target) ──
-        int jobCount = writeJobsIndex(apiDir);
-
-        // ── 4. call_graph.json: deduplicated edges for graph rendering ──
-        writeCallGraph(apiDir, edges, cycles);
-
-        // ── 5. node_id_map.json: shortId -> fullId lookup for resolving edge references ──
-        // MID-026's 4th conversion: writeNodeIdMap only ever reads buildFullId()'s finished string
-        // (see LightNode.fullId's own doc comment), so it takes the same shared `nodeIndex` this
-        // method already built for cross-node lookups above, rather than a second, separately-built
-        // map or the full FlowNode map.
-        writeNodeIdMap(apiDir, nodeIndex);
-
-        // ── 6. statements/index.json (+ index.offsets.json): one row per statement ──
-        int statementCount = writeStatementIndex(apiDir, lightNodes);
+        // Register what the pool wrote in the writer's original order — node details first, then
+        // each facet — so the layout manifest's insertion order (and therefore its bytes) is
+        // identical to the sequential pass. The counts come from these same results.
+        int nodeDetailCount = 0;
+        for (int i = 0; i < resolvedNodes.size(); i++) {
+            for (Written w : written.get(i)) {
+                manifest.recordArtifact(w.key(), w.bytes(), w.rows());
+                nodeDetailCount++;
+            }
+        }
+        int facet = resolvedNodes.size();
+        Written tablesW = firstOf(written.get(facet++));
+        int tableCount = tablesW == null ? 0 : tablesW.rows().intValue();
+        if (tablesW != null) manifest.recordArtifact(tablesW.key(), tablesW.bytes(), tablesW.rows());
+        Written globalsW = firstOf(written.get(facet++));
+        if (globalsW != null) manifest.recordArtifact(globalsW.key(), globalsW.bytes(), globalsW.rows());
+        Written jobsW = firstOf(written.get(facet++));
+        int jobCount = jobsW == null ? 0 : jobsW.rows().intValue();
+        if (jobsW != null) manifest.recordArtifact(jobsW.key(), jobsW.bytes(), jobsW.rows());
+        Written callGraphW = firstOf(written.get(facet++));
+        if (callGraphW != null) manifest.recordArtifact(callGraphW.key(), callGraphW.bytes(), callGraphW.rows());
+        Written nodeIdMapW = firstOf(written.get(facet++));
+        if (nodeIdMapW != null) manifest.recordArtifact(nodeIdMapW.key(), nodeIdMapW.bytes(), nodeIdMapW.rows());
+        List<Written> statementsW = written.get(facet++);
+        int statementCount = statementsW.isEmpty() ? 0 : statementsW.get(0).rows().intValue();
+        for (Written w : statementsW) manifest.recordArtifact(w.key(), w.bytes(), w.rows());
 
         // ── 7. manifest.json: written LAST, after index.json (the staleness anchor) ──
         // The routing artifact every API can use to answer in one small read. Counts are the ones
@@ -1548,6 +1258,531 @@ public class ChunkedFlowWriter {
                 jobCount, edges.size());
 
         System.err.println("[ChunkedFlowWriter] API files written: " + apiDir);
+    }
+
+    /**
+     * Builds and writes one {@code api/nodes/{id}.json} detail document from its own chunk, on the
+     * concurrent save pool. Returns {@code null} for a dangling chunk reference — the same node
+     * every other consumer skips — so the caller counts only the files actually emitted. The
+     * document goes out through the length-declared small-write path ({@link
+     * #writeSmallJsonUnrecorded}), so a KB-sized detail file rides the store's buffered asynchronous
+     * path instead of a direct round trip.
+     */
+    private Written writeNodeDetail(ResolvedNode rn,
+                                    Map<String, ArtifactKey> chunkIndex,
+                                    Map<String, DependencyCrawler.NodeMetrics> nodeMetrics,
+                                    Map<String, Set<String>> subtreeCache,
+                                    Map<String, LightNode> nodeIndex,
+                                    ArtifactKey nodesDir) throws IOException {
+        FlowNode node = readNodeChunk(rn.originalId(), chunkIndex);
+        if (node == null) return null;
+        node.setNodeId(rn.light().getNodeId());
+        String nodeId = safeNodeId(node);
+        Map<String, Object> detail = new LinkedHashMap<>();
+
+        detail.put("nodeId", nodeId);
+        String pkg = node.getPackageName() != null ? node.getPackageName() : "";
+        String obj = node.getObjectName() != null ? node.getObjectName() : "";
+        detail.put("name", pkg.isEmpty() ? obj : pkg + "." + obj);
+        // packageName/objectName are emitted so the estate globals facet can key a package's
+        // declaration list by its own package name (the display `name` is "PKG.SUB").
+        if (!pkg.isEmpty()) detail.put("packageName", pkg);
+        detail.put("objectName", obj);
+        detail.put("schema", node.getSchema());
+        detail.put("objectType", node.getObjectType());
+        // Task #29: nested/local subprogram marker on the node detail too (additive; omitted
+        // for ordinary nodes so existing node JSON is byte-identical).
+        if (node.isNested()) detail.put("nested", true);
+        if (node.getScopeDepth() > 0) detail.put("scopeDepth", node.getScopeDepth());
+        detail.put("depth", node.getDepth());
+        detail.put("lineStart", node.getLineStart());
+        detail.put("lineEnd", node.getLineEnd());
+        detail.put("linesOfCode", node.getLinesOfCode());
+
+        // Tasks #26/#27 — result-set marker + TVF/SETOF return shape. Scalars ride Mongo's
+        // Splitter into the parent document automatically; returnsColumns[] becomes its own
+        // child collection there, the same way cursors[] does.
+        if (node.isReturnsResultSet()) {
+            detail.put("returnsResultSet", true);
+            detail.put("resultSets", node.getResultSets());
+        }
+        if (node.getReturnType() != null) detail.put("returnType", node.getReturnType());
+        if (node.getReturnsColumns() != null && !node.getReturnsColumns().isEmpty()) {
+            detail.put("returnsColumns", node.getReturnsColumns());
+        }
+
+        // Trigger metadata (populated for TRIGGER nodes)
+        if (node.getTriggerTable() != null)  detail.put("triggerTable", node.getTriggerTable());
+        if (node.getTriggerEvent() != null)  detail.put("triggerEvent", node.getTriggerEvent());
+        if (node.getTriggerTiming() != null) detail.put("triggerTiming", node.getTriggerTiming());
+        if (node.getTriggerWhenClause() != null) detail.put("triggerWhenClause", node.getTriggerWhenClause());
+        if (node.getTriggerLevel() != null) detail.put("triggerLevel", node.getTriggerLevel());
+        if (node.getTriggerBody() != null) detail.put("triggerBody", node.getTriggerBody());
+        // Catalog-only metadata (ALL_TRIGGERS TRIGGER_TYPE / STATUS) on a catalog-discovered
+        // trigger node — additive, null for every non-catalog trigger node.
+        if (node.getTriggerType() != null) detail.put("triggerType", node.getTriggerType());
+        if (node.getTriggerStatus() != null) detail.put("triggerStatus", node.getTriggerStatus());
+
+        // Package-global DECLARATIONS (PACKAGE_BODY/PACKAGE_SPEC nodes only) — the estate
+        // globals facet's declared variables (name/dataType/defaultValue/constant). Each
+        // VariableInfo already carries exactly those fields.
+        if (node.getPackageVariables() != null && !node.getPackageVariables().isEmpty()) {
+            detail.put("packageGlobalDeclarations", node.getPackageVariables());
+        }
+
+        // Parameters
+        if (node.getParameters() != null && !node.getParameters().isEmpty()) {
+            List<Map<String, Object>> params = new ArrayList<>();
+            for (ParameterInfo p : node.getParameters()) {
+                Map<String, Object> pm = new LinkedHashMap<>();
+                pm.put("name", p.getName());
+                pm.put("dataType", p.getDataType());
+                pm.put("direction", p.getDirection());
+                if (p.getDefaultValue() != null) pm.put("default", p.getDefaultValue());
+                pm.put("line", p.getLine());
+                params.add(pm);
+            }
+            detail.put("parameters", params);
+        }
+
+        // Variables — categorized
+        if (node.getLocalVariables() != null && !node.getLocalVariables().isEmpty()) {
+            detail.put("variables", categorizeVariables(node.getLocalVariables()));
+        }
+
+        // Tables — grouped by name with all operations and lines
+        if (node.getTableOperations() != null && !node.getTableOperations().isEmpty()) {
+            detail.put("tables", groupTableOps(node.getTableOperations()));
+            detail.put("directTables", groupTableOps(node.getTableOperations()));
+        }
+
+        // Subtree tables — aggregate from this node + all descendants
+        {
+            Set<String> descendants = subtreeCache.getOrDefault(nodeId, Collections.emptySet());
+            detail.put("subtreeTables", buildSubtreeTables(nodeId, descendants, nodeIndex));
+        }
+
+        // Cursors — enrich with OPEN/FETCH/CLOSE operations from statements
+        if (node.getCursors() != null && !node.getCursors().isEmpty()) {
+            // Build cursor name -> operations map from statements
+            Map<String, List<Map<String, Object>>> cursorOpsFromStmts = new LinkedHashMap<>();
+            if (node.getStatements() != null) {
+                for (StatementInfo s : node.getStatements()) {
+                    String sType = s.getType();
+                    if (sType == null) continue;
+                    String cursorName = null;
+                    String opType = null;
+                    if ("OPEN_CURSOR".equals(sType) || "OPEN_FOR".equals(sType)) {
+                        opType = "OPEN";
+                        cursorName = extractCursorNameFromSql(s.getSqlText());
+                    } else if ("FETCH".equals(sType) || "BULK_COLLECT".equals(sType)) {
+                        opType = sType;
+                        cursorName = extractCursorNameFromSql(s.getSqlText());
+                    } else if ("CLOSE_CURSOR".equals(sType)) {
+                        opType = "CLOSE";
+                        cursorName = extractCursorNameFromSql(s.getSqlText());
+                    }
+                    if (cursorName != null && opType != null) {
+                        Map<String, Object> opInfo = new LinkedHashMap<>();
+                        opInfo.put("operation", opType);
+                        opInfo.put("line", s.getLine());
+                        cursorOpsFromStmts.computeIfAbsent(cursorName.toUpperCase(), k -> new ArrayList<>()).add(opInfo);
+                    }
+                }
+            }
+
+            List<Map<String, Object>> cursors = new ArrayList<>();
+            for (CursorInfo c : node.getCursors()) {
+                Map<String, Object> ci = new LinkedHashMap<>();
+                ci.put("name", c.getName());
+                ci.put("line", c.getLine());
+                ci.put("lineEnd", c.getLineEnd());
+                ci.put("forLoop", c.isForLoop());
+                ci.put("refCursor", c.isRefCursor());
+                // Task #26: the "returns data" marker the cursors facet surfaces. It is a
+                // property of the owning node (a cursor lives in a routine that may return
+                // result sets), emitted on each cursor row so the facet can show/filter it.
+                ci.put("returnsData", node.isReturnsResultSet());
+                ci.put("resultSets", node.getResultSets());
+                if (c.getQuery() != null) ci.put("query", c.getQuery());
+                if (c.getTables() != null) ci.put("tables", c.getTables());
+                // Attach post-DECLARE lifecycle operations (OPEN/FETCH/CLOSE/DEALLOCATE).
+                // Prefer the dialect parser's own CursorInfo.stmtOperations when it already
+                // carried them (e.g. SQL Server's visitor matches OPEN/FETCH/CLOSE/DEALLOCATE
+                // to the declaring cursor by name directly, including DEALLOCATE, which the
+                // statement-derived fallback below has no vocabulary for at all). Fall back to
+                // deriving from node.getStatements() only when the parser did not supply them,
+                // which is the existing Oracle PL/SQL path (OPEN_CURSOR/FETCH/CLOSE_CURSOR).
+                String cName = c.getName() != null ? c.getName().toUpperCase() : "";
+                List<Map<String, Object>> stmtOps;
+                if (c.getStmtOperations() != null && !c.getStmtOperations().isEmpty()) {
+                    stmtOps = new ArrayList<>();
+                    for (CursorInfo.StmtOp op : c.getStmtOperations()) {
+                        Map<String, Object> opInfo = new LinkedHashMap<>();
+                        opInfo.put("operation", op.getOperation());
+                        opInfo.put("line", op.getLine());
+                        stmtOps.add(opInfo);
+                    }
+                } else {
+                    stmtOps = cursorOpsFromStmts.get(cName);
+                }
+                if (stmtOps != null && !stmtOps.isEmpty()) {
+                    // A cursor's lifecycle list is a SEQUENCE (OPEN → FETCH… → CLOSE), so it
+                    // is emitted in true source order regardless of how it was collected:
+                    // the statement-derived fallback groups by cursor name over a statement
+                    // list that, for a package-as-entry-point node, used to arrive with the
+                    // package initialization block's statements in front (see
+                    // DependencyCrawler's aggregation), and a dialect's own stmtOperations is
+                    // whatever order that visitor recorded. Stable sort — ties keep it.
+                    stmtOps = new ArrayList<>(stmtOps);
+                    stmtOps.sort(Comparator.comparingInt(o -> ((Number) o.get("line")).intValue()));
+                    ci.put("stmtOperations", stmtOps);
+                }
+                cursors.add(ci);
+            }
+            detail.put("cursors", cursors);
+        }
+
+        // Sequences — extracted from calls with NEXTVAL/CURRVAL
+        if (node.getCalls() != null && !node.getCalls().isEmpty()) {
+            List<Map<String, Object>> seqList = extractSequences(node.getCalls());
+            if (!seqList.isEmpty()) {
+                detail.put("sequences", seqList);
+            }
+        }
+
+        // Calls — grouped by target (skip builtins)
+        if (node.getCalls() != null && !node.getCalls().isEmpty()) {
+            detail.put("calls", groupCalls(node.getCalls(), node.getPackageName(), node.getSchema()));
+        }
+
+        // Dynamic SQL
+        if (node.getDynamicSql() != null && !node.getDynamicSql().isEmpty()) {
+            List<Map<String, Object>> dynSql = new ArrayList<>();
+            for (DynamicSqlInfo ds : node.getDynamicSql()) {
+                Map<String, Object> dm = new LinkedHashMap<>();
+                dm.put("type", ds.getType());
+                dm.put("line", ds.getLine());
+                dm.put("sqlExpression", ds.getSqlExpression());
+                if (ds.getUsingVariables() != null && !ds.getUsingVariables().isEmpty())
+                    dm.put("usingVariables", ds.getUsingVariables());
+                dynSql.add(dm);
+            }
+            detail.put("dynamicSql", dynSql);
+        }
+
+        // Exception handlers
+        if (node.getExceptionHandlers() != null && !node.getExceptionHandlers().isEmpty()) {
+            List<Map<String, Object>> exHandlers = new ArrayList<>();
+            for (ExceptionHandlerInfo eh : node.getExceptionHandlers()) {
+                Map<String, Object> em = new LinkedHashMap<>();
+                if (eh.getExceptionName() != null) em.put("exception", eh.getExceptionName());
+                em.put("line", eh.getLine());
+                em.put("lineEnd", eh.getLineEnd());
+                em.put("statementsCount", eh.getStatementsCount());
+                exHandlers.add(em);
+            }
+            detail.put("exceptionHandlers", exHandlers);
+        }
+
+        // IDENTITY columns (SQL Server)
+        if (node.getIdentityColumns() != null && !node.getIdentityColumns().isEmpty()) {
+            List<Map<String, Object>> idCols = new ArrayList<>();
+            for (IdentityColumnInfo ic : node.getIdentityColumns()) {
+                Map<String, Object> im = new LinkedHashMap<>();
+                im.put("schema", ic.getSchema());
+                im.put("tableName", ic.getTableName());
+                im.put("columnName", ic.getColumnName());
+                im.put("seed", ic.getSeed());
+                im.put("increment", ic.getIncrement());
+                im.put("line", ic.getLine());
+                idCols.add(im);
+            }
+            detail.put("identityColumns", idCols);
+        }
+
+        // Declared FOREIGN KEY relationships. Written as explicit maps rather than serialized
+        // POJOs so the key names here are the contract the Mongo mapper and the UI read, and
+        // do not silently change if the model class is refactored.
+        if (node.getForeignKeys() != null && !node.getForeignKeys().isEmpty()) {
+            List<Map<String, Object>> fks = new ArrayList<>();
+            for (ForeignKeyInfo fk : node.getForeignKeys()) {
+                Map<String, Object> fm = new LinkedHashMap<>();
+                fm.put("constraintName", fk.getConstraintName());
+                fm.put("schema", fk.getSchema());
+                fm.put("tableName", fk.getTable());
+                fm.put("columns", fk.getColumns());
+                fm.put("referencedSchema", fk.getReferencedSchema());
+                fm.put("referencedTable", fk.getReferencedTable());
+                fm.put("referencedColumns", fk.getReferencedColumns());
+                fm.put("line", fk.getLine());
+                fks.add(fm);
+            }
+            detail.put("foreignKeys", fks);
+        }
+
+        // Statement summary
+        detail.put("statementSummary", nodeMetrics.getOrDefault(nodeId,
+                EMPTY_NODE_METRICS).statementSummary());
+
+        // Transaction scope — COMMIT / ROLLBACK / SAVEPOINT + autonomous transaction
+        java.util.List<Map<String, Object>> txnStmts = new ArrayList<>();
+        int commits = 0, rollbacks = 0, savepoints = 0;
+        if (node.getStatements() != null) {
+            for (StatementInfo s : node.getStatements()) {
+                String t = s.getType();
+                if (t == null) continue;
+                String T = t.toUpperCase();
+                if (T.equals("COMMIT") || T.equals("ROLLBACK") || T.equals("SAVEPOINT")) {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("type", T);
+                    m.put("line", s.getLine());
+                    if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) {
+                        m.put("name", s.getSavepointName());
+                    }
+                    txnStmts.add(m);
+                    if (T.equals("COMMIT")) commits++;
+                    else if (T.equals("ROLLBACK")) rollbacks++;
+                    else savepoints++;
+                }
+            }
+        }
+        // transactionScope.statements is read as the order the COMMIT/ROLLBACK/SAVEPOINTs
+        // execute in, so it is emitted in true source order rather than in the node's raw
+        // statement-list order (see the cursor stmtOperations note above and DependencyCrawler's
+        // package aggregation). Stable sort.
+        txnStmts.sort(Comparator.comparingInt(m -> ((Number) m.get("line")).intValue()));
+        if (!txnStmts.isEmpty() || node.isAutonomousTransaction()) {
+            Map<String, Object> ts = new LinkedHashMap<>();
+            ts.put("commits", commits);
+            ts.put("rollbacks", rollbacks);
+            ts.put("savepoints", savepoints);
+            ts.put("autonomous", node.isAutonomousTransaction());
+            ts.put("statements", txnStmts);
+            detail.put("transactionScope", ts);
+        }
+
+        // External package var refs
+        if (node.getExternalPackageVarRefs() != null && !node.getExternalPackageVarRefs().isEmpty()) {
+            detail.put("externalPackageVarRefs", node.getExternalPackageVarRefs());
+        }
+        if (node.getExternalPackageVarRefDetails() != null && !node.getExternalPackageVarRefDetails().isEmpty()) {
+            detail.put("externalPackageVarRefDetails", node.getExternalPackageVarRefDetails());
+        }
+
+        // Source file ref
+        String sourceFile = buildSourceFileName(node);
+        if (sourceFile != null) detail.put("sourceFile", sourceFile);
+
+        // Package members (package-as-entry-point aggregation only — see FlowNode#getMembers).
+        // Lets PackageTreeBuilder build the procedure drill-down tree straight from this one
+        // node's own detail, instead of a separate crawl/output folder per procedure.
+        if (node.getMembers() != null && !node.getMembers().isEmpty()) {
+            List<Map<String, Object>> members = new ArrayList<>();
+            for (SubprogramSummaryInfo m : node.getMembers()) {
+                Map<String, Object> mm = new LinkedHashMap<>();
+                mm.put("name", m.getName());
+                mm.put("type", m.getType());
+                mm.put("lineStart", m.getLineStart());
+                mm.put("lineEnd", m.getLineEnd());
+                // Task #29: nested member marker (omitted for ordinary members).
+                if (m.isNested()) mm.put("nested", true);
+                if (m.getScopeDepth() > 0) mm.put("scopeDepth", m.getScopeDepth());
+                members.add(mm);
+            }
+            detail.put("members", members);
+        }
+
+        String safeId = safeFileName(nodeId);
+        ArtifactKey key = nodesDir.resolve(safeId + ".json");
+        return new Written(key, writeSmallJsonUnrecorded(key, detail), null);
+    }
+
+    /** The single artifact a one-element task result holds, or {@code null} for an empty one. */
+    private static Written firstOf(List<Written> written) {
+        return written.isEmpty() ? null : written.get(0);
+    }
+
+    /**
+     * Builds one {@code api/index.json} node row from its own chunk, on the save pool. Returns
+     * {@code null} for a dangling chunk reference, which every consumer skips. The row is
+     * byte-identical to the one the sequential loop built — only the chunk read that feeds it moved
+     * onto the pool.
+     */
+    private Map<String, Object> buildIndexNode(ResolvedNode rn,
+                                               Map<String, ArtifactKey> chunkIndex,
+                                               Map<String, DependencyCrawler.NodeMetrics> nodeMetrics,
+                                               Map<String, Set<String>> subtreeCache,
+                                               Map<String, LightNode> nodeIndex,
+                                               Map<String, String> firstCallerMap) throws IOException {
+        FlowNode node = readNodeChunk(rn.originalId(), chunkIndex);
+        if (node == null) return null; // dangling chunk reference, recorded nowhere else either
+        node.setNodeId(rn.light().getNodeId());
+        Map<String, Object> idx = new LinkedHashMap<>();
+        String nodeId = safeNodeId(node);
+        String pkg = node.getPackageName() != null ? node.getPackageName() : "";
+        String obj = node.getObjectName() != null ? node.getObjectName() : "";
+        String fullName = pkg.isEmpty() ? obj : pkg + "." + obj;
+
+        idx.put("nodeId", nodeId);
+        idx.put("order", node.getOrder());
+        idx.put("depth", node.getDepth());
+        idx.put("schema", node.getSchema());
+        idx.put("packageName", pkg.isEmpty() ? null : pkg);
+        idx.put("objectName", obj);
+        idx.put("name", fullName);
+        idx.put("objectType", node.getObjectType());
+        // Task #29: nested/local subprogram badge for the procedures facet. Additive — only
+        // emitted for nested nodes, so existing (non-nested) index.json is byte-identical.
+        if (node.isNested()) idx.put("nested", true);
+        if (node.getScopeDepth() > 0) idx.put("scopeDepth", node.getScopeDepth());
+        // Trigger metadata in the index summary so the UI can associate a trigger with its
+        // OWN table (otherwise every trigger node shows under every table/view).
+        if (node.getTriggerTable() != null)  idx.put("triggerTable", node.getTriggerTable());
+        if (node.getTriggerEvent() != null)  idx.put("triggerEvent", node.getTriggerEvent());
+        if (node.getTriggerTiming() != null) idx.put("triggerTiming", node.getTriggerTiming());
+        if (node.getTriggerWhenClause() != null) idx.put("triggerWhenClause", node.getTriggerWhenClause());
+        if (node.getTriggerLevel() != null) idx.put("triggerLevel", node.getTriggerLevel());
+        if (node.getTriggerBody() != null) idx.put("triggerBody", node.getTriggerBody());
+        if (node.getTriggerType() != null) idx.put("triggerType", node.getTriggerType());
+        if (node.getTriggerStatus() != null) idx.put("triggerStatus", node.getTriggerStatus());
+        idx.put("lineStart", node.getLineStart());
+        idx.put("lineEnd", node.getLineEnd());
+        idx.put("linesOfCode", node.getLinesOfCode());
+        // Tasks #26/#27: the procedures facet reads these off the index row (returnsResultSet /
+        // resultSets for the "returns data" filter; returnType/returnsColumns for the TVF shape).
+        if (node.isReturnsResultSet()) {
+            idx.put("returnsResultSet", true);
+            idx.put("resultSets", node.getResultSets());
+        }
+        if (node.getReturnType() != null) idx.put("returnType", node.getReturnType());
+        if (node.getReturnsColumns() != null && !node.getReturnsColumns().isEmpty()) {
+            idx.put("returnsColumns", node.getReturnsColumns());
+        }
+        idx.put("readable", node.isReadable());
+        if (node.getMessage() != null) idx.put("message", node.getMessage());
+        idx.put("parentNodeId", firstCallerMap.get(nodeId));
+        idx.put("callCount", nodeMetrics.getOrDefault(nodeId,
+                EMPTY_NODE_METRICS).callCount());
+
+        // Counts only — details in nodes/{id}.json
+        int tableCount = node.getTableOperations() != null ? countDistinct(node.getTableOperations()) : 0;
+        // Counted with groupCalls()'s own key (below), so counts.callsOut equals the node
+        // detail's calls[] length — overloads split by arity instead of merging, and the
+        // schema/package qualification matches. The old name-only key under-counted every
+        // overloaded target (ERP_PKG_PLANNER.COMPUTE_TOTAL (1 args)/(2 args) collapsed to one),
+        // making complexity.callsOut 1 short of node.calls for the affected procedures.
+        int[] callCounts = countCallGroups(node.getCalls(), node.getPackageName(), node.getSchema());
+        int callCountOut = callCounts[0];
+        int internalCallCount = callCounts[1];
+        int externalCallCount = callCounts[2];
+        int varCount = node.getLocalVariables() != null ? node.getLocalVariables().size() : 0;
+        int cursorCount = node.getCursors() != null ? node.getCursors().size() : 0;
+        int paramCount = node.getParameters() != null ? node.getParameters().size() : 0;
+        int exHandlerCount = node.getExceptionHandlers() != null ? node.getExceptionHandlers().size() : 0;
+        int sequenceCount = 0;
+        if (node.getCalls() != null) {
+            Set<String> seqNames = new HashSet<>();
+            for (CallInfo c : node.getCalls()) {
+                String cName = c.getName();
+                if (cName != null && ("NEXTVAL".equals(cName) || "CURRVAL".equals(cName))
+                        && c.getPackageName() != null) {
+                    seqNames.add(c.getPackageName());
+                }
+            }
+            sequenceCount = seqNames.size();
+        }
+
+        Map<String, Object> counts = new LinkedHashMap<>();
+        counts.put("tables", tableCount);
+        counts.put("callsOut", callCountOut);
+        counts.put("internalCalls", internalCallCount);
+        counts.put("externalCalls", externalCallCount);
+        counts.put("variables", varCount);
+        counts.put("cursors", cursorCount);
+        counts.put("parameters", paramCount);
+        counts.put("exceptionHandlers", exHandlerCount);
+        counts.put("sequences", sequenceCount);
+        counts.put("statements", nodeMetrics.getOrDefault(nodeId,
+                EMPTY_NODE_METRICS).statementSummary());
+
+        // Subtree counts
+        Set<String> descendants = subtreeCache.getOrDefault(nodeId, Collections.emptySet());
+        Set<String> subtreeTableNames = new HashSet<>();
+        // Count tables from this node
+        if (node.getTableOperations() != null) {
+            for (TableOperationInfo t : node.getTableOperations()) {
+                String key = tableKey(t);
+                if (key != null) subtreeTableNames.add(key);
+            }
+        }
+        // Count tables from all descendants
+        for (String descId : descendants) {
+            LightNode descNode = nodeIndex.get(descId);
+            if (descNode != null && descNode.getTableOperations() != null) {
+                for (TableOperationInfo t : descNode.getTableOperations()) {
+                    String key = tableKey(t);
+                    if (key != null) subtreeTableNames.add(key);
+                }
+            }
+        }
+        counts.put("subtreeTablesCount", subtreeTableNames.size());
+        counts.put("subtreeNodesCount", descendants.size());
+
+        // Flow LOC: this node's LOC + all descendant LOC (full execution path)
+        int flowLoc = node.getLinesOfCode();
+        for (String descId : descendants) {
+            LightNode descNode = nodeIndex.get(descId);
+            if (descNode != null) flowLoc += descNode.getLinesOfCode();
+        }
+        counts.put("flowLinesOfCode", flowLoc);
+
+        idx.put("counts", counts);
+
+        // File references for on-demand loading
+        String sourceFile = buildSourceFileName(node);
+        if (sourceFile != null) idx.put("sourceFile", sourceFile);
+        idx.put("detailFile", "nodes/" + safeFileName(nodeId) + ".json");
+        return idx;
+    }
+
+    /** One node's transaction-scope contribution: its COMMIT/ROLLBACK/SAVEPOINT rows and counts. */
+    private record TxnNodeResult(List<Map<String, Object>> statements, int commits, int rollbacks,
+                                 int savepoints, boolean autonomous) {}
+
+    /**
+     * Collects one node's transaction-scope statements from its chunk, on the save pool. Returns
+     * {@code null} for a dangling chunk reference. The autonomous flag is reported even when the
+     * node has no COMMIT/ROLLBACK/SAVEPOINT, matching the sequential aggregation.
+     */
+    private TxnNodeResult txnForNode(ResolvedNode rn, Map<String, ArtifactKey> chunkIndex) throws IOException {
+        FlowNode fn = readNodeChunk(rn.originalId(), chunkIndex);
+        if (fn == null) return null;
+        fn.setNodeId(rn.light().getNodeId());
+        boolean autonomous = fn.isAutonomousTransaction();
+        List<Map<String, Object>> stmts = new ArrayList<>();
+        int commits = 0, rollbacks = 0, savepoints = 0;
+        if (fn.getStatements() != null) {
+            for (StatementInfo s : fn.getStatements()) {
+                String t = s.getType();
+                if (t == null) continue;
+                String T = t.toUpperCase();
+                if (!T.equals("COMMIT") && !T.equals("ROLLBACK") && !T.equals("SAVEPOINT")) continue;
+                if (T.equals("COMMIT")) commits++;
+                else if (T.equals("ROLLBACK")) rollbacks++;
+                else savepoints++;
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("nodeId", fn.getNodeId());
+                m.put("proc", fn.getObjectName());
+                m.put("schema", fn.getSchema());
+                m.put("type", T);
+                m.put("line", s.getLine());
+                if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) m.put("name", s.getSavepointName());
+                m.put("autonomous", fn.isAutonomousTransaction());
+                stmts.add(m);
+            }
+        }
+        return new TxnNodeResult(stmts, commits, rollbacks, savepoints, autonomous);
     }
 
     /**
@@ -2000,13 +2235,42 @@ public class ChunkedFlowWriter {
      * repo's real corpus — confirmed zero {@code $2}/{@code $3}-suffixed ids exist there — but a
      * real, latent limitation of that primitive, not one this method repeats).
      */
-    private List<LightNode> buildLightNodes() throws IOException {
-        List<LightNode> out = new ArrayList<>();
-        for (ArtifactKey cf : listSorted(chunksKey, "chunk_")) {
-            out.add(toLightNode(readJson(cf, FlowNode.class)));
+    /** {@link #scanChunks()}'s two products: the id→key index and the light projections. */
+    private record ChunkScan(Map<String, ArtifactKey> chunkIndex, List<LightNode> lightNodes) {}
+
+    /**
+     * {@link #buildChunkIndex()} and {@link #buildLightNodes()} fused into ONE read of the chunk
+     * family. The save pass needs both, and reading every chunk twice is two full object-store
+     * passes over the same bytes — the single largest avoidable cost on the save critical path.
+     * Keeps only the id→key map and the light projections; the full bodies are discarded immediately,
+     * exactly as each method does alone.
+     */
+    private ChunkScan scanChunks() throws IOException {
+        List<ArtifactKey> chunkKeys = listSorted(chunksKey, "chunk_");
+        // The chunk reads are independent, so they run concurrently; each task projects to the small
+        // LightNode and returns it, so a full body is never retained across tasks (preserving the
+        // memory property this method had when it read sequentially).
+        List<Callable<ChunkEntry>> tasks = new ArrayList<>(chunkKeys.size());
+        for (ArtifactKey cf : chunkKeys) {
+            tasks.add(() -> {
+                FlowNode n = readJson(cf, FlowNode.class);
+                return new ChunkEntry(n.getNodeId(), cf, toLightNode(n));
+            });
         }
-        return out;
+        Map<String, ArtifactKey> index = new LinkedHashMap<>();
+        List<LightNode> light = new ArrayList<>(chunkKeys.size());
+        for (ChunkEntry e : runConcurrently(tasks)) {
+            if (e.nodeId() != null) index.put(e.nodeId(), e.key());
+            light.add(e.light());
+        }
+        return new ChunkScan(index, light);
     }
+
+    /** One chunk read's product: its node id, its key, and the light projection. */
+    private record ChunkEntry(String nodeId, ArtifactKey key, LightNode light) {}
+
+    /** One merge-time chunk read: the node, or the error message for a corrupt/unreadable chunk. */
+    private record ChunkRead(FlowNode node, String error) {}
 
     /** A {@link LightNode} copy with a different {@code nodeId} — records are immutable, so the
      *  short-id dedup pass (which used to mutate {@code FlowNode} in place) produces a new instance
@@ -2039,7 +2303,7 @@ public class ChunkedFlowWriter {
     }
 
     @SuppressWarnings("unchecked")
-    private int writeTableIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
+    private Written writeTableIndex(ArtifactKey apiDir, List<LightNode> nodes) throws IOException {
         ArtifactKey tablesDir = apiDir.resolve("tables");
 
         Map<String, String> tableObjectTypes = new LinkedHashMap<>();
@@ -2311,9 +2575,8 @@ public class ChunkedFlowWriter {
         tableIndex.put("tables", tableList);
 
         ArtifactKey key = tablesDir.resolve("index.json");
-        long bytes = writeJson(key, tableIndex);
-        manifest.recordArtifact(key, bytes, (long) tableList.size());
-        return tableList.size();
+        long bytes = writeJsonUnrecorded(key, tableIndex);
+        return new Written(key, bytes, (long) tableList.size());
     }
 
     /**
@@ -2322,7 +2585,7 @@ public class ChunkedFlowWriter {
      * the post-crawl {@link JobDiscoverer}; an estate with no scheduler catalog gets an empty
      * document ({@code totalJobs:0}) so the reader degrades to an empty page rather than a 404.
      */
-    private int writeJobsIndex(ArtifactKey apiDir) throws IOException {
+    private Written writeJobsIndex(ArtifactKey apiDir) throws IOException {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Map<String, Object> j : discoveredJobs) {
             if (j == null) continue;
@@ -2334,9 +2597,8 @@ public class ChunkedFlowWriter {
         index.put("totalJobs", rows.size());
         index.put("jobs", rows);
         ArtifactKey key = apiDir.resolve("jobs", "index.json");
-        long bytes = writeJson(key, index);
-        manifest.recordArtifact(key, bytes, (long) rows.size());
-        return rows.size();
+        long bytes = writeJsonUnrecorded(key, index);
+        return new Written(key, bytes, (long) rows.size());
     }
 
     /**
@@ -2347,8 +2609,8 @@ public class ChunkedFlowWriter {
      * a cheaper outcome than the bounded-conversion pattern {@code writeTableIndex}/{@code
      * writeStatementIndex} used, not a partial version of it.
      */
-    private void writeCallGraph(ArtifactKey apiDir, List<FlowEdge> edges,
-                                List<List<String>> cycles) throws IOException {
+    private Written writeCallGraph(ArtifactKey apiDir, List<FlowEdge> edges,
+                                   List<List<String>> cycles) throws IOException {
         // Build set of back-edges from detected cycles (last->first in each cycle)
         Set<String> backEdgeKeys = new HashSet<>();
         for (List<String> cycle : cycles) {
@@ -2430,7 +2692,8 @@ public class ChunkedFlowWriter {
         graph.put("backEdges", backEdgeCount);
         graph.put("edges", new ArrayList<>(deduped.values()));
 
-        writeJson(apiDir.resolve("call_graph.json"), graph);
+        ArtifactKey key = apiDir.resolve("call_graph.json");
+        return new Written(key, writeJsonUnrecorded(key, graph), null);
     }
 
     /**
@@ -2438,7 +2701,7 @@ public class ChunkedFlowWriter {
      * Compact ID is the main key used everywhere (index, edges, URLs).
      * Full ID has parameter suffixes for complete disambiguation.
      */
-    private void writeNodeIdMap(ArtifactKey apiDir, Map<String, LightNode> nodeIndex) throws IOException {
+    private Written writeNodeIdMap(ArtifactKey apiDir, Map<String, LightNode> nodeIndex) throws IOException {
         Map<String, String> idToFull = new LinkedHashMap<>();
         Map<String, String> fullToId = new LinkedHashMap<>();
 
@@ -2455,7 +2718,8 @@ public class ChunkedFlowWriter {
         map.put("shortToFull", idToFull);   // key name must match ParserAnalysisReader.loadIdMap
         map.put("fullToId", fullToId);
 
-        writeJson(apiDir.resolve("node_id_map.json"), map);
+        ArtifactKey key = apiDir.resolve("node_id_map.json");
+        return new Written(key, writeJsonUnrecorded(key, map), null);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2685,10 +2949,30 @@ public class ChunkedFlowWriter {
     public void writeResolverData(SchemaResolver resolver) throws IOException {
         ArtifactKey resolverDir = buildKey.resolve("resolver");
 
-        writeJson(resolverDir.resolve("q1_object_resolution.json"), resolver.exportObjectResolution());
-        writeJson(resolverDir.resolve("q4_direct_dependencies.json"), resolver.exportDirectDependencies());
-        writeJson(resolverDir.resolve("q3_reverse_dependencies.json"), resolver.exportReverseDependencies());
-        writeJson(resolverDir.resolve("q1_ambiguous_objects.json"), resolver.exportAmbiguousObjects());
+        // The four resolver documents are independent of one another and of everything above, so
+        // their writes go out concurrently (same bounded pool + context capture as the API write
+        // pass). The documents themselves are still produced here, in order, on this thread — the
+        // resolver's export methods are not called from the pool. Registration into the manifest is
+        // then done in the original order, so its bytes are unchanged.
+        ArtifactKey q1Obj = resolverDir.resolve("q1_object_resolution.json");
+        ArtifactKey q4Direct = resolverDir.resolve("q4_direct_dependencies.json");
+        ArtifactKey q3Reverse = resolverDir.resolve("q3_reverse_dependencies.json");
+        ArtifactKey q1Ambiguous = resolverDir.resolve("q1_ambiguous_objects.json");
+        List<Object> docs = List.of(
+                resolver.exportObjectResolution(),
+                resolver.exportDirectDependencies(),
+                resolver.exportReverseDependencies(),
+                resolver.exportAmbiguousObjects());
+        List<ArtifactKey> keys = List.of(q1Obj, q4Direct, q3Reverse, q1Ambiguous);
+        List<Callable<Written>> tasks = new ArrayList<>(keys.size());
+        for (int i = 0; i < keys.size(); i++) {
+            ArtifactKey key = keys.get(i);
+            Object doc = docs.get(i);
+            tasks.add(() -> new Written(key, writeJsonUnrecorded(key, doc), null));
+        }
+        for (Written w : runConcurrently(tasks)) {
+            manifest.recordArtifact(w.key(), w.bytes(), w.rows());
+        }
 
         // Resolver artifacts are written after writeFinalResult, so refresh the manifest to include
         // them — it stays the last artifact committed.

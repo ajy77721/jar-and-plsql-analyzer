@@ -1784,19 +1784,34 @@ public class DependencyCrawler {
         Map<String, ArtifactKey> chunkIndex = writer.buildChunkIndex();
         Set<String> nodeIds = chunkIndex.keySet();
 
-        Map<String, Map<String, Integer>> statementSummaries = new LinkedHashMap<>();
+        // Each node's chunk is independent, so the reads run concurrently on the existing
+        // context-carrying fan-out pool. The summaries are keyed by node id, and the result map is
+        // rebuilt by iterating nodeIds in order below, so concurrency cannot change the output.
+        Map<String, Map<String, Integer>> statementSummaries = new ConcurrentHashMap<>();
+        java.util.concurrent.atomic.AtomicReference<IOException> readFailure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        List<Runnable> readTasks = new ArrayList<>(nodeIds.size());
         for (String nodeId : nodeIds) {
-            FlowNode n = writer.readNodeChunk(nodeId, chunkIndex);
-            if (n == null) continue;
-            Map<String, Integer> stmtSummary = new LinkedHashMap<>();
-            if (n.getStatements() != null) {
-                for (StatementInfo s : n.getStatements()) {
-                    String type = s.getType() != null ? s.getType().toUpperCase() : "OTHER";
-                    stmtSummary.merge(type, 1, Integer::sum);
+            readTasks.add(() -> {
+                try {
+                    FlowNode n = writer.readNodeChunk(nodeId, chunkIndex);
+                    if (n == null) return;
+                    Map<String, Integer> stmtSummary = new LinkedHashMap<>();
+                    if (n.getStatements() != null) {
+                        for (StatementInfo s : n.getStatements()) {
+                            String type = s.getType() != null ? s.getType().toUpperCase() : "OTHER";
+                            stmtSummary.merge(type, 1, Integer::sum);
+                        }
+                    }
+                    statementSummaries.put(nodeId, stmtSummary);
+                } catch (IOException e) {
+                    readFailure.compareAndSet(null, e);
                 }
-            }
-            statementSummaries.put(nodeId, stmtSummary);
+            });
         }
+        fanOut(readTasks, sourceParallelism);
+        IOException failure = readFailure.get();
+        if (failure != null) throw failure;
 
         // Compute callCount from edges
         Map<String, Integer> callCounts = new LinkedHashMap<>();
