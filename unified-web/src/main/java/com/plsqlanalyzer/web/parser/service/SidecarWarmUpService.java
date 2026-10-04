@@ -385,6 +385,7 @@ public class SidecarWarmUpService {
      * therefore retried next sweep).
      */
     private int warmByName(String name) {
+        long startNanos = System.nanoTime();
         try {
             // The header is the completeness marker; write it only when missing (a fresh analysis
             // already has one from save time, so this is a no-op there).
@@ -404,11 +405,20 @@ public class SidecarWarmUpService {
                 headerNew = header;
             }
             int written = writer.writeAll(name, false);
-            if (!header || written != AnalysisViewWriter.VIEW_COUNT) return -1;
+            long ms = (System.nanoTime() - startNanos) / 1_000_000L;
+            if (!header || written != AnalysisViewWriter.VIEW_COUNT) {
+                // One DEBUG line per analysis: the sweep's own INFO line reports the totals.
+                log.debug("Sidecar warm-up: {} incomplete ({}/{} facets) in {} ms", name, written,
+                        AnalysisViewWriter.VIEW_COUNT, ms);
+                return -1;
+            }
+            log.debug("Sidecar warm-up: {} warmed {} sidecars in {} ms", name,
+                    written + (headerNew ? 1 : 0), ms);
             return written + (headerNew ? 1 : 0);
         } catch (Throwable t) {
             // Any error is one failed analysis, not a failed sweep, and is retried next time.
-            log.debug("Sidecar warm-up failed for {}: {}", name, t.toString());
+            log.debug("Sidecar warm-up failed for {} after {} ms: {}", name,
+                    (System.nanoTime() - startNanos) / 1_000_000L, t.toString());
             return -1;
         }
     }

@@ -1,7 +1,10 @@
 package com.plsqlanalyzer.web.parser.service;
 
 import com.analyzer.storage.AnalysisRepository;
+import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.RequestScopedArtifactStore;
 import com.analyzer.storage.repo.AnalysisQuery;
+import com.analyzer.storage.sso.CapturedSsoContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.plsqlanalyzer.web.parser.controller.ParserSearchFacets;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -12,8 +15,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Writes an analysis's precomputed view summaries after {@code AnalysisService.runAnalysis} has
@@ -39,6 +47,18 @@ public class AnalysisViewWriter {
     /** The endpoint defaults for {@code /complexity/scores} — mirrors {@link ComplexityScoringService}. */
     private static final String DEFAULT_ALGORITHM = "linear";
     private static final double DEFAULT_EXPONENT = 1.3;
+
+    /**
+     * Bounded pool for the independent facet computations of one precompute pass. It is deliberately
+     * <b>not</b> {@code ShallowTree}'s listing pool: a facet's own node reads fan out on that pool,
+     * and running a facet that waits on an inner fan-out on the same bounded pool would let the
+     * outer tasks starve it (the classic nested-submission deadlock). Separate pools cannot.
+     */
+    private static final ExecutorService FACET_POOL = Executors.newFixedThreadPool(6, r -> {
+        Thread t = new Thread(r, "view-precompute");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final AnalysisRepository repository;
     private final StaticAnalysisReader staticReader;
@@ -80,87 +100,208 @@ public class AnalysisViewWriter {
     /**
      * As {@link #writeAll(String)}, reporting how many facets landed and optionally staying quiet.
      *
+     * <p>The facets are independent, so they are computed <b>concurrently</b> on a bounded pool:
+     * one read of {@code api/nodes/*.json} feeds them all (the single-pass node scan opened here),
+     * and the four node-scan facets, the two table maps and the estate facets' index/detail/used-by
+     * builds no longer queue behind one another. Each pool task re-installs the calling thread's SSO
+     * context, so a sidecar computed off-thread still signs as the job's principal.
+     *
      * <p>The background warm-up passes {@code verbose=false} and tallies the failures into its one
      * line per sweep, so a deployment whose store is unreachable does not warn once per facet per
      * analysis. The computation is identical either way; only the log level differs.
      *
-     * @return the number of the {@link #VIEW_COUNT} facets whose sidecar was written (0..8)
+     * @return the number of the {@link #VIEW_COUNT} facets whose sidecar was written
      */
     public int writeAll(String name, boolean verbose) {
         if (name == null || name.isBlank()) return 0;
+        long startNanos = System.nanoTime();
+
+        // Single-pass node scan: one read of every node document feeds every facet below instead of
+        // each facet (and each estate detail/used-by build) re-reading all of them. Opened on this
+        // thread, where the caller's routing and credential context is installed, so the read signs
+        // as the right user. A store that cannot be listed leaves the pass closed and each facet
+        // fails independently below, exactly as it did before.
+        AutoCloseable pass = null;
+        try {
+            pass = staticReader.beginNodeScanPass(name);
+        } catch (Throwable t) {
+            log.debug("view precompute {}: node-scan pass could not be opened: {}", name, t.toString());
+        }
+        try {
+            int written = computeFacets(name, verbose);
+            log.debug("view precompute {} wrote {}/{} facets in {} ms", name, written, VIEW_COUNT,
+                    (System.nanoTime() - startNanos) / 1_000_000L);
+            return written;
+        } finally {
+            if (pass != null) {
+                try {
+                    pass.close();
+                } catch (Exception ignored) {
+                    // The pass handle only removes a map entry; nothing here can matter.
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs the independent facet computations concurrently and returns how many landed.
+     *
+     * <p>The calling thread's SSO context and routing scope are captured <b>before</b> fanning out
+     * and re-installed on every pool task: a pool worker has neither a request-bound session nor the
+     * job's {@code SsoJobContext}, so a facet computed there would otherwise read and write as the
+     * shared default principal. This is the same hand-off {@code ShallowTree.parallelMap} performs
+     * for its listing fan-out.
+     */
+    private int computeFacets(String name, boolean verbose) {
+        CapturedSsoContext sso = CapturedSsoContext.capture(null);
+        RequestScopedArtifactStore.Scope scope = storeScope(staticReader.store());
+
+        List<Callable<Integer>> tasks = List.of(
+                // The four node-scan facets: document() backfills each sidecar on the miss this is.
+                () -> writeFacet(name, AnalysisQuery.Dataset.PLSQL_SEQUENCES, verbose),
+                () -> writeFacet(name, AnalysisQuery.Dataset.PLSQL_CURSORS, verbose),
+                () -> writeFacet(name, AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL, verbose),
+                () -> writeFacet(name, AnalysisQuery.Dataset.PLSQL_JOINS, verbose),
+                // The three estate-facet indexes plus their per-object detail/used-by sidecars.
+                () -> writeEstateFacet(name, AnalysisQuery.Dataset.PLSQL_VIEWS,
+                        AnalysisViewStore.VIEWS_INDEX, verbose),
+                () -> writeEstateFacet(name, AnalysisQuery.Dataset.PLSQL_TRIGGERS,
+                        AnalysisViewStore.TRIGGERS_INDEX, verbose),
+                () -> writeEstateFacet(name, AnalysisQuery.Dataset.PLSQL_GLOBALS,
+                        AnalysisViewStore.GLOBALS_INDEX, verbose),
+                // Scheduled jobs — the crawler's api/jobs/index.json, cached as views/jobs-index.json.
+                () -> writeFacet(name, AnalysisQuery.Dataset.PLSQL_JOBS, verbose),
+                // The two table-scoped facets, grouped in one scan each; the split files beside them.
+                () -> writeTableFacet(name, AnalysisViewStore.TABLE_JOINS, verbose),
+                () -> writeTableFacet(name, AnalysisViewStore.TABLE_COLUMNS, verbose),
+                () -> writeComplexityFacet(name, verbose),
+                () -> writeStatsFacet(name, verbose),
+                () -> writeSearchFacet(name, verbose),
+                () -> writeCallTreesFacet(name, verbose)
+        );
+
+        List<Future<Integer>> futures = new ArrayList<>(tasks.size());
+        for (Callable<Integer> task : tasks) {
+            futures.add(FACET_POOL.submit(() -> {
+                try (AutoCloseable ssoHandle = sso == null ? null : sso.install();
+                     AutoCloseable scopeHandle = scope.install()) {
+                    return task.call();
+                } catch (Throwable t) {
+                    // One facet's failure is contained; the rest still land and the set is rebuilt
+                    // on the next sweep (hasCompleteViewSet stays false).
+                    log.debug("view precompute {} facet failed: {}", name, t.toString());
+                    return 0;
+                }
+            }));
+        }
         int written = 0;
-
-        // The four node-scan facets: document() backfills each sidecar on the miss this call is.
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_SEQUENCES, verbose)) written++;
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_CURSORS, verbose)) written++;
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_DYNAMIC_SQL, verbose)) written++;
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_JOINS, verbose)) written++;
-
-        // The three estate-facet indexes (views/MVs, triggers, package globals). Beside each index,
-        // the per-object detail files and the whole-analysis used-by map — the same split shape the
-        // table maps use, so a per-object request reads one small file.
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_VIEWS, verbose)) written++;
-        writeViewDetails(name, verbose);
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_TRIGGERS, verbose)) written++;
-        writeTriggerDetails(name, verbose);
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_GLOBALS, verbose)) written++;
-        writeGlobalDetails(name, verbose);
-        // Scheduled jobs — the crawler's api/jobs/index.json, cached as views/jobs-index.json.
-        if (facet(name, AnalysisQuery.Dataset.PLSQL_JOBS, verbose)) written++;
-
-        // The two table-scoped facets, grouped in one scan each — the endpoint is per-table, so a
-        // map is the only shape that serves every table without re-scanning per table. Beside each
-        // map, one small split file per table, so the per-table endpoint reads one file and a lazy
-        // backfill writes one file (not the whole map).
-        try {
-            Map<String, JsonNode> joins = staticReader.getAllTableJoins(name);
-            if (views.writeTableMap(name, AnalysisViewStore.TABLE_JOINS, joins, verbose)) written++;
-            writeTableFiles(name, AnalysisViewStore.TABLE_JOINS_DIR, joins, verbose);
-        } catch (Exception e) {
-            logFacet(name, AnalysisViewStore.TABLE_JOINS, e, verbose);
+        for (Future<Integer> f : futures) {
+            try {
+                written += f.get();
+            } catch (Exception ignored) {
+                // Each task contains its own failures; a future only fails on interruption.
+            }
         }
-        try {
-            Map<String, JsonNode> columns = staticReader.getAllTableColumnRefs(name);
-            if (views.writeTableMap(name, AnalysisViewStore.TABLE_COLUMNS, columns, verbose)) written++;
-            writeTableFiles(name, AnalysisViewStore.TABLE_COLUMNS_DIR, columns, verbose);
-        } catch (Exception e) {
-            logFacet(name, AnalysisViewStore.TABLE_COLUMNS, e, verbose);
-        }
+        return written;
+    }
 
-        // Complexity at the endpoint's default weights; the endpoint recomputes for custom weights.
+    /** The calling thread's routing scope for {@code store}, or a no-op scope when it has none. */
+    private static RequestScopedArtifactStore.Scope storeScope(ArtifactStore store) {
+        return store instanceof RequestScopedArtifactStore routed
+                ? routed.captureScope() : RequestScopedArtifactStore.Scope.NONE;
+    }
+
+    /** One node-scan facet: {@code document()} backfills its sidecar on the miss this call is. */
+    private int writeFacet(String name, AnalysisQuery.Dataset dataset, boolean verbose) {
+        return facet(name, dataset, verbose) ? 1 : 0;
+    }
+
+    /**
+     * One estate-facet index plus, beside it, its per-object detail files and whole-analysis used-by
+     * map. When the manifest records the facet as empty there is nothing for those builds to hold,
+     * so they are skipped — the manifest-driven skip; a stale or absent manifest records nothing and
+     * the full precompute runs unchanged.
+     */
+    private int writeEstateFacet(String name, AnalysisQuery.Dataset dataset, String indexView,
+                                 boolean verbose) {
+        int n = writeFacet(name, dataset, verbose);
+        if (!recordedEmpty(name, indexView)) {
+            switch (indexView) {
+                case AnalysisViewStore.VIEWS_INDEX -> writeViewDetails(name, verbose);
+                case AnalysisViewStore.TRIGGERS_INDEX -> writeTriggerDetails(name, verbose);
+                case AnalysisViewStore.GLOBALS_INDEX -> writeGlobalDetails(name, verbose);
+                default -> { }
+            }
+        }
+        return n;
+    }
+
+    /** True when the fresh manifest records {@code view} as having zero rows. */
+    private boolean recordedEmpty(String name, String view) {
+        Long rows = views.facetRows(name, view);
+        return rows != null && rows == 0L;
+    }
+
+    /**
+     * One table-scoped facet: the grouped one-scan map, then one small split file per table so the
+     * per-table endpoint reads one file and a lazy backfill writes one file (not the whole map).
+     */
+    private int writeTableFacet(String name, String view, boolean verbose) {
+        boolean joins = AnalysisViewStore.TABLE_JOINS.equals(view);
+        try {
+            Map<String, JsonNode> byTable = joins
+                    ? staticReader.getAllTableJoins(name)
+                    : staticReader.getAllTableColumnRefs(name);
+            int n = views.writeTableMap(name, view, byTable, verbose) ? 1 : 0;
+            writeTableFiles(name, joins ? AnalysisViewStore.TABLE_JOINS_DIR
+                    : AnalysisViewStore.TABLE_COLUMNS_DIR, byTable, verbose);
+            return n;
+        } catch (Exception e) {
+            logFacet(name, view, e, verbose);
+            return 0;
+        }
+    }
+
+    /** Complexity at the endpoint's default weights, plus the two precomputed grid neighbours. */
+    private int writeComplexityFacet(String name, boolean verbose) {
+        int n = 0;
         try {
             ResponseEntity<Object> response = complexityScoringService.getScores(
                     name, new ComplexityScoringService.Weights(),
                     new ComplexityScoringService.Thresholds(), DEFAULT_ALGORITHM, DEFAULT_EXPONENT);
-            if (writeBody(name, AnalysisViewStore.COMPLEXITY, response, verbose)) written++;
+            if (writeBody(name, AnalysisViewStore.COMPLEXITY, response, verbose)) n++;
             writeComplexityVariants(name, verbose);
         } catch (Exception e) {
             logFacet(name, AnalysisViewStore.COMPLEXITY, e, verbose);
         }
+        return n;
+    }
 
-        // Summary stats at the default (unscoped) request.
+    /** Summary stats at the default (unscoped) request. */
+    private int writeStatsFacet(String name, boolean verbose) {
         try {
-            if (writeBody(name, AnalysisViewStore.SUMMARY_STATS,
-                    summaryStatsService.getStats(name, null, null, null), verbose)) written++;
+            return writeBody(name, AnalysisViewStore.SUMMARY_STATS,
+                    summaryStatsService.getStats(name, null, null, null), verbose) ? 1 : 0;
         } catch (Exception e) {
             logFacet(name, AnalysisViewStore.SUMMARY_STATS, e, verbose);
+            return 0;
         }
+    }
 
-        // The raw search-facet arrays /global-search filters — the same reads the controller makes,
-        // stored once so a search stops re-reading the tables index and every node file per request.
+    /** The raw search-facet arrays {@code /global-search} filters, stored once. */
+    private int writeSearchFacet(String name, boolean verbose) {
         try {
             ObjectNode facets = ParserSearchFacets.build(repository, mapper, name);
-            if (views.writeSearch(name, facets, verbose)) written++;
+            return views.writeSearch(name, facets, verbose) ? 1 : 0;
         } catch (Exception e) {
             logFacet(name, AnalysisViewStore.SEARCH, e, verbose);
+            return 0;
         }
+    }
 
-        // The call trees and callers for the analysis's entry points, built once here instead of
-        // synthesised from the three whole files on every request. Best-effort and capped; any entry
-        // point not written is backfilled by the read path on first access.
-        if (writeCallTrees(name, verbose)) written++;
-
-        return written;
+    /** The call trees and callers for the analysis's entry points. */
+    private int writeCallTreesFacet(String name, boolean verbose) {
+        return writeCallTrees(name, verbose) ? 1 : 0;
     }
 
     /**

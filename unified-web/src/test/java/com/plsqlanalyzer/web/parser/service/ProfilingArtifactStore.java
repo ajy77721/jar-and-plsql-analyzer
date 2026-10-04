@@ -276,6 +276,22 @@ public final class ProfilingArtifactStore implements ArtifactStore {
     /** Total whole+range GETs. */
     public long getOps() { return readOps.sum() + rangeReadOps.sum(); }
 
+    /**
+     * How many data ops (GET/HEAD) touched {@code key} — the assertion hook for "this artifact is
+     * read exactly once by a single-pass precompute". Zero when it was never touched.
+     */
+    public long dataOpsForKey(ArtifactKey key) {
+        long n = 0;
+        for (Map.Entry<String, LongAdder> e : touches.entrySet()) {
+            String entry = e.getKey();
+            int sp = entry.indexOf(' ');
+            String op = entry.substring(0, sp);
+            if (!op.startsWith("GET") && !op.startsWith("HEAD")) continue;
+            if (entry.substring(sp + 1).equals(key.toString())) n += e.getValue().sum();
+        }
+        return n;
+    }
+
     /** Total HEADs (exists + size + lastModified). */
     public long headOps() { return totalHeadOps(); }
 

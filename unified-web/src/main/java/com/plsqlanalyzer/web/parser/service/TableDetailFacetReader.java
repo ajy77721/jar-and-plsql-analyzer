@@ -1,14 +1,11 @@
 package com.plsqlanalyzer.web.parser.service;
 
-import com.analyzer.storage.ArtifactKey;
-import com.analyzer.storage.ShallowTree;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -61,17 +58,6 @@ class TableDetailFacetReader {
         this.r = r;
     }
 
-    private JsonNode readTree(ArtifactKey key) throws IOException {
-        try (InputStream in = r.openRead(key)) {
-            return r.mapper.readTree(in);
-        }
-    }
-
-    /** Reads every node document concurrently, in input order. See {@link ShallowTree#parallelMap}. */
-    private List<JsonNode> readAll(List<ArtifactKey> nodeFiles) throws IOException {
-        return ShallowTree.parallelMap(r.store(), nodeFiles, this::readTree);
-    }
-
     /** Q59 — every join touching {@code table}, in either direction, across the analysis. */
     JsonNode getTableJoins(String name, String table) throws IOException {
         ObjectMapper mapper = r.mapper;
@@ -82,7 +68,7 @@ class TableDetailFacetReader {
 
         ArrayNode out = mapper.createArrayNode();
         Set<String> seen = new LinkedHashSet<>();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode node : r.nodeDocuments(name)) {
             String procId = orEmpty(textOrNull(node, "nodeId"));
             String procName = orEmpty(textOrNull(node, "name"));
             String sourceFile = orEmpty(textOrNull(node, "sourceFile"));
@@ -162,7 +148,7 @@ class TableDetailFacetReader {
 
         ArrayNode out = mapper.createArrayNode();
         Set<String> seen = new LinkedHashSet<>();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode node : r.nodeDocuments(name)) {
             String procId = orEmpty(textOrNull(node, "nodeId"));
             String procName = orEmpty(textOrNull(node, "name"));
             String sourceFile = orEmpty(textOrNull(node, "sourceFile"));
@@ -256,7 +242,7 @@ class TableDetailFacetReader {
         ObjectMapper mapper = r.mapper;
         Map<String, ArrayNode> out = new LinkedHashMap<>();
         Map<String, Set<String>> seenByTable = new HashMap<>();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode node : r.nodeDocuments(name)) {
             String procId = orEmpty(textOrNull(node, "nodeId"));
             String procName = orEmpty(textOrNull(node, "name"));
             String sourceFile = orEmpty(textOrNull(node, "sourceFile"));
@@ -307,7 +293,7 @@ class TableDetailFacetReader {
         ObjectMapper mapper = r.mapper;
         Map<String, ArrayNode> out = new LinkedHashMap<>();
         Map<String, Set<String>> seenByTable = new HashMap<>();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode node : r.nodeDocuments(name)) {
             String procId = orEmpty(textOrNull(node, "nodeId"));
             String procName = orEmpty(textOrNull(node, "name"));
             String sourceFile = orEmpty(textOrNull(node, "sourceFile"));

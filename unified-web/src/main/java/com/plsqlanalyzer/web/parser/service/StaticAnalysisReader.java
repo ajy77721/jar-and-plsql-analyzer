@@ -11,11 +11,13 @@ import org.springframework.stereotype.Component;
 
 import com.analyzer.storage.ArtifactKey;
 import com.analyzer.storage.ArtifactStore;
+import com.analyzer.storage.ShallowTree;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Reads analysis data from the static flow-output directory.
@@ -36,6 +38,13 @@ public class StaticAnalysisReader implements AnalysisDataReader {
             });
 
     private final ArtifactStore store;
+
+    /**
+     * Node-detail documents read once for a whole precompute pass, keyed by analysis name. Populated
+     * by {@link #beginNodeScanPass(String)} and removed when the pass closes, so it never outlives
+     * the write it serves and never affects a request-path read.
+     */
+    private final ConcurrentHashMap<String, List<JsonNode>> nodeScanPass = new ConcurrentHashMap<>();
 
     /** Routing identity for cache scoping; {@code null} in a store-only test construction. */
     private final ConnectionGuard connectionGuard;
@@ -299,6 +308,45 @@ public class StaticAnalysisReader implements AnalysisDataReader {
     }
 
     /**
+     * Every node-detail document of {@code name}, in listing order.
+     *
+     * <p>Within a {@link #beginNodeScanPass(String)} pass the same list is shared by every facet
+     * that scans nodes — the four node-scan facets, the two table maps and the estate facets'
+     * index/detail/used-by builds — so all of them cost <b>one</b> read of {@code api/nodes/*.json}
+     * rather than one each. Outside a pass this reads directly, exactly as before, so a request-path
+     * read is unchanged.
+     */
+    List<JsonNode> nodeDocuments(String name) throws IOException {
+        List<JsonNode> shared = nodeScanPass.get(name);
+        return shared != null ? shared : readNodeDocuments(name);
+    }
+
+    /** The one read of every node document; see {@link #nodeDocuments(String)}. */
+    private List<JsonNode> readNodeDocuments(String name) throws IOException {
+        List<ArtifactKey> files = collectNodeFiles(name);
+        if (files.isEmpty()) return List.of();
+        return ShallowTree.parallelMap(store, files, key -> {
+            try (InputStream in = openRead(key)) {
+                return mapper.readTree(in);
+            }
+        });
+    }
+
+    /**
+     * Opens a single-pass node scan for one analysis and returns a handle whose {@link
+     * AutoCloseable#close()} drops the shared list.
+     *
+     * <p>The read runs on the calling thread, so the caller's routing and credential context
+     * applies; the resulting list is then shared by every facet computed while the handle is open.
+     * The handle is idempotent to close and the list is dropped even if a facet fails, so a failed
+     * precompute can never leave one analysis's nodes resident for the next.
+     */
+    AutoCloseable beginNodeScanPass(String name) throws IOException {
+        nodeScanPass.put(name, readNodeDocuments(name));
+        return () -> nodeScanPass.remove(name);
+    }
+
+    /**
      * One listing of the analysis's {@code sources/} directory, keyed by leaf name — built once per
      * view computation so a node-scan resolves every node's {@code sourceFile} with zero per-source
      * storage ops. See {@link CoreFileReader#sourceKeyIndex(String)}.
@@ -345,6 +393,9 @@ public class StaticAnalysisReader implements AnalysisDataReader {
     }
 
     public void evictCache(String analysisName) {
+        // A pass is scoped to one precompute and removed on close; dropping it here as well means a
+        // correction/re-analysis can never be answered from a node list read before it.
+        nodeScanPass.remove(analysisName);
         synthesizedCache.remove(cacheKey(analysisName, "joins"));
         synthesizedCache.remove(cacheKey(analysisName, "cursors"));
         synthesizedCache.remove(cacheKey(analysisName, "sequences"));

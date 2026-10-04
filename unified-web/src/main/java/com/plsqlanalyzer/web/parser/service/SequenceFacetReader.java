@@ -6,10 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.analyzer.storage.ArtifactKey;
-import com.analyzer.storage.ShallowTree;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -24,28 +22,14 @@ class SequenceFacetReader {
         this.r = r;
     }
 
-    /** Streams a node-detail document out of the store. */
-    private JsonNode readTree(ArtifactKey key) throws IOException {
-        try (InputStream in = r.openRead(key)) {
-            return r.mapper.readTree(in);
-        }
-    }
-
-    /** Reads every node document concurrently, in input order. See {@link ShallowTree#parallelMap}. */
-    private List<JsonNode> readAll(List<ArtifactKey> nodeFiles) throws IOException {
-        return ShallowTree.parallelMap(r.store(), nodeFiles, this::readTree);
-    }
-
     JsonNode getSequences(String name) throws IOException {
         ObjectMapper mapper = r.mapper;
         String key = r.cacheKey(name, "sequences");
         JsonNode cached = r.synthesizedCache.get(key);
         if (cached != null) return cached;
 
-        List<ArtifactKey> nodeFiles = r.collectNodeFiles(name);
-        if (nodeFiles.isEmpty()) return mapper.createArrayNode();
-
-        List<JsonNode> nodes = readAll(nodeFiles);
+        List<JsonNode> nodes = r.nodeDocuments(name);
+        if (nodes.isEmpty()) return mapper.createArrayNode();
 
         Map<String, ObjectNode> seqMap = new LinkedHashMap<>();
         Map<String, String[]> srcCache = new HashMap<>();  // sourceFile -> source lines
@@ -137,7 +121,7 @@ class SequenceFacetReader {
         if (cached != null) return cached;
 
         ArrayNode result = mapper.createArrayNode();
-        for (JsonNode node : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode node : r.nodeDocuments(name)) {
             JsonNode dyn = node.get("dynamicSql");
             if (dyn == null || !dyn.isArray()) continue;
             String nodeId = textOrNull(node, "nodeId");

@@ -5,16 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import com.analyzer.storage.ArtifactKey;
-import com.analyzer.storage.ShallowTree;
-
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.*;
 
 import static com.plsqlanalyzer.web.parser.service.StaticAnalysisReader.textOrNull;
 
-/** Node-scan facet reads: getJoins + getCursors (both iterate collectNodeFiles). */
+/** Node-scan facet reads: getJoins + getCursors (both over the shared node-document scan). */
 class NodeScanFacetReader {
 
     private final StaticAnalysisReader r;
@@ -23,30 +19,18 @@ class NodeScanFacetReader {
         this.r = r;
     }
 
-    /** Streams a node-detail document out of the store. */
-    private JsonNode readTree(ArtifactKey key) throws IOException {
-        try (InputStream in = r.openRead(key)) {
-            return r.mapper.readTree(in);
-        }
-    }
-
-    /** Reads every node document concurrently, in input order. See {@link ShallowTree#parallelMap}. */
-    private List<JsonNode> readAll(List<ArtifactKey> nodeFiles) throws IOException {
-        return ShallowTree.parallelMap(r.store(), nodeFiles, this::readTree);
-    }
-
     JsonNode getJoins(String name) throws IOException {
         ObjectMapper mapper = r.mapper;
         String key = r.cacheKey(name, "joins");
         JsonNode cached = r.synthesizedCache.get(key);
         if (cached != null) return cached;
 
-        List<ArtifactKey> nodeFiles = r.collectNodeFiles(name);
-        if (nodeFiles.isEmpty()) return mapper.createArrayNode();
+        List<JsonNode> nodes = r.nodeDocuments(name);
+        if (nodes.isEmpty()) return mapper.createArrayNode();
 
         Map<String, ObjectNode> joinMap = new LinkedHashMap<>();
         {
-            for (JsonNode node : readAll(nodeFiles)) {
+            for (JsonNode node : nodes) {
                 String nodeId = textOrNull(node, "nodeId");
                 String nodeName = textOrNull(node, "name");
                 String sourceFile = textOrNull(node, "sourceFile");
@@ -121,12 +105,12 @@ class NodeScanFacetReader {
         JsonNode cached = r.synthesizedCache.get(key);
         if (cached != null) return cached;
 
-        List<ArtifactKey> nodeFiles = r.collectNodeFiles(name);
-        if (nodeFiles.isEmpty()) return mapper.createArrayNode();
+        List<JsonNode> nodes = r.nodeDocuments(name);
+        if (nodes.isEmpty()) return mapper.createArrayNode();
 
         Map<String, ObjectNode> cursorMap = new LinkedHashMap<>();
         {
-            for (JsonNode node : readAll(nodeFiles)) {
+            for (JsonNode node : nodes) {
                 String nodeId = textOrNull(node, "nodeId");
                 String nodeName = textOrNull(node, "name");
                 String sourceFile = textOrNull(node, "sourceFile");

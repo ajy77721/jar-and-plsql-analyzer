@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.analyzer.storage.ArtifactKey;
-import com.analyzer.storage.ShallowTree;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -95,10 +94,6 @@ class EstateFacetReader {
         }
     }
 
-    private List<JsonNode> readAll(List<ArtifactKey> files) throws IOException {
-        return ShallowTree.parallelMap(r.store(), files, this::readTree);
-    }
-
     /**
      * The dedicated parse-time package-global declaration artifact
      * ({@code api/globals/declarations.json}: {@code {declarations:{PACKAGE:[{name,dataType,
@@ -181,7 +176,7 @@ class EstateFacetReader {
     /** The node details of the analysis, keyed by nodeId — the node-scan shape the other facets use. */
     private Map<String, JsonNode> nodeDetails(String name) throws IOException {
         Map<String, JsonNode> out = new LinkedHashMap<>();
-        for (JsonNode n : readAll(r.collectNodeFiles(name))) {
+        for (JsonNode n : r.nodeDocuments(name)) {
             String id = textOrNull(n, "nodeId");
             if (id != null) out.put(id, n);
         }
@@ -1260,7 +1255,7 @@ class EstateFacetReader {
         JsonNode cached = r.synthesizedCache.get(ck);
         if (cached != null) return cached;
 
-        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        List<JsonNode> nodeFiles = r.nodeDocuments(name);
 
         // Declaration lists persisted per package — the declaring package plus
         // name/dataType/defaultValue/constant, the exact shape each variable row uses. Keyed
@@ -1491,7 +1486,7 @@ class EstateFacetReader {
     private ArrayNode globalsByProcedure(String name, String pkg) throws IOException {
         ArrayNode out = r.mapper.createArrayNode();
         if (pkg == null || pkg.isEmpty()) return out;
-        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        List<JsonNode> nodeFiles = r.nodeDocuments(name);
         PackageGlobalScope scope = packageGlobalScope(nodeFiles);
         for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
@@ -1544,7 +1539,7 @@ class EstateFacetReader {
     JsonNode getGlobalsUsedByMap(String name) throws IOException {
         ObjectMapper m = r.mapper;
         Map<String, ArrayNode> byVar = new LinkedHashMap<>();
-        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        List<JsonNode> nodeFiles = r.nodeDocuments(name);
         PackageGlobalScope scope = packageGlobalScope(nodeFiles);
         for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");
@@ -1587,7 +1582,7 @@ class EstateFacetReader {
     private ArrayNode globalUsedBy(String name, String variable, String pkg) throws IOException {
         ObjectMapper m = r.mapper;
         ArrayNode out = m.createArrayNode();
-        List<JsonNode> nodeFiles = readAll(r.collectNodeFiles(name));
+        List<JsonNode> nodeFiles = r.nodeDocuments(name);
         PackageGlobalScope scope = packageGlobalScope(nodeFiles);
         for (JsonNode node : nodeFiles) {
             JsonNode refs = node.get("externalPackageVarRefDetails");

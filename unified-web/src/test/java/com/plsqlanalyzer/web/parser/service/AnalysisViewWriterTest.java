@@ -1,6 +1,7 @@
 package com.plsqlanalyzer.web.parser.service;
 
 import com.analyzer.storage.ArtifactKey;
+import com.analyzer.storage.ArtifactStore;
 import com.analyzer.storage.InMemoryArtifactStore;
 import com.analyzer.storage.repo.AnalysisQuery;
 import com.analyzer.repo.ArtifactScanRepository;
@@ -188,6 +189,64 @@ class AnalysisViewWriterTest {
                     M.writeValueAsBytes(repository.document(
                             AnalysisQuery.ofTable(AnalysisQuery.Dataset.PLSQL_TABLE_JOINS, NAME, table))),
                     "table-joins sidecar differs for " + table);
+        }
+    }
+
+    /**
+     * The single-pass node scan: one precompute reads each {@code api/nodes/*.json} <b>exactly
+     * once</b>, however many facets scan it — the four node-scan facets, the two table maps and the
+     * estate facets' index/detail/used-by builds. Before the pass each of those re-read every node
+     * file, which is the ~200 s the warm-up spent.
+     */
+    @Test
+    void oneNodeScanFeedsEveryFacet() throws IOException {
+        InMemoryArtifactStore backing = new InMemoryArtifactStore();
+        ProfilingArtifactStore profiled = new ProfilingArtifactStore(backing);
+        put(backing, AnalysisPaths.resolveKey(NAME, "api/index.json"),
+                "{\"entryPoint\":\"DEMO\",\"nodes\":[]}");
+        node(backing, "P1.json", """
+                {"nodeId":"ERP$P1","name":"P1","sourceFile":"P1.sql",
+                 "sequences":[{"name":"SEQ_ORDERS","schema":"ERP","operations":{"NEXTVAL":[3]}}],
+                 "cursors":[{"name":"C1","query":"SELECT 1","forLoop":true,"line":5}],
+                 "dynamicSql":[{"type":"EXECUTE_IMMEDIATE","line":9,"sqlExpression":"SELECT 1"}],
+                 "tables":[{"name":"ORDERS","alias":"o","joins":[{"joinType":"JOIN",
+                    "joinedTable":"CUSTOMER","condition":"ORDERS.CUST_ID=c.id","line":10}]}]}""");
+        node(backing, "P2.json", """
+                {"nodeId":"ERP$P2","name":"P2","sourceFile":"P2.sql",
+                 "tables":[{"name":"ORDERS","joins":[{"joinType":"LEFT","joinedTable":"CUSTOMER",
+                    "condition":"c.id=o.cust","line":20}]}]}""");
+
+        AnalysisViewStore pViews = new AnalysisViewStore(profiled);
+        StaticAnalysisReader pReader = new StaticAnalysisReader(profiled);
+        AnalysisReaderFactory pFactory = new AnalysisReaderFactory(pReader,
+                new ClaudeAnalysisReader(pReader, new ClaudePersistenceService(profiled)));
+        ArtifactScanRepository pRepo = new ArtifactScanRepository(profiled, profiled, M, pFactory,
+                pReader, pViews, null, new com.jaranalyzer.service.JarDataPaths("data/jar", profiled));
+        ComplexityScoringService pComplexity = mock(ComplexityScoringService.class);
+        when(pComplexity.getScores(eq(NAME), any(), any(), anyString(), anyDouble()))
+                .thenReturn(ResponseEntity.ok((Object) M.createObjectNode().put("score", 1)));
+        SummaryStatsService pStats = mock(SummaryStatsService.class);
+        when(pStats.getStats(eq(NAME), any(), any(), any()))
+                .thenReturn(ResponseEntity.ok((Object) M.createObjectNode().put("totalNodes", 2)));
+        AnalysisViewWriter pWriter = new AnalysisViewWriter(pRepo, pReader, pComplexity, pStats,
+                pViews, M);
+
+        pWriter.writeAll(NAME);
+
+        for (String file : new String[]{"P1.json", "P2.json"}) {
+            assertEquals(1L, profiled.dataOpsForKey(
+                            AnalysisPaths.resolveKey(NAME, "api/nodes/" + file)),
+                    "node " + file + " must be read exactly once by the precompute");
+        }
+    }
+
+    private void node(ArtifactStore store, String file, String json) throws IOException {
+        put(store, AnalysisPaths.resolveKey(NAME, "api/nodes/" + file), json);
+    }
+
+    private void put(ArtifactStore store, ArtifactKey key, String body) throws IOException {
+        try (OutputStream out = store.write(key)) {
+            out.write(body.getBytes(StandardCharsets.UTF_8));
         }
     }
 
