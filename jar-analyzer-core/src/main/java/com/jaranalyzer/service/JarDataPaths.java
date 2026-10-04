@@ -138,6 +138,12 @@ public class JarDataPaths {
     public ArtifactKey analysisOffsetsKey(String jarName) { return jarRootKey(jarName).resolve("analysis.offsets.json"); }
     /** Offset index twin for {@code analysis_corrected.json}. */
     public ArtifactKey correctedOffsetsKey(String jarName) { return jarRootKey(jarName).resolve("analysis_corrected.offsets.json"); }
+    /**
+     * Offset index twin for {@code analysis_corrected_prev.json} (plan B2). Rotating the corrected
+     * document to its "previous" twin moves this sidecar with it, so the previous view keeps
+     * offset-seek; the bytes it indexes are unchanged by the move.
+     */
+    public ArtifactKey correctedPrevOffsetsKey(String jarName) { return jarRootKey(jarName).resolve("analysis_corrected_prev.offsets.json"); }
 
     /** {@code manifest.json} — the per-JAR layout manifest (plan 2c). */
     public ArtifactKey manifestKey(String jarName) { return jarRootKey(jarName).resolve("manifest.json"); }

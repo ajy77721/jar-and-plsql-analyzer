@@ -169,11 +169,9 @@ public class PersistenceService {
         invalidateSummaryCache(jarName);
         WriteStats stats = writeAnalysisStreamingTo(paths.analysisFile(jarName), jarName, projectName, jarSize, analyzedAt,
                 totalClasses, totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage, scopeTarget);
-        // Save-time precompute (plan 2b): the summary and the class tree are the first-hit penalties
-        // a fresh analysis used to make its first visitor pay. Both are built here, from the same
-        // builder code the lazy read paths use, so the first request is a small read.
-        preGenerateSummaryCache(jarName, true);
-        preGenerateClassTreeCache(jarName, true);
+        // Save-time precompute (plans 2b, B1, B3): the summary and the class tree are the first-hit
+        // penalties a fresh analysis used to make its first visitor pay. Both are now built inside
+        // writeAnalysisStreamingTo, from that same write pass rather than by re-reading the document.
         writeManifest(jarName, true, stats);
     }
 
@@ -185,8 +183,8 @@ public class PersistenceService {
         invalidateSummaryCache(jarName);
         WriteStats stats = writeAnalysisStreamingTo(paths.correctedFile(jarName), jarName, projectName, jarSize, analyzedAt,
                 totalClasses, totalEndpoints, classesJsonlFile, endpoints, analysisMode, null, null);
-        preGenerateSummaryCache(jarName, false);
-        preGenerateClassTreeCache(jarName, false);
+        // The summary and class tree are built inside writeAnalysisStreamingTo from the write pass
+        // (plans B1/B3); the corrected document's offsets are written there too (plan 2a / B2).
         writeManifest(jarName, false, stats);
     }
 
@@ -204,9 +202,13 @@ public class PersistenceService {
                 ? paths.correctedKey(jarName) : paths.analysisKey(jarName);
 
         // Filled by writeDocumentTo in the SAME pass that writes the document: byte offsets for the
-        // two ordinal-addressed arrays (plan 2a) and the counts the manifest needs (plan 2c).
+        // two ordinal-addressed arrays (plan 2a), the counts the manifest needs (plan 2c), and the
+        // summary + class-tree sidecars (plans B1/B3) — see SaveTimeProjections.
         AnalysisOffsets offsets = new AnalysisOffsets();
         WriteStats stats = new WriteStats();
+        boolean isCorrected = outPath.equals(paths.correctedFile(jarName));
+        SaveTimeProjections projections =
+                new SaveTimeProjections(store, objectMapper, paths, jarName, !isCorrected);
 
         // Flatten every endpoint's call tree into a content-addressed node dictionary BEFORE
         // opening the output. In memory a call tree is a DAG — a method reached by N paths is one
@@ -232,7 +234,12 @@ public class PersistenceService {
 
             writeDocument(outKey, outPath, jarName, projectName, jarSize, analyzedAt, totalClasses,
                     totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage, scopeTarget,
-                    flattener, rootIds, fragIds, offsets, stats);
+                    flattener, rootIds, fragIds, offsets, stats, projections);
+        } catch (IOException | RuntimeException e) {
+            // The document write failed; its staged bytes are discarded by commitAtomically, and the
+            // sidecars built from those bytes must be discarded with it.
+            projections.abort();
+            throw e;
         } finally {
             try {
                 store.delete(spillKey);
@@ -267,6 +274,18 @@ public class PersistenceService {
         // Write lightweight header sidecar for fast listing
         writeHeaderSidecar(jarName, projectName, jarSize, analyzedAt,
                 totalClasses, totalEndpoints, analysisMode, basePackage, scopeTarget);
+
+        // Plans B1/B3: publish the summary and class tree that writeDocumentTo built from the same
+        // elements it wrote — never a re-read of the document. Runs after the document is committed
+        // so a failure here can never damage it. A sidecar that failed (an edge case) falls back to
+        // its lazy re-read builder for that sidecar only (correctness first).
+        projections.finish();
+        if (projections.summaryFailed()) {
+            preGenerateSummaryCache(jarName, !isCorrected);
+        }
+        if (projections.classTreeFailed()) {
+            preGenerateClassTreeCache(jarName, !isCorrected);
+        }
         return stats;
     }
 
@@ -389,12 +408,12 @@ public class PersistenceService {
                                String analysisMode, String basePackage, String scopeTarget,
                                CallTreeFlattener flattener, List<String> rootIds,
                                List<com.fasterxml.jackson.databind.node.ObjectNode> fragIds,
-                               AnalysisOffsets offsets, WriteStats stats)
+                               AnalysisOffsets offsets, WriteStats stats, SaveTimeProjections projections)
             throws IOException {
         commitAtomically(outKey, staging ->
                 writeDocumentTo(staging, jarName, projectName, jarSize, analyzedAt, totalClasses,
                         totalEndpoints, classesJsonlFile, endpoints, analysisMode, basePackage,
-                        scopeTarget, flattener, rootIds, fragIds, offsets, stats));
+                        scopeTarget, flattener, rootIds, fragIds, offsets, stats, projections));
     }
 
     /**
@@ -502,7 +521,7 @@ public class PersistenceService {
                                  String analysisMode, String basePackage, String scopeTarget,
                                  CallTreeFlattener flattener, List<String> rootIds,
                                  List<com.fasterxml.jackson.databind.node.ObjectNode> fragIds,
-                                 AnalysisOffsets offsets, WriteStats stats)
+                                 AnalysisOffsets offsets, WriteStats stats, SaveTimeProjections projections)
             throws IOException {
         try (OutputStream os = openWrite(outKey);
              CountingOutputStream counting = new CountingOutputStream(os);
@@ -521,6 +540,10 @@ public class PersistenceService {
                 gen.writeBooleanField("scoped", true);
                 gen.writeStringField("scopeTarget", scopeTarget);
             }
+            // The summary's own header is the same fields in the same order — written here, in the
+            // same pass, so the summary never has to read this document back (plan B1).
+            projections.beginSummary(projectName, jarSize, analyzedAt, totalClasses, totalEndpoints,
+                    analysisMode, basePackage, scopeTarget);
 
             gen.writeStringField(CallTreeFlattener.FORMAT_FIELD, CallTreeFlattener.FORMAT);
             flattener.streamNodes(gen);
@@ -548,6 +571,8 @@ public class PersistenceService {
                 gen.writeFieldName("advice");
                 objectMapper.writeValue(gen, advice);
             }
+            // The summary echoes the advice block verbatim; hand it the same list, in the same pass.
+            projections.writeAdvice(advice);
 
             // Pool distinct invocations — the largest field in the document, and 42.6% of its
             // entries are repeats of another. The pool must precede `classes`, but is only known
@@ -569,6 +594,7 @@ public class PersistenceService {
             // separator is written here (not by the generator) and the offset recorded after it, so
             // a slice is a complete JSON value. The generator's array context is untouched: it wrote
             // `[`, we write the elements, it writes `]`.
+            projections.beginClasses();
             gen.writeFieldName("classes");
             gen.writeStartArray();
             gen.flush();
@@ -579,6 +605,10 @@ public class PersistenceService {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.isBlank()) continue;
+                    // Feed the summary classIndex and the class-tree row from the SAME element, in
+                    // the same pass (plans B1/B3). The raw line carries invocations inline — the only
+                    // field pooling rewrites, and the class-tree row reads it but never emits it.
+                    projections.addClassLine(line);
                     // Unchanged classes keep their original bytes; a pooled class is serialised by
                     // the mapper so its string escaping matches what produced the JSONL (a lone
                     // surrogate written raw fails the UTF-8 encoder).
@@ -600,15 +630,21 @@ public class PersistenceService {
             }
             gen.writeEndArray();
             log.info("  {} classes written", classCount);
+            projections.endClasses();
 
             // ── endpoints (plan 2a) ─────────────────────────────────────────────────────────
+            projections.beginEndpoints();
             gen.writeFieldName("endpoints");
             gen.writeStartArray();
             gen.flush();
             int epCount = 0;
             GrowableOffsets endpointOffsets = new GrowableOffsets();
             for (EndpointInfo ep : endpoints) {
-                byte[] row = endpointBytes(ep, rootIds.get(epCount), fragIds.get(epCount), endpointPool);
+                // The un-pooled endpoint node, built once: the summary projects it (plan B1) and
+                // endpointBytes pools and ref-ifies it into the document's bytes.
+                com.fasterxml.jackson.databind.node.ObjectNode on = endpointNode(ep);
+                projections.addEndpoint(on);
+                byte[] row = endpointBytes(on, rootIds.get(epCount), fragIds.get(epCount), endpointPool);
                 if (epCount > 0) counting.write(',');
                 endpointOffsets.add(counting.count(), row.length);
                 counting.write(row);
@@ -616,6 +652,7 @@ public class PersistenceService {
             }
             gen.writeEndArray();
             log.info("  {} endpoints written", epCount);
+            projections.endEndpoints();
 
             gen.writeEndObject();
             gen.flush();
@@ -655,10 +692,9 @@ public class PersistenceService {
      * than suppressed with a mixin, so the reference fields land in the exact slots the tree fields
      * occupied.
      */
-    private byte[] endpointBytes(EndpointInfo ep, String rootId,
+    private byte[] endpointBytes(com.fasterxml.jackson.databind.node.ObjectNode on, String rootId,
                                  com.fasterxml.jackson.databind.node.ObjectNode fragIds,
                                  EndpointArrayPool endpointPool) throws IOException {
-        com.fasterxml.jackson.databind.node.ObjectNode on = endpointNode(ep);
         // Ordinals replace the objects under the SAME keys, so field order — and therefore the
         // bytes of an inflated endpoint — are unchanged.
         endpointPool.rewrite(on);
@@ -1282,6 +1318,13 @@ public class PersistenceService {
         if (!store.exists(current)) return;
         var prev = paths.correctedPrevKey(jarName);
         store.move(current, prev);
+        // The offset index addresses the document's bytes, which the move does not change — so it
+        // follows the document, and the previous view keeps offset-seek (plan B2). A sidecar left
+        // from an older rotation is dropped rather than left pointing at the new bytes.
+        var currentOffsets = paths.correctedOffsetsKey(jarName);
+        var prevOffsets = paths.correctedPrevOffsetsKey(jarName);
+        if (store.exists(currentOffsets)) store.move(currentOffsets, prevOffsets);
+        else store.delete(prevOffsets);
         log.info("Rotated corrected -> prev: {}", prev);
     }
 
@@ -1292,6 +1335,12 @@ public class PersistenceService {
         }
         var current = paths.correctedKey(jarName);
         store.move(prev, current);
+        // Reverting replaces the corrected bytes with the previous document's, so the offsets move
+        // back with them; a corrected index that no longer matches the restored bytes is dropped.
+        var prevOffsets = paths.correctedPrevOffsetsKey(jarName);
+        var currentOffsets = paths.correctedOffsetsKey(jarName);
+        if (store.exists(prevOffsets)) store.move(prevOffsets, currentOffsets);
+        else store.delete(currentOffsets);
         log.info("Reverted: prev -> corrected: {}", current);
     }
 

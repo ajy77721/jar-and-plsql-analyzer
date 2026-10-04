@@ -99,7 +99,7 @@ public final class ClassTreeChunks {
             while (parser.nextToken() != JsonToken.END_ARRAY) {
                 if (parser.currentToken() != JsonToken.START_OBJECT) continue;
                 JsonNode row = COMPACT.readTree(parser);
-                if (writer == null) writer = new ChunkWriter(store, chunksDir, chunkIndex);
+                if (writer == null) writer = new ChunkWriter(store, chunksDir, chunkIndex, "");
                 writer.write(row);
                 if (inChunk == 0) firstFqn = row.path("fullyQualifiedName").asText(null);
                 lastFqn = row.path("fullyQualifiedName").asText(null);
@@ -182,15 +182,74 @@ public final class ClassTreeChunks {
         }
     }
 
+    /**
+     * Feeds rows to the chunk files as they are produced, so the chunks are built from the same
+     * pass that writes the monolithic array — no second read of {@code _class-tree.json}.
+     *
+     * <p>Rows must be supplied in array order. {@link #finish()} closes the last chunk and writes
+     * the index; the chunk files and the index are written under {@code suffix}, so a caller that
+     * stages its writes can move them into place only after the document that produced them has
+     * committed (see {@code PersistenceService}). Passing {@code ""} writes final keys directly.
+     */
+    public static final class Accumulator {
+        private final ArtifactStore store;
+        private final ArtifactKey chunksDir;
+        private final ArtifactKey indexKey;
+        private final String suffix;
+        private final List<Chunk> chunks = new ArrayList<>();
+        private int rowIndex;
+        private int chunkIndex;
+        private int inChunk;
+        private String firstFqn;
+        private String lastFqn;
+        private ChunkWriter writer;
+
+        public Accumulator(ArtifactStore store, ArtifactKey chunksDir, ArtifactKey indexKey,
+                           String suffix) {
+            this.store = store;
+            this.chunksDir = chunksDir;
+            this.indexKey = indexKey;
+            this.suffix = suffix == null ? "" : suffix;
+        }
+
+        public void add(JsonNode row) throws IOException {
+            if (writer == null) writer = new ChunkWriter(store, chunksDir, chunkIndex, suffix);
+            writer.write(row);
+            if (inChunk == 0) firstFqn = row.path("fullyQualifiedName").asText(null);
+            lastFqn = row.path("fullyQualifiedName").asText(null);
+            rowIndex++;
+            inChunk++;
+            if (inChunk == CHUNK_SIZE) {
+                chunks.add(writer.close(chunkIndex, inChunk, firstFqn, lastFqn));
+                chunkIndex++;
+                inChunk = 0;
+                firstFqn = null;
+                writer = null;
+            }
+        }
+
+        public Index finish() throws IOException {
+            if (writer != null) {
+                chunks.add(writer.close(chunkIndex, inChunk, firstFqn, lastFqn));
+                writer = null;
+            }
+            Index index = new Index(CHUNK_SIZE, chunks.size(), rowIndex, List.copyOf(chunks));
+            writeIndex(store, indexKey, index);
+            return index;
+        }
+    }
+
     /** Streams one chunk file, tracking its byte length as it is written. */
     private static final class ChunkWriter {
         private final CountingOutputStream counting;
         private final JsonGenerator gen;
         private boolean first = true;
 
-        ChunkWriter(ArtifactStore store, ArtifactKey chunksDir, int index) throws IOException {
+        ChunkWriter(ArtifactStore store, ArtifactKey chunksDir, int index, String suffix)
+                throws IOException {
             counting = new CountingOutputStream(
-                    new BufferedOutputStream(store.write(chunksDir.resolve(index + ".json")), 128 * 1024));
+                    new BufferedOutputStream(
+                            store.write(chunksDir.resolve(index + ".json" + suffix)), 128 * 1024));
             gen = COMPACT.getFactory().createGenerator(counting);
             gen.writeStartArray();
             // The array brackets go through the generator; the rows are written raw to the counting

@@ -25,6 +25,18 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
             "collectionLifecycleFlows", 100
     );
 
+    /** Class fields the class-tree row keeps. Shared with {@link #writeClassTreeRow}. */
+    private static final Set<String> CLASS_TREE_CLASS_KEEP = Set.of(
+            "fullyQualifiedName", "packageName", "simpleName", "stereotype",
+            "sourceJar", "superClass", "isInterface", "isAbstract", "isEnum", "accessFlags",
+            "interfaces", "annotations", "repositoryEntityType");
+    private static final Set<String> CLASS_TREE_CLASS_SKIP = Set.of("sourceCode", "entityFieldMappings");
+    private static final Set<String> CLASS_TREE_METHOD_SKIP =
+            Set.of("fieldAccesses", "localVariables", "descriptor", "opcode");
+    private static final Set<String> CLASS_TREE_METHOD_KEEP = Set.of(
+            "name", "returnType", "annotations", "parameters",
+            "startLine", "endLine", "accessFlags", "httpMethod", "path", "stringLiterals");
+
     protected final com.analyzer.storage.ArtifactKey documentKey;
     protected final ObjectMapper objectMapper;
     protected final JarDataPaths jarDataPaths;
@@ -324,14 +336,6 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
         InvocationPool.Inflater invPool = InvocationPool.Inflater.seekClasses(parser, objectMapper);
         if (parser.currentToken() != JsonToken.START_ARRAY) { gen.writeStartArray(); gen.writeEndArray(); return; }
 
-        Set<String> classKeep = Set.of("fullyQualifiedName", "packageName", "simpleName", "stereotype",
-                "sourceJar", "superClass", "isInterface", "isAbstract", "isEnum", "accessFlags",
-                "interfaces", "annotations", "repositoryEntityType");
-        Set<String> classSkip = Set.of("sourceCode", "entityFieldMappings");
-        Set<String> methodSkip = Set.of("fieldAccesses", "localVariables", "descriptor", "opcode");
-        Set<String> methodKeep = Set.of("name", "returnType", "annotations", "parameters",
-                "startLine", "endLine", "accessFlags", "httpMethod", "path", "stringLiterals");
-
         // HTTP client class prefixes — mirrors domain-config.json "http_client_classes"
         // Used to detect methods that make outbound REST calls via their invocations list.
         List<String> httpClientPrefixes = List.of(
@@ -353,6 +357,24 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                     (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(parser);
             invPool.inflateClass(classNode, objectMapper);
 
+            writeClassTreeRow(gen, objectMapper, classNode, httpClientPrefixes, includeMembers);
+        }
+        gen.writeEndArray();
+    }
+
+    /**
+     * One class-tree row, reconstructed from the buffered class node with the field-filtering logic.
+     *
+     * <p>Shared by the read-time streamer ({@link #streamClassTree}) and the save-time accumulator
+     * ({@code SaveTimeProjections}) so the two cannot drift: the accumulator feeds the raw class
+     * JSONL line (which carries {@code invocations} inline), the streamer feeds the document class
+     * after {@link InvocationPool.Inflater#inflateClass} has restored the same field. Both produce
+     * the identical row.
+     */
+    static void writeClassTreeRow(JsonGenerator gen, ObjectMapper objectMapper,
+                                  com.fasterxml.jackson.databind.JsonNode classNode,
+                                  List<String> httpClientPrefixes, boolean includeMembers)
+            throws IOException {
             // Reconstruct from buffered node using the original field-filtering logic
             gen.writeStartObject();
             int methodCount = 0;
@@ -367,7 +389,7 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                 String fname = entry.getKey();
                 com.fasterxml.jackson.databind.JsonNode fval = entry.getValue();
 
-                if (classKeep.contains(fname)) {
+                if (CLASS_TREE_CLASS_KEEP.contains(fname)) {
                     gen.writeFieldName(fname);
                     objectMapper.writeValue(gen, fval);
                 } else if ("fields".equals(fname)) {
@@ -437,7 +459,7 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                                 var me = mFields.next();
                                 String mf = me.getKey();
                                 JsonNode mv = me.getValue();
-                                if (!methodSkip.contains(mf) && methodKeep.contains(mf)) {
+                                if (!CLASS_TREE_METHOD_SKIP.contains(mf) && CLASS_TREE_METHOD_KEEP.contains(mf)) {
                                     gen.writeFieldName(mf);
                                     objectMapper.writeValue(gen, mv);
                                 }
@@ -450,7 +472,7 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                     gen.writeEndArray();
                     gen.writeNumberField("methodCount", methodCount);
                     wroteMethodSummaries = true;
-                } else if (classSkip.contains(fname)) {
+                } else if (CLASS_TREE_CLASS_SKIP.contains(fname)) {
                     // skip — already buffered, just don't write
                 } else {
                     // unknown field — skip
@@ -459,8 +481,6 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
             if (!wroteFields) { gen.writeNumberField("fieldCount", 0); gen.writeFieldName("fields"); gen.writeStartArray(); gen.writeEndArray(); }
             if (!wroteMethodSummaries) { gen.writeFieldName("methodSummaries"); gen.writeStartArray(); gen.writeEndArray(); gen.writeNumberField("methodCount", 0); }
             gen.writeEndObject();
-        }
-        gen.writeEndArray();
     }
 
     @Override
@@ -496,14 +516,17 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
      * has none.
      *
      * <p>{@code analysis.json} and {@code analysis_corrected.json} each get their own sidecar,
-     * written in the same pass as the document (plan 2a). The {@code previous} correction twin has
-     * no sidecar yet, so it answers {@code null} and keeps the legacy scan.
+     * written in the same pass as the document (plan 2a). The {@code previous} correction twin
+     * inherits the corrected sidecar when it is rotated (plan B2); a document with no sidecar (an
+     * older analysis, or one written by the POJO path) answers {@code null} and keeps the legacy
+     * scan.
      */
     protected com.analyzer.storage.ArtifactKey offsetsKey() {
         if (documentKey == null) return null;
         return switch (documentKey.leaf()) {
             case "analysis.json" -> jarDataPaths.analysisOffsetsKey(jarName);
             case "analysis_corrected.json" -> jarDataPaths.correctedOffsetsKey(jarName);
+            case "analysis_corrected_prev.json" -> jarDataPaths.correctedPrevOffsetsKey(jarName);
             default -> null;
         };
     }
@@ -628,14 +651,31 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
         // serialized BEFORE aggregate fields, so we cannot tell at callTree-encounter time.
         // This single pass reads through the first endpoint's callTree using skipChildren()
         // (O(1) memory, no JsonNode allocation) then checks for externalCalls.
-        boolean hasPrecomputedAggregates = checkHasPrecomputedAggregates();
+        //
+        // The write path supplies the answer instead (plan B1), so the pre-scan — a second read of
+        // the document — is not made when the summary is built from the same pass that wrote it.
+        boolean pre = checkHasPrecomputedAggregates();
+        streamSummary(parser, gen, () -> pre);
+    }
 
+    /**
+     * As {@link #streamSummary(JsonParser, JsonGenerator)}, but with the "new format" decision
+     * supplied by the caller rather than discovered by re-reading the document.
+     *
+     * <p>{@code PersistenceService} uses this when it builds the summary from the bytes it is
+     * already writing (plan B1): it wrote the pre-computed endpoint aggregates itself, so it knows
+     * the answer and the builder never opens the document a second time. The no-arg overload keeps
+     * the lazy/fallback behaviour for analyses written before this existed.
+     */
+    public void streamSummary(JsonParser parser, JsonGenerator gen,
+                              java.util.function.BooleanSupplier hasPrecomputedAggregates)
+            throws IOException {
         Map<String, String> entityCollMap = new LinkedHashMap<>();
         Map<String, String> repoCollMap = new LinkedHashMap<>();
         List<Map<String, Object>> scheduledJobs = new ArrayList<>();
         List<String> enableSchedulingClasses = new ArrayList<>();
         List<Map<String, Object>> classIndex = new ArrayList<>();
-        int scheduledCount = 0;
+        int[] scheduledCount = {0};
 
         gen.writeStartObject();
 
@@ -679,136 +719,8 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                 while (parser.nextToken() != JsonToken.END_ARRAY) {
                     if (parser.currentToken() != JsonToken.START_OBJECT) continue;
                     JsonNode classNode = objectMapper.readTree(parser);
-
-                    Map<String, Object> entry = new LinkedHashMap<>();
-                    entry.put("fullyQualifiedName", textOf(classNode, "fullyQualifiedName"));
-                    entry.put("simpleName", textOf(classNode, "simpleName"));
-                    entry.put("packageName", textOf(classNode, "packageName"));
-                    entry.put("stereotype", textOf(classNode, "stereotype"));
-                    entry.put("sourceJar", textOf(classNode, "sourceJar"));
-                    entry.put("jarName", textOf(classNode, "jarName"));
-                    entry.put("sourcePath", textOf(classNode, "sourcePath"));
-                    entry.put("isInterface", classNode.path("isInterface").asBoolean(false));
-                    entry.put("isAbstract", classNode.path("isAbstract").asBoolean(false));
-                    entry.put("isEnum", classNode.path("isEnum").asBoolean(false));
-
-                    var annArr = classNode.path("annotations");
-                    List<Map<String, Object>> annList = new ArrayList<>();
-                    if (annArr.isArray()) {
-                        for (var ann : annArr) {
-                            Map<String, Object> a = new LinkedHashMap<>();
-                            a.put("name", textOf(ann, "name"));
-                            if ("Document".equals(textOf(ann, "name")) && ann.has("attributes")) {
-                                a.put("attributes", objectMapper.convertValue(ann.get("attributes"), Map.class));
-                            }
-                            annList.add(a);
-                        }
-                    }
-                    entry.put("annotations", annList);
-
-                    var ifArr = classNode.path("interfaces");
-                    List<String> interfaces = new ArrayList<>();
-                    if (ifArr.isArray()) { for (var i : ifArr) interfaces.add(i.asText()); }
-                    entry.put("interfaces", interfaces);
-                    entry.put("superClass", textOf(classNode, "superClass"));
-
-                    // ANNOTATED methods only, and only their name and annotations.
-                    //
-                    // Three consumers — callGraph.js:184, summary-analyzer.js:249/291 and
-                    // summary-scheduled.js:34 — iterate `cls.methods` on this payload looking for
-                    // @Scheduled, @Document and mapping annotations. The field was never emitted,
-                    // so all three loops have always been no-ops: a silently missing feature, not
-                    // an error.
-                    //
-                    // Carrying every method would bloat a payload the browser fetches on every
-                    // analysis open. It is not needed: on unified-web only 343 of 33,250 methods
-                    // (1.0%) carry an annotation, and annotations are the only thing these three
-                    // read — so the whole subset costs 0.04 MB. Attributes are kept because that is
-                    // what they inspect (a cron expression, a collection name).
-                    //
-                    // Omitted entirely when a class has no annotated methods, which is 99% of them,
-                    // so the rest of the summary is unchanged.
-                    List<Map<String, Object>> annotatedMethods = new ArrayList<>();
-                    for (var m : classNode.path("methods")) {
-                        var mAnns = m.path("annotations");
-                        if (!mAnns.isArray() || mAnns.isEmpty()) continue;
-                        List<Map<String, Object>> methodAnnList = new ArrayList<>();
-                        for (var a : mAnns) {
-                            Map<String, Object> one = new LinkedHashMap<>();
-                            one.put("name", textOf(a, "name"));
-                            if (a.has("attributes")) {
-                                one.put("attributes",
-                                        objectMapper.convertValue(a.get("attributes"), Map.class));
-                            }
-                            methodAnnList.add(one);
-                        }
-                        Map<String, Object> mEntry = new LinkedHashMap<>();
-                        mEntry.put("name", textOf(m, "name"));
-                        mEntry.put("annotations", methodAnnList);
-                        annotatedMethods.add(mEntry);
-                    }
-                    if (!annotatedMethods.isEmpty()) entry.put("methods", annotatedMethods);
-
-                    classIndex.add(entry);
-
-                    String fqn = textOf(classNode, "fullyQualifiedName");
-                    String simple = textOf(classNode, "simpleName");
-                    for (var ann : annArr) {
-                        if ("Document".equals(textOf(ann, "name")) && ann.has("attributes")) {
-                            String coll = ann.path("attributes").path("collection").asText(null);
-                            if (coll == null) coll = ann.path("attributes").path("value").asText(null);
-                            if (coll != null) {
-                                if (fqn != null) entityCollMap.put(fqn, coll);
-                                if (simple != null) entityCollMap.put(simple, coll);
-                            }
-                        }
-                    }
-
-                    String stereotype = textOf(classNode, "stereotype");
-                    if ("REPOSITORY".equals(stereotype) || "SPRING_DATA".equals(stereotype)) {
-                        var superIfaces = classNode.path("interfaces");
-                        if (superIfaces.isArray()) {
-                            for (var si : superIfaces) {
-                                // Placeholder for generic type extraction
-                            }
-                        }
-                    }
-
-                    var methods = classNode.path("methods");
-                    if (methods.isArray()) {
-                        for (var method : methods) {
-                            var mAnns = method.path("annotations");
-                            if (mAnns.isArray()) {
-                                for (var mAnn : mAnns) {
-                                    String annName = textOf(mAnn, "name");
-                                    if ("Scheduled".equals(annName)) {
-                                        scheduledCount++;
-                                        Map<String, Object> job = new LinkedHashMap<>();
-                                        job.put("className", fqn);
-                                        job.put("simpleName", simple);
-                                        job.put("methodName", textOf(method, "name"));
-                                        job.put("stereotype", stereotype);
-                                        job.put("sourceJar", textOf(classNode, "sourceJar"));
-                                        job.put("jarName", textOf(classNode, "jarName"));
-                                        job.put("sourcePath", textOf(classNode, "sourcePath"));
-                                        if (mAnn.has("attributes")) {
-                                            job.put("attributes", objectMapper.convertValue(mAnn.get("attributes"), Map.class));
-                                        }
-                                        scheduledJobs.add(job);
-                                    }
-                                    if ("EnableScheduling".equals(annName)) {
-                                        if (simple != null) enableSchedulingClasses.add(simple);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    for (var ann : annArr) {
-                        if ("EnableScheduling".equals(textOf(ann, "name"))) {
-                            if (simple != null && !enableSchedulingClasses.contains(simple))
-                                enableSchedulingClasses.add(simple);
-                        }
-                    }
+                    classIndex.add(summarizeClass(classNode, objectMapper, entityCollMap, scheduledJobs,
+                            scheduledCount, enableSchedulingClasses));
                 }
 
                 gen.writeFieldName("classIndex");
@@ -819,7 +731,7 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                 objectMapper.writeValue(gen, repoCollMap);
                 gen.writeFieldName("scheduledJobs");
                 objectMapper.writeValue(gen, scheduledJobs);
-                gen.writeNumberField("scheduledCount", scheduledCount);
+                gen.writeNumberField("scheduledCount", scheduledCount[0]);
                 gen.writeFieldName("enableSchedulingClasses");
                 objectMapper.writeValue(gen, enableSchedulingClasses);
 
@@ -857,12 +769,12 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                             // aggregates. Expanding is deferred to that branch and normally
                             // never happens.
                             hasCallTreeToken = parser.currentToken() != JsonToken.VALUE_NULL;
-                            if (hasCallTreeToken && !hasPrecomputedAggregates) {
+                            if (hasCallTreeToken && !hasPrecomputedAggregates.getAsBoolean()) {
                                 callTreeNode = inflater.toTree(parser.getText(), objectMapper);
                             }
                         } else if ("callTree".equals(fk)) {
                             hasCallTreeToken = true;
-                            if (hasPrecomputedAggregates) {
+                            if (hasPrecomputedAggregates.getAsBoolean()) {
                                 // New format: aggregates are pre-computed; skip potentially huge tree.
                                 // skipChildren() reads tokens using an internal depth counter — O(1) memory.
                                 parser.skipChildren();
@@ -916,51 +828,7 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
                         computed.keySet().retainAll(Set.of("aggregatedCollectionVerification", "aggregatedCollectionSources"));
                     }
 
-                    gen.writeStartObject();
-                    Set<String> writtenFields = new HashSet<>();
-                    for (var entry : epSmallFields.entrySet()) {
-                        String key = entry.getKey();
-                        writtenFields.add(key);
-                        gen.writeFieldName(key);
-                        JsonNode val = entry.getValue();
-                        // Cap large per-endpoint arrays to prevent huge summaries
-                        if (CAPPED_ARRAY_FIELDS.containsKey(key) && val.isArray()
-                                && val.size() > CAPPED_ARRAY_FIELDS.get(key)) {
-                            int cap = CAPPED_ARRAY_FIELDS.get(key);
-                            gen.writeStartArray();
-                            int i = 0;
-                            for (var item : val) {
-                                if (i++ >= cap) break;
-                                objectMapper.writeValue(gen, item);
-                            }
-                            gen.writeEndArray();
-                            // The truncation used to be SILENT, so anything counting the array got
-                            // the cap instead of the truth: 24 endpoints reported 100 external
-                            // calls where the analysis found 224, and the summary's total came to
-                            // 3,104 against a stored 5,958. The array still has to be capped (an
-                            // uncapped summary measured 650 MB), but the real size is now stated so
-                            // a reader can say "100 of 224" instead of quietly saying "100".
-                            // Written only when truncation actually happened, so untruncated
-                            // responses are byte-for-byte unchanged.
-                            gen.writeNumberField(key + "Total", val.size());
-                        } else {
-                            objectMapper.writeValue(gen, val);
-                        }
-                    }
-                    if (computed != null) {
-                        for (var ce : computed.entrySet()) {
-                            if (writtenFields.contains(ce.getKey())) continue;
-                            gen.writeFieldName(ce.getKey());
-                            Integer cap = CAPPED_ARRAY_FIELDS.get(ce.getKey());
-                            if (cap != null && ce.getValue() instanceof List<?> list && list.size() > cap) {
-                                objectMapper.writeValue(gen, list.subList(0, cap));
-                                gen.writeNumberField(ce.getKey() + "Total", list.size());
-                            } else {
-                                objectMapper.writeValue(gen, ce.getValue());
-                            }
-                        }
-                    }
-                    gen.writeEndObject();
+                    writeSummaryEndpoint(gen, objectMapper, epSmallFields, computed);
                 }
                 gen.writeEndArray();
 
@@ -971,6 +839,211 @@ public abstract class AbstractAnalysisDataProvider implements AnalysisDataProvid
             }
         }
 
+        gen.writeEndObject();
+    }
+
+    /**
+     * One class's summary projection — the {@code classIndex} entry plus the three class-derived
+     * sidecar accumulators ({@code entityCollMap}, {@code scheduledJobs}/{@code scheduledCount},
+     * {@code enableSchedulingClasses}).
+     *
+     * <p>Shared by the read-time streamer ({@link #streamSummary}) and the save-time accumulator
+     * ({@code SaveTimeProjections}) so the two cannot drift. The accumulator feeds the raw class
+     * JSONL line; the streamer feeds the document class. Neither reads {@code invocations}, which is
+     * the only field pooling changes, so both produce the identical entry.
+     *
+     * @param scheduledCount single-element counter, mutated (the value accumulates across classes)
+     * @return the {@code classIndex} entry, to be appended by the caller in document order
+     */
+    static Map<String, Object> summarizeClass(JsonNode classNode, ObjectMapper objectMapper,
+                                              Map<String, String> entityCollMap,
+                                              List<Map<String, Object>> scheduledJobs,
+                                              int[] scheduledCount,
+                                              List<String> enableSchedulingClasses) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("fullyQualifiedName", textOf(classNode, "fullyQualifiedName"));
+        entry.put("simpleName", textOf(classNode, "simpleName"));
+        entry.put("packageName", textOf(classNode, "packageName"));
+        entry.put("stereotype", textOf(classNode, "stereotype"));
+        entry.put("sourceJar", textOf(classNode, "sourceJar"));
+        entry.put("jarName", textOf(classNode, "jarName"));
+        entry.put("sourcePath", textOf(classNode, "sourcePath"));
+        entry.put("isInterface", classNode.path("isInterface").asBoolean(false));
+        entry.put("isAbstract", classNode.path("isAbstract").asBoolean(false));
+        entry.put("isEnum", classNode.path("isEnum").asBoolean(false));
+
+        var annArr = classNode.path("annotations");
+        List<Map<String, Object>> annList = new ArrayList<>();
+        if (annArr.isArray()) {
+            for (var ann : annArr) {
+                Map<String, Object> a = new LinkedHashMap<>();
+                a.put("name", textOf(ann, "name"));
+                if ("Document".equals(textOf(ann, "name")) && ann.has("attributes")) {
+                    a.put("attributes", objectMapper.convertValue(ann.get("attributes"), Map.class));
+                }
+                annList.add(a);
+            }
+        }
+        entry.put("annotations", annList);
+
+        var ifArr = classNode.path("interfaces");
+        List<String> interfaces = new ArrayList<>();
+        if (ifArr.isArray()) { for (var i : ifArr) interfaces.add(i.asText()); }
+        entry.put("interfaces", interfaces);
+        entry.put("superClass", textOf(classNode, "superClass"));
+
+        // ANNOTATED methods only, and only their name and annotations.
+        //
+        // Three consumers — callGraph.js:184, summary-analyzer.js:249/291 and
+        // summary-scheduled.js:34 — iterate `cls.methods` on this payload looking for
+        // @Scheduled, @Document and mapping annotations. The field was never emitted,
+        // so all three loops have always been no-ops: a silently missing feature, not
+        // an error.
+        //
+        // Carrying every method would bloat a payload the browser fetches on every
+        // analysis open. It is not needed: on unified-web only 343 of 33,250 methods
+        // (1.0%) carry an annotation, and annotations are the only thing these three
+        // read — so the whole subset costs 0.04 MB. Attributes are kept because that is
+        // what they inspect (a cron expression, a collection name).
+        //
+        // Omitted entirely when a class has no annotated methods, which is 99% of them,
+        // so the rest of the summary is unchanged.
+        List<Map<String, Object>> annotatedMethods = new ArrayList<>();
+        for (var m : classNode.path("methods")) {
+            var mAnns = m.path("annotations");
+            if (!mAnns.isArray() || mAnns.isEmpty()) continue;
+            List<Map<String, Object>> methodAnnList = new ArrayList<>();
+            for (var a : mAnns) {
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("name", textOf(a, "name"));
+                if (a.has("attributes")) {
+                    one.put("attributes",
+                            objectMapper.convertValue(a.get("attributes"), Map.class));
+                }
+                methodAnnList.add(one);
+            }
+            Map<String, Object> mEntry = new LinkedHashMap<>();
+            mEntry.put("name", textOf(m, "name"));
+            mEntry.put("annotations", methodAnnList);
+            annotatedMethods.add(mEntry);
+        }
+        if (!annotatedMethods.isEmpty()) entry.put("methods", annotatedMethods);
+
+        String fqn = textOf(classNode, "fullyQualifiedName");
+        String simple = textOf(classNode, "simpleName");
+        for (var ann : annArr) {
+            if ("Document".equals(textOf(ann, "name")) && ann.has("attributes")) {
+                String coll = ann.path("attributes").path("collection").asText(null);
+                if (coll == null) coll = ann.path("attributes").path("value").asText(null);
+                if (coll != null) {
+                    if (fqn != null) entityCollMap.put(fqn, coll);
+                    if (simple != null) entityCollMap.put(simple, coll);
+                }
+            }
+        }
+
+        String stereotype = textOf(classNode, "stereotype");
+        if ("REPOSITORY".equals(stereotype) || "SPRING_DATA".equals(stereotype)) {
+            var superIfaces = classNode.path("interfaces");
+            if (superIfaces.isArray()) {
+                for (var si : superIfaces) {
+                    // Placeholder for generic type extraction
+                }
+            }
+        }
+
+        var methods = classNode.path("methods");
+        if (methods.isArray()) {
+            for (var method : methods) {
+                var mAnns = method.path("annotations");
+                if (mAnns.isArray()) {
+                    for (var mAnn : mAnns) {
+                        String annName = textOf(mAnn, "name");
+                        if ("Scheduled".equals(annName)) {
+                            scheduledCount[0]++;
+                            Map<String, Object> job = new LinkedHashMap<>();
+                            job.put("className", fqn);
+                            job.put("simpleName", simple);
+                            job.put("methodName", textOf(method, "name"));
+                            job.put("stereotype", stereotype);
+                            job.put("sourceJar", textOf(classNode, "sourceJar"));
+                            job.put("jarName", textOf(classNode, "jarName"));
+                            job.put("sourcePath", textOf(classNode, "sourcePath"));
+                            if (mAnn.has("attributes")) {
+                                job.put("attributes", objectMapper.convertValue(mAnn.get("attributes"), Map.class));
+                            }
+                            scheduledJobs.add(job);
+                        }
+                        if ("EnableScheduling".equals(annName)) {
+                            if (simple != null) enableSchedulingClasses.add(simple);
+                        }
+                    }
+                }
+            }
+        }
+        for (var ann : annArr) {
+            if ("EnableScheduling".equals(textOf(ann, "name"))) {
+                if (simple != null && !enableSchedulingClasses.contains(simple))
+                    enableSchedulingClasses.add(simple);
+            }
+        }
+        return entry;
+    }
+
+    /**
+     * One projected endpoint, with the large per-endpoint arrays capped. Shared by the read-time
+     * streamer ({@link #streamSummary}) and the save-time accumulator, so the two cannot drift.
+     *
+     * @param epFields the endpoint's fields in document order, already inflated (no pool ordinals)
+     * @param computed aggregates recomputed from a call tree for a legacy document, or null
+     */
+    static void writeSummaryEndpoint(JsonGenerator gen, ObjectMapper objectMapper,
+                                     Map<String, JsonNode> epFields, Map<String, Object> computed)
+            throws IOException {
+        gen.writeStartObject();
+        Set<String> writtenFields = new HashSet<>();
+        for (var entry : epFields.entrySet()) {
+            String key = entry.getKey();
+            writtenFields.add(key);
+            gen.writeFieldName(key);
+            JsonNode val = entry.getValue();
+            // Cap large per-endpoint arrays to prevent huge summaries
+            if (CAPPED_ARRAY_FIELDS.containsKey(key) && val.isArray()
+                    && val.size() > CAPPED_ARRAY_FIELDS.get(key)) {
+                int cap = CAPPED_ARRAY_FIELDS.get(key);
+                gen.writeStartArray();
+                int i = 0;
+                for (var item : val) {
+                    if (i++ >= cap) break;
+                    objectMapper.writeValue(gen, item);
+                }
+                gen.writeEndArray();
+                // The truncation used to be SILENT, so anything counting the array got
+                // the cap instead of the truth: 24 endpoints reported 100 external
+                // calls where the analysis found 224, and the summary's total came to
+                // 3,104 against a stored 5,958. The array still has to be capped (an
+                // uncapped summary measured 650 MB), but the real size is now stated so
+                // a reader can say "100 of 224" instead of quietly saying "100".
+                // Written only when truncation actually happened, so untruncated
+                // responses are byte-for-byte unchanged.
+                gen.writeNumberField(key + "Total", val.size());
+            } else {
+                objectMapper.writeValue(gen, val);
+            }
+        }
+        if (computed != null) {
+            for (var ce : computed.entrySet()) {
+                if (writtenFields.contains(ce.getKey())) continue;
+                gen.writeFieldName(ce.getKey());
+                Integer cap = CAPPED_ARRAY_FIELDS.get(ce.getKey());
+                if (cap != null && ce.getValue() instanceof List<?> list && list.size() > cap) {
+                    objectMapper.writeValue(gen, list.subList(0, cap));
+                    gen.writeNumberField(ce.getKey() + "Total", list.size());
+                } else {
+                    objectMapper.writeValue(gen, ce.getValue());
+                }
+            }
+        }
         gen.writeEndObject();
     }
 
