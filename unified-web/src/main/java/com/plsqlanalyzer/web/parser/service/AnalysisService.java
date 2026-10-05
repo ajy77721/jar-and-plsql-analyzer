@@ -499,13 +499,25 @@ public class AnalysisService {
         return staticReader.evictAll();
     }
 
-    /** Derive the datasource dialect from a jdbc URL (no extra DB call). */
-    private static String dialectOf(String jdbcUrl) {
+    /**
+     * Derive the datasource dialect from a jdbc URL (no extra DB call).
+     *
+     * <p>PostgreSQL was omitted here — the scan was written before Postgres support existed. A
+     * Postgres connection therefore reported {@code UNKNOWN}, which the Cache Manager's datasource
+     * filter (derived from {@code PA._DS_LABEL}) does not list, so its dropdown offered four of the
+     * five dialects and a Postgres connection could not be filtered. The other two copies of this
+     * scan ({@code HistoryFacet.dbType}, {@code AdminController.dialectOf}) already cover Postgres;
+     * this one now matches them.
+     *
+     * <p>Package-private so a unit test can assert every dialect without standing up the service.
+     */
+    static String dialectOf(String jdbcUrl) {
         String u = jdbcUrl == null ? "" : jdbcUrl.toLowerCase();
         if (u.contains("sqlserver")) return "SQLSERVER";
         if (u.contains("oracle"))    return "ORACLE";
         if (u.contains("mysql"))     return "MYSQL";
         if (u.contains("db2"))       return "DB2";
+        if (u.contains("postgres"))  return "POSTGRES";
         return "UNKNOWN";
     }
 
