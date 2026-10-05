@@ -56,7 +56,15 @@ class ApiPathCoverageTest {
      * <p>Keep this list short and justified. An entry here is a claim that a 404 is expected and
      * handled, which is exactly the assumption that hid the original bug.
      */
-    private static final Set<String> KNOWN_ABSENT = Set.of();
+    /**
+     * "/api/" is not a call — it is the PREFIX GUARD in page-envelope.js's isPublicPath
+     * ({@code path.indexOf('/api/') !== 0}), added with the auth-expiry fix (2668594). The
+     * API_PATH regex cannot tell a guard from a fetch target, and no controller maps "/api/"
+     * exactly, so it lands here rather than the gate staying red for a string that never goes
+     * over the wire. (First seen when the full reactor ran for the task-51 push — the failure
+     * reproduces on the clean tree, so it pre-dates that push's diff.)
+     */
+    private static final Set<String> KNOWN_ABSENT = Set.of("/api/");
 
     @Test
     @DisplayName("every /api path used by the frontend has a matching controller mapping")

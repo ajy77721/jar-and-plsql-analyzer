@@ -425,10 +425,21 @@ PA.statements = {
      * scoped facet table). `PA.statements.data` itself stays the full/unscoped aggregate (used by
      * the type-filter pills); only the table's own row data (`PA.tf`) is swapped per scope.
      */
+    /**
+     * Monotonic token for scope fetches. Every overlapping `applyScope` bumps it; a response that
+     * comes back after a newer call started is STALE — applying it would leave the table showing
+     * the previous procedure's scope while the toolbar names the new one (an unserialized
+     * fetch→setData raced: A slow, B fast, A lands last). The newer call always re-renders, so a
+     * stale one simply does nothing.
+     */
+    _scopeSeq: 0,
+
     applyScope: async function() {
+        var seq = ++PA.statements._scopeSeq;
         var ctx = PA.context;
         var mode = PA._scope;
         if (!ctx || !ctx.procId || mode === 'full') {
+            if (seq !== PA.statements._scopeSeq) return;
             PA.tf.setData('stmt', PA.statements.data);
             PA.statements._updateCounts();
             PA.statements._applyLoadError();
@@ -448,6 +459,7 @@ PA.statements = {
             scoped = [];
             PA.statements._loadError = (e && e.message) ? e.message : String(e);
         }
+        if (seq !== PA.statements._scopeSeq) return;
         PA.tf.setData('stmt', scoped);
         PA.statements._updateCounts();
         PA.statements._applyLoadError();

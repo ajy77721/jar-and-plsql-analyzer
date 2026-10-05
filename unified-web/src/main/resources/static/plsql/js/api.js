@@ -325,7 +325,32 @@ PA.api = {
         };
     },
 
+    /**
+     * MID-021 consistency fix: every other read here dispatches by `_parserName()`; this one
+     * didn't. With a parser-backed analysis loaded, the Tables-tab expand therefore always hit
+     * the LIVE-CRAWL endpoint — which reads the server's latest live-crawl result, not this
+     * analysis: 404 ("No access details available") when no crawl existed, another analysis's
+     * data when one did (and its substring table fallback could return a different table
+     * outright). The parser branch asks the same `/tables/page?q=<name>` one-row call the parser
+     * page's own table-detail modal makes (`parser/js/api.js`'s `getTableDetailByName`) and maps
+     * the row through the grid's own `_adaptParserTableRow`, so the panel reads exactly the shape
+     * the live-crawl branch always returned.
+     */
     async getTableDetail(tableName) {
+        const n = this._parserName();
+        if (n) {
+            const params = new URLSearchParams();
+            params.set('q', tableName);
+            params.set('limit', '5');   // headroom for a schema-qualified near-match, not a scan
+            const res = await fetch(`/api/parser/analyses/${encodeURIComponent(n)}/tables/page?${params}`);
+            if (!res.ok) { PA.apiFail(res); return null; }
+            const body = await res.json();
+            const rows = Array.isArray(body) ? body : (body.items || []);
+            const upper = tableName.toUpperCase();
+            const t = rows.find(r => (r.name || '').toUpperCase() === upper);
+            if (!t) return null;
+            return PA.api._adaptParserTableRow(t);
+        }
         const res = await fetch(`/api/plsql/analysis/tables/${encodeURIComponent(tableName)}`);
         if (!res.ok) { PA.apiFail(res); return null; }
         return res.json();

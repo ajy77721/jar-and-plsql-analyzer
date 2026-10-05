@@ -336,12 +336,23 @@ window.AccessDetails = (function () {
         if (!analysisName || !tableName) return null;
         try {
             var r = await fetch('/api/parser/analyses/' + encodeURIComponent(analysisName)
-                              + '/search?q=' + encodeURIComponent('table:' + tableName) + '&limit=500');
+                              + '/search?q=' + encodeURIComponent('table:' + tableName) + '&limit=1000');
             if (!r.ok) return null;
             var d = await r.json();
             if (d.indexed === false) return null;
+            var want = String(tableName).toUpperCase();
             var byKey = {};
             (d.rows || []).forEach(function (row) {
+                // `table:` is a CONTAINS match server-side (StatementSearcher.field), so the
+                // response for `table:ORDERS` also carries rows of ORDERS_ARCHIVE, CLIENT_ORDERS,
+                // … The join below is keyed per (nodeId, operation, line) — and two tables read by
+                // the same statement line (a JOIN) collide on exactly that key with
+                // last-write-wins. So only an exact, case-insensitive name match may enter the
+                // map: another table's row here is how this panel showed someone else's columns
+                // and predicates. A row with no tableName at all is skipped for the same reason —
+                // unattributable evidence is not evidence.
+                var rowTable = String(row.tableName || '').toUpperCase();
+                if (rowTable !== want) return;
                 byKey[(row.nodeId || '') + '|' + (row.operation || '') + '|' + row.line] = row;
             });
             return byKey;
@@ -368,6 +379,20 @@ window.AccessDetails = (function () {
         return (x.procedureId || '') + '|' + (x.operation || '') + '|' + x.lineNumber;
     }
 
+    /**
+     * Whether the panel `id` still belongs to THESE detail rows. Detail-panel ids are derived
+     * from the outer row's index (`ad-p-<idx>` / `ad-s-<idx>`), so a re-sort or page change can
+     * reassign an id to a different table while this panel's fetch is still in flight — the same
+     * id, different `PA.tf` state. Repainting then would render one table's panel over another's;
+     * `mount` re-inits the state with the new `details` array, so identity of the state's own
+     * `data` is the exact test. (The mutations above stay harmless either way: they only touch
+     * THIS panel's row objects, which the new panel never shares.)
+     */
+    function _panelIsCurrent(id, details) {
+        var s = PA.tf && PA.tf._state ? PA.tf._state[id] : null;
+        return !!s && s.data === details;
+    }
+
     async function enrich(id, details, analysisName, tableName) {
         if (!analysisName || !tableName || !details || !details.length) { _markUnknown(id, details); return; }
         var byKey = await fetchDetail(analysisName, tableName);
@@ -381,14 +406,15 @@ window.AccessDetails = (function () {
             return;
         }
         _updateCoverage(id, details);
-        // Re-render only if this panel is still open; the user may have collapsed the row.
-        if (document.getElementById(id + '-tbody') && PA.tf._state[id]) PA.tf.render(id);
+        // Re-render only if this panel is still open AND still the panel these rows belong to;
+        // the user may have collapsed the row, or the id may now belong to a different table.
+        if (document.getElementById(id + '-tbody') && _panelIsCurrent(id, details)) PA.tf.render(id);
     }
 
     function _markUnknown(id, details) {
         (details || []).forEach(function (x) { x._columns = null; });
         _updateCoverage(id, details, true);
-        if (document.getElementById(id + '-tbody') && PA.tf._state[id]) PA.tf.render(id);
+        if (document.getElementById(id + '-tbody') && _panelIsCurrent(id, details)) PA.tf.render(id);
     }
 
     /**

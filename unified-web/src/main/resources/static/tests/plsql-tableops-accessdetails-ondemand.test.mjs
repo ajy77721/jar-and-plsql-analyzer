@@ -99,17 +99,20 @@ export async function test_renderDetail_fetches_and_mounts_the_full_table_detail
   };
 
   const html = tableOps._renderDetail({ tableName: 'ERP_ORDER', triggers: [] }, 0, (v) => v);
-  ok(html.includes('ad-s-0-wrap'), 'must render a placeholder wrap div synchronously');
+  // The wrap id carries a per-expand sequence token now (task 51 — an index-only id let a slow
+  // getTableDetail response write one table's details into a later panel that reused the id), so
+  // the FIRST expand on a fresh module is seq 1: ad-s-1-wrap.
+  ok(html.includes('ad-s-1-wrap'), 'must render a placeholder wrap div synchronously');
 
   // Simulates PA.tf.toggleDetail actually inserting the returned HTML into a live DOM element —
   // this test exercises _renderDetail in isolation, so the insertion is stubbed rather than real.
-  globalThis.document.elements['ad-s-0-wrap'] = { innerHTML: '' };
+  globalThis.document.elements['ad-s-1-wrap'] = { innerHTML: '' };
 
   // Let the deferred async work (setTimeout 0 + the fetch) run.
   await new Promise((resolve) => setTimeout(resolve, 10));
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   equal(fetchedName, 'ERP_ORDER', 'must fetch the exact table whose panel opened');
-  const wrap = globalThis.document.elements['ad-s-0-wrap'];
+  const wrap = globalThis.document.elements['ad-s-1-wrap'];
   ok(wrap.innerHTML.includes('data-count="2"'), 'must mount all 2 fetched details when unscoped: ' + wrap.innerHTML);
 }

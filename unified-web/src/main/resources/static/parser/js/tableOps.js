@@ -462,7 +462,11 @@ PA.tableOps = {
     showTriggers: function(idx) {
         var s = PA.tf.state('to');
         if (!s) return;
-        var t = s.filtered[idx];
+        // `idx` is the GLOBAL row index baked into the row's onclick; on a server-paged grid
+        // `s.filtered` holds only the CURRENT page, so it must be rebased the same way
+        // PA.tf.toggleDetail does. Unrebased, every trigger click past page 1 read a row that
+        // is not there and silently did nothing.
+        var t = s.src ? s.filtered[idx - s.page * s.pageSize] : s.filtered[idx];
         if (!t) return;
         PA.tableDetail.open(t.tableName || '', t.tableSchema || '', 'triggers');
     },

@@ -573,10 +573,16 @@ PA.tf = {
         // `s.filtered` holds only the current page, so it has to be rebased.
         if (row.dataset.lazy && s.renderDetail) {
             const item = s.src ? s.filtered[idx - s.page * s.pageSize] : s.filtered[idx];
-            if (item) {
-                const esc = PA.esc || (v => v);
-                row.innerHTML = '<td colspan="20">' + s.renderDetail(item, idx, esc) + '</td>';
+            if (!item) {
+                // The rows in the DOM no longer match `s.filtered` — a refetch/debounced filter is
+                // mid-restart. Leave the row lazy and closed: deleting the flag here would leave a
+                // permanently EMPTY detail row that can never be rendered, which read as "clicked
+                // and nothing showed". `render` is about to replace this row anyway; if it doesn't,
+                // the next click retries.
+                return;
             }
+            const esc = PA.esc || (v => v);
+            row.innerHTML = '<td colspan="20">' + s.renderDetail(item, idx, esc) + '</td>';
             delete row.dataset.lazy;
         }
 

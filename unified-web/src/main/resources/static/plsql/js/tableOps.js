@@ -25,6 +25,7 @@ PA.tableOps = {
     _src: null,
     activeOps: new Set(),  // active operation filters (empty = all)
     scopeMode: 'all',      // 'all' | 'scoped'
+    _detailSeq: 0,         // per-expand panel id token — see _renderDetail
     _facetPromise: null,   // BUG-FIX (see _initColFiltersAsync): whole-table-list fetch used only
                             // to compute column-filter facet values, reset each load()
 
@@ -414,7 +415,14 @@ PA.tableOps = {
 
         // One shared panel for both pages and for the popup modal — see shared/access-details.js.
         // Was a flat unbounded div list; N reaches 1,385 on real analyses.
-        const wrapId = 'ad-s-' + idx + '-wrap';
+        //
+        // The id carries a per-expand sequence, not just the row index: the index is reused
+        // across re-renders (a re-sort assigns it to a different table), and this panel's
+        // getTableDetail fetch is ASYNC — a slow response landing after a re-render used to find
+        // the SAME id belonging to a different table's panel and write this table's access
+        // details into it. A unique id makes the stale fetch's lookup miss instead.
+        const seq = ++PA.tableOps._detailSeq;
+        const wrapId = 'ad-s-' + seq + '-wrap';
         html += '<div id="' + wrapId + '" style="padding:8px 0;color:var(--text-muted);font-size:11px">Loading access details…</div>';
 
         setTimeout(async () => {
@@ -439,7 +447,7 @@ PA.tableOps = {
                 wrap.innerHTML = '<div style="padding:8px 0;color:var(--text-muted);font-size:11px">No access details available</div>';
                 return;
             }
-            const adId = 'ad-s-' + idx;
+            const adId = 'ad-s-' + seq;
             wrap.innerHTML = AccessDetails.render(adId, details,
                 { fullCount: fullCount, scoped: scopeActive && details.length < fullCount });
             AccessDetails.mount(adId, details, {
