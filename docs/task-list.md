@@ -32,6 +32,8 @@
 | 28 | **Db2 modules** — grammar-first MODULE / ALTER MODULE PUBLISH / CREATE VARIABLE rules; `ROUTINEMODULENAME` → `ObjectRef.moduleName`; crawler keys a module member MODULE.SUB; module/global vars → packageVariables → globals facet | construct matrix | feat/db2-modules-nesting |
 | 29 | **Nested-subprogram marking** — `nested`/`scopeDepth` on SubprogramInfo/SubprogramSummaryInfo/FlowNode; persisted to `members[]` + `index.json` (procedures facet badge); ids byte-identical for non-nested | construct matrix | feat/db2-modules-nesting |
 | 24 | Scheduled/infra entry points: JOB/EVENT nodes + SCHEDULES edges ×4 dialects (Oracle DBMS_SCHEDULER/DBMS_JOB, SQL Server Agent, pg_cron, MySQL EVENT grammar), suppression removed, `/analyses/{n}/jobs` + "scheduled" badge | construct matrix | feat/scheduled-entry-points |
+| 49 | **Cache Manager filter showed 4 of 5 dialects** — `AnalysisService.dialectOf` omitted PostgreSQL (reported UNKNOWN), which the derived filter (`PA._DS_LABEL`) does not list, so a Postgres connection was unfilterable. Added the branch + `AnalysisServiceDialectTest`. Live: the 5 fresh analyses' jdbcUrls all map to their dialect | user report | 252f916 |
+| 50 | **Expired AWS session → sign-in screen, not an error popup** — every SSO-gate 401 routes through `PA.handleUnauthorized` (page-envelope.js), which the universal fetch wrapper and `apiFail` both call; the home page resumes silently, else opens the code + "Open AWS login" screen with a calm note. New `auth-expiry-401.test.mjs` | user report | 2668594 |
 
 ---
 
@@ -64,7 +66,7 @@
 | 31 | **Verify P4** (credentials for ALL queue-job types) | storage audit | **AC:** a test/inspection proving every QueueJob.Type's captured context carries credentials (or the job needs none — documented per type) |
 | 32 | **ChatController persistence** | web audit | **AC:** chat writes route through the user's context (no default-store degradation) + a test |
 | 33 | **Case-sensitivity normalization** (identity lookup) | false-pick session | **AC:** OracleDemo and ORACLEDEMO resolve to the SAME analysis on every endpoint (stats + facets + details) + tests |
-| 34 | **Bucket-garbage check/cleanup** (~152 MB doubled-prefix) | housekeeping | **AC:** the prefix verified (count+bytes), backed up, deleted; the bucket listing clean |
+| 34 | **Bucket-garbage check/cleanup** (~152 MB doubled-prefix) | housekeeping | **AC:** the prefix verified (count+bytes), backed up, deleted; the bucket listing clean. **Re-verified 2026-10-05:** `s3://amp-analyzer-parse-jar/amp-analyzer/` still holds 2,091 objects / 159.8 MB, dated 2026-09-23 — still PENDING (deletion needs backup + user ok) |
 | 35 | **Re-verification round** (fresh analyses all 6 + the false-pick re-audit) | false-pick audit | **AC:** every facet re-audited on the fresh data: 0 false picks, the fixed items verified fixed (globals real-only, sqlserver view edges, db2 level, no pseudo-tables, bodyCalls present) |
 | 36 | **A JAR with REAL DB calls** (live db-calls proof) | false-pick audit | **AC:** a fixture jar (or real app jar) with each call shape → the API returns them with correct kind/class/method; verified in the UI |
 | 37 | **A multi-level view-chain fixture** (view→view→view) | false-pick audit | **AC:** a 3-level chain rendered fully in the UI + every hop verified real |
