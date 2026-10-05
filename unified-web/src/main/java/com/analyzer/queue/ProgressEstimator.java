@@ -32,6 +32,7 @@ public class ProgressEstimator {
 
     private final ProgressCalibrationStore store;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ProgressEstimator(ConfigDirService configDirService) {
         this.store = new ProgressCalibrationStore(configDirService.getConfigDir());
     }
