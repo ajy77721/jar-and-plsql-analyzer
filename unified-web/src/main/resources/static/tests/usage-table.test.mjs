@@ -28,7 +28,7 @@ async function loadUsageTable() {
 
 export async function test_pagination_math_pages_and_bounds() {
   const U = await loadUsageTable();
-  equal(U.PAGE, 25, 'the default page size must be 25');
+  equal(U.PAGE, 10, 'the default page size must be 10');
   const p = U.paginate(142, 25, 0);
   equal(p.pages, 6, '142 rows at 25/page is 6 pages');
   equal(p.start, 0, 'page 0 starts at 0');
@@ -52,7 +52,7 @@ export async function test_pagination_math_handles_empty_and_bad_sizes() {
   equal(empty.pages, 1, 'an empty list still has one (empty) page');
   equal(empty.end, 0, 'nothing is sliced from an empty list');
   const bad = U.paginate(30, 0, 0);
-  equal(bad.size, 25, 'a zero page size falls back to the default rather than dividing by zero');
+  equal(bad.size, 10, 'a zero page size falls back to the default rather than dividing by zero');
 }
 
 /* ---------------------------------- filter ---------------------------------- */

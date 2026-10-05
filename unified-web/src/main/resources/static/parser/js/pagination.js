@@ -14,10 +14,28 @@ window.PA = window.PA || {};
 PA.pager = {
     _state: {},
     _renderers: {},
-    defaultSize: 25,
+    _lastTotals: {},
+    defaultSize: 10,
+
+    /** The shared page-size policy (shared/tableFramework.js), with a local fallback. */
+    _ps: function () {
+        if (window.PA && PA.pageSize) return PA.pageSize;
+        return {
+            DEFAULT: 10, OPTIONS: [10, 25, 50, 100, 250], ALL: 'all',
+            resolve: function () { return 10; },
+            set: function () {},
+            optionsHtml: function (cur, serverPaged) {
+                var out = [10, 25, 50, 100, 250].map(function (n) {
+                    return '<option value="' + n + '"' + (n === cur ? ' selected' : '') + '>' + n + '/page</option>';
+                }).join('');
+                if (!serverPaged) out += '<option value="all"' + (cur >= 1000000 ? ' selected' : '') + '>All</option>';
+                return out;
+            }
+        };
+    },
 
     get: function (key, size) {
-        if (!this._state[key]) this._state[key] = { page: 1, size: size || this.defaultSize };
+        if (!this._state[key]) this._state[key] = { page: 1, size: size || this._ps().resolve(false) };
         return this._state[key];
     },
     /**
@@ -77,7 +95,7 @@ PA.pager = {
         var st = this._srcState[key];
         if (!st) {
             st = this._srcState[key] = {
-                src: src, pages: {}, page: 1, size: size || this.defaultSize,
+                src: src, pages: {}, page: 1, size: size || this._ps().resolve(true),
                 highest: 1, total: -1, exact: false, hasMore: false,
                 loading: false, error: null
             };
@@ -157,10 +175,9 @@ PA.pager = {
         else if (st.exact) info = (st.total ? (start + 1) : 0) + '–' + (start + shown) + ' of ' + st.total;
         else info = (shown ? (start + 1) : 0) + '–' + (start + shown);
 
-        var sizes = [10, 25, 50, 100].map(function (n) {
-            return '<option value="' + n + '"' + (n === st.size ? ' selected' : '') + '>' + n + '/page</option>';
-        }).join('');
-        // No "All" option: a page source exists precisely so the whole result set is never sent.
+        // Numeric sizes only: a page source exists precisely so the whole result set is never sent,
+        // so "All" is not offered here.
+        var sizes = this._ps().optionsHtml(st.size, true);
 
         var html = '<div class="pagination-bar">'
             + '<div class="page-info">' + info + '</div>'
@@ -198,6 +215,7 @@ PA.pager = {
     // identical to every other paginated view (light or dark theme).
     _controls: function (key, st, total, pages, start, shown) {
         if (total === 0) return '';
+        this._lastTotals[key] = total;   // so an "All" selection knows the size to expand to
         var end = start + shown;
         function btn(label, page, disabled, active, title) {
             return '<button class="' + (active ? 'active' : '') + '"'
@@ -205,9 +223,7 @@ PA.pager = {
                 + (title ? ' title="' + title + '"' : '')
                 + ' onclick="PA.pager.go(\'' + key + '\',' + page + ')">' + label + '</button>';
         }
-        var sizes = [10, 25, 50, 100].map(function (n) {
-            return '<option value="' + n + '"' + (n === st.size ? ' selected' : '') + '>' + n + '/page</option>';
-        }).join('') + '<option value="' + total + '"' + (st.size >= total ? ' selected' : '') + '>All</option>';
+        var sizes = this._ps().optionsHtml(st.size, false);
         var html = '<div class="pagination-bar">'
             + '<div class="page-info">' + (total ? (start + 1) : 0) + '–' + end + ' of ' + total + '</div>'
             + '<div class="page-size"><select onchange="PA.pager.setSize(\'' + key + '\', this.value)">' + sizes + '</select></div>';
@@ -236,7 +252,19 @@ PA.pager = {
         var st = this.get(key); st.page = page; this._rerender(key);
     },
     setSize: function (key, size) {
-        var n = parseInt(size, 10) || this.defaultSize;
+        var ps = this._ps();
+        if (String(size) === ps.ALL) {
+            var srcAll = this._srcState[key];
+            if (srcAll) return;   // no "All" for a page source
+            var stAll = this.get(key);
+            stAll.size = Math.max(1, this._lastTotals[key] || stAll.size);
+            ps.set(ps.ALL);
+            stAll.page = 1;
+            this._rerender(key);
+            return;
+        }
+        var n = parseInt(size, 10) || ps.DEFAULT;
+        ps.set(n);
         var src = this._srcState[key];
         if (src) {
             // The page size is the server's `limit`, so every cached page was cut at the old size.

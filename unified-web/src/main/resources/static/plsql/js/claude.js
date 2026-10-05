@@ -14,7 +14,7 @@ PA.claude = {
     viewMode: 'both',  // 'both' | 'static' | 'claude'
     activeOps: new Set(),
     page: 1,
-    pageSize: 50,
+    pageSize: (window.PA && PA.pageSize) ? PA.pageSize.resolve(false) : 10,
 
     // ==================== PROC ID RESOLUTION ====================
 
@@ -840,12 +840,11 @@ PA.claude = {
         const p = PA.claude.page;
         let html = '<div class="pagination-bar">';
         html += '<div class="page-info">' + total + ' tables</div>';
-        html += '<div class="page-size"><select onchange="PA.claude.setPageSize(+this.value)">';
-        for (const sz of [20, 50, 100]) {
-            html += `<option value="${sz}" ${PA.claude.pageSize === sz ? 'selected' : ''}>${sz}/page</option>`;
-        }
-        html += `<option value="${total}" ${PA.claude.pageSize >= total ? 'selected' : ''}>All</option>`;
-        html += '</select></div>';
+        html += '<div class="page-size"><select onchange="PA.claude.setPageSize(this.value)">'
+            + ((window.PA && PA.pageSize) ? PA.pageSize.optionsHtml(PA.claude.pageSize, false)
+                : [10, 25, 50, 100, 250].map((sz) => `<option value="${sz}" ${PA.claude.pageSize === sz ? 'selected' : ''}>${sz}/page</option>`).join('')
+                  + `<option value="all" ${PA.claude.pageSize >= 1000000 ? 'selected' : ''}>All</option>`)
+            + '</select></div>';
 
         html += '<div class="page-btns">';
         html += `<button onclick="PA.claude.goPage(1)" ${p <= 1 ? 'disabled' : ''}>&laquo;</button>`;
@@ -862,7 +861,18 @@ PA.claude = {
     },
 
     goPage(p) { PA.claude.page = Math.max(1, p); if (PA.claude.result) PA.claude.renderResult(PA.claude.result); },
-    setPageSize(sz) { PA.claude.pageSize = sz; PA.claude.page = 1; if (PA.claude.result) PA.claude.renderResult(PA.claude.result); },
+    setPageSize(sz) {
+        const ps = (window.PA && PA.pageSize) ? PA.pageSize : null;
+        if (String(sz) === 'all') {
+            PA.claude.pageSize = 1000000;   // the slice shows every row
+            if (ps) ps.set(ps.ALL);
+        } else {
+            PA.claude.pageSize = parseInt(sz, 10) || PA.claude.pageSize;
+            if (ps) ps.set(PA.claude.pageSize);
+        }
+        PA.claude.page = 1;
+        if (PA.claude.result) PA.claude.renderResult(PA.claude.result);
+    },
 
     toggleDetail(idx) {
         const row = document.getElementById('claude-detail-' + idx);

@@ -41,6 +41,64 @@
  */
 window.PA = window.PA || {};
 
+/**
+ * The one page-size policy for every table: the remembered choice, else the 10-row default.
+ *
+ * <p>Pages used to hard-code 50, 25 or 10 per table, and the selector offered 10/20/50/100. The
+ * user's last choice is now remembered in localStorage under `ampPageSize` and every table opens at
+ * it; the first-time default is 10. `All` is offered only where the whole set can be held in the
+ * browser — a server-paged table cannot fetch "all", so it caps at the largest numeric option.
+ */
+PA.pageSize = {
+    KEY: 'ampPageSize',
+    DEFAULT: 10,
+    OPTIONS: [10, 25, 50, 100, 250],
+    ALL: 'all',
+
+    /** The stored choice: a number in OPTIONS, or 'all', or null. */
+    get() {
+        try {
+            if (typeof localStorage === 'undefined') return null;
+            const v = localStorage.getItem(this.KEY);
+            if (v === this.ALL) return this.ALL;
+            const n = parseInt(v, 10);
+            return this.OPTIONS.indexOf(n) !== -1 ? n : null;
+        } catch (e) { return null; }
+    },
+
+    set(v) {
+        try {
+            if (typeof localStorage === 'undefined') return;
+            if (v === this.ALL) localStorage.setItem(this.KEY, this.ALL);
+            else {
+                const n = parseInt(v, 10);
+                if (this.OPTIONS.indexOf(n) !== -1) localStorage.setItem(this.KEY, String(n));
+            }
+        } catch (e) { /* private mode / disabled storage — the default still applies */ }
+    },
+
+    /** The effective size for a table. `serverPaged` caps 'all' at the largest numeric option. */
+    resolve(serverPaged) {
+        const v = this.get();
+        if (v === this.ALL) return serverPaged ? this.OPTIONS[this.OPTIONS.length - 1] : 1000000;
+        if (v != null) return v;
+        return this.DEFAULT;
+    },
+
+    /** `<option>` markup for a selector. All is offered only for client-held tables. */
+    optionsHtml(current, serverPaged) {
+        let out = '';
+        for (const n of this.OPTIONS) {
+            out += `<option value="${n}" ${n === current ? 'selected' : ''}>${n}/page</option>`;
+        }
+        if (!serverPaged) {
+            const allSel = current === this.ALL || current >= 1000000;
+            out += `<option value="${this.ALL}" ${allSel ? 'selected' : ''}>All</option>`;
+        }
+        return out;
+    }
+};
+
 PA.tf = {
 
     /**
@@ -73,12 +131,15 @@ PA.tf = {
         opts = opts || {};
         const src = (window.PA && PA.isPageSource && PA.isPageSource(data)) ? data : null;
         const rows = src ? [] : (data || []);
+        // The remembered choice wins; first time it is the 10-row default. Server-paged tables use
+        // the same size as their `limit`, so this is the parameter sent to the server too.
+        pageSize = PA.pageSize.resolve(!!src);
         const s = {
             id,
             data: rows,
             filtered: src ? [] : [...rows],
             page: 0,
-            pageSize: pageSize || 50,
+            pageSize: pageSize,
             renderRow,
             renderDetail: opts.renderDetail || null,
             sortKeys: opts.sortKeys || {},
@@ -428,11 +489,19 @@ PA.tf = {
         PA.tf.render(id);
     },
 
-    /** Change page size */
+    /** Change page size, and remember the choice for every table (localStorage 'ampPageSize'). */
     setPageSize(id, sz) {
         const s = PA.tf._state[id];
         if (!s) return;
-        s.pageSize = sz;
+        if (String(sz) === PA.pageSize.ALL) {
+            // All is only offered for client-held tables; a server page source cannot fetch it.
+            if (s.src) return;
+            s.pageSize = Math.max(1, (s.data || []).length);
+            PA.pageSize.set(PA.pageSize.ALL);
+        } else {
+            s.pageSize = parseInt(sz, 10) || s.pageSize;
+            PA.pageSize.set(s.pageSize);
+        }
         s.page = 0;
         // The page size is the server's `limit`, so every cached page was cut at the old size.
         if (s.src) { PA.tf._restart(id); return; }
@@ -927,11 +996,8 @@ PA.tf = {
         else html += (shown ? (start + 1) : 0) + '–' + (start + shown);
         html += '</div>';
 
-        html += `<div class="page-size"><select onchange="PA.tf.setPageSize('${id}',+this.value)">`;
-        for (const sz of [10, 20, 50, 100]) {
-            html += `<option value="${sz}" ${s.pageSize === sz ? 'selected' : ''}>${sz}/page</option>`;
-        }
-        html += '</select></div>';
+        html += `<div class="page-size"><select onchange="PA.tf.setPageSize('${id}',this.value)">`
+            + PA.pageSize.optionsHtml(s.pageSize, true) + '</select></div>';
 
         const busy = s.loading;
         html += '<div class="page-btns">';
@@ -989,12 +1055,8 @@ PA.tf = {
 
         const p = s.page;
         let html = '<div class="page-info">' + total + ' items</div>';
-        html += `<div class="page-size"><select onchange="PA.tf.setPageSize('${id}',+this.value)">`;
-        for (const sz of [10, 20, 50, 100]) {
-            html += `<option value="${sz}" ${s.pageSize === sz ? 'selected' : ''}>${sz}/page</option>`;
-        }
-        html += `<option value="${total}" ${s.pageSize >= total ? 'selected' : ''}>All</option>`;
-        html += '</select></div>';
+        html += `<div class="page-size"><select onchange="PA.tf.setPageSize('${id}',this.value)">`
+            + PA.pageSize.optionsHtml(s.pageSize, false) + '</select></div>';
 
         if (totalPages > 1) {
             html += '<div class="page-btns">';

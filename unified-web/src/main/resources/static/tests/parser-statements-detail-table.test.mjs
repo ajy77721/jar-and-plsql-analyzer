@@ -108,14 +108,14 @@ export async function test_the_drill_down_paginates_and_page_two_holds_the_remai
   await withPanel(fixture(87), async ({ dom }) => {
     const rows = (html) => (html.match(/<tr class="ad-row">/g) || []).length;
 
-    equal(rows(dom.get(ID + '-tbody').innerHTML), 50,
-      'page 1 must hold exactly one page (50) of the 87 procedures');
+    equal(rows(dom.get(ID + '-tbody').innerHTML), 10,
+      'page 1 must hold exactly one page (the 10-row default) of the 87 procedures');
     const pager = dom.get(ID + '-pager').innerHTML;
     includes(pager, '87 items', 'the pager must report the true row count');
     includes(pager, "PA.tf.goPage('stmtd-0',1)", 'a second page must be reachable');
 
     PA.tf.goPage(ID, 1);
-    equal(rows(dom.get(ID + '-tbody').innerHTML), 37, 'page 2 must hold the remaining 37');
+    equal(rows(dom.get(ID + '-tbody').innerHTML), 10, 'page 2 must hold the next 10');
   });
 }
 

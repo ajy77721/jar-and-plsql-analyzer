@@ -251,7 +251,7 @@ Object.assign(PA.summary, {
             data: data,
             filtered: [...data],
             page: 0,
-            pageSize: pageSize || 25,
+            pageSize: (window.PA && PA.pageSize) ? PA.pageSize.resolve(false) : (pageSize || 10),
             renderRow: renderRowFn,
             renderDetail: detailFn || null,
             domainFn: schemaFn || null,
@@ -296,11 +296,8 @@ Object.assign(PA.summary, {
     _buildPagerHtml(id, s, start, totalPages) {
         const showing = `${Math.min(start + 1, s.filtered.length)}-${Math.min(start + s.pageSize, s.filtered.length)} of ${s.filtered.length}`;
         let html = `<span class="page-info">${showing}</span>`;
-        html += `<select class="page-size" onchange="PA.summary._pageSizeChange('${id}',parseInt(this.value))" style="font-size:11px;padding:2px 4px;border-radius:var(--radius-sm);border:1px solid var(--border)">`;
-        for (const sz of [10, 25, 50, 100]) {
-            html += `<option value="${sz}"${sz === s.pageSize ? ' selected' : ''}>${sz} / page</option>`;
-        }
-        html += '</select>';
+        html += `<select class="page-size" onchange="PA.summary._pageSizeChange('${id}',this.value)" style="font-size:11px;padding:2px 4px;border-radius:var(--radius-sm);border:1px solid var(--border)">`
+            + this._pageSizeOptions(s.pageSize) + '</select>';
         html += `<span class="page-btns">`;
         html += `<button onclick="PA.summary._pageGo('${id}',${s.page - 1})" ${s.page <= 0 ? 'disabled' : ''}>&laquo;</button>`;
         const maxBtns = 7;
@@ -330,10 +327,25 @@ Object.assign(PA.summary, {
         this._pageRender(id);
     },
 
+    /** The shared page-size options (10/25/50/100/250 + All). */
+    _pageSizeOptions(current) {
+        if (window.PA && PA.pageSize) return PA.pageSize.optionsHtml(current, false);
+        return [10, 25, 50, 100, 250].map((n) =>
+            `<option value="${n}"${n === current ? ' selected' : ''}>${n} / page</option>`).join('')
+            + `<option value="all"${current >= 1000000 ? ' selected' : ''}>All</option>`;
+    },
+
     _pageSizeChange(id, size) {
         const s = this._pageState[id];
         if (!s) return;
-        s.pageSize = size;
+        const ps = (window.PA && PA.pageSize) ? PA.pageSize : null;
+        if (String(size) === 'all') {
+            s.pageSize = Math.max(1, s.filtered.length);
+            if (ps) ps.set(ps.ALL);
+        } else {
+            s.pageSize = parseInt(size, 10) || s.pageSize;
+            if (ps) ps.set(s.pageSize);
+        }
         s.page = 0;
         this._pageRender(id);
     },

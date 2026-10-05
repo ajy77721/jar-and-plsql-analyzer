@@ -503,7 +503,7 @@ Object.assign(JA.summary, {
             data: rows,
             filtered: src ? [] : [...rows],
             page: 0,
-            pageSize: pageSize || 25,
+            pageSize: (window.PA && PA.pageSize) ? PA.pageSize.resolve(!!src) : (pageSize || 10),
             renderRow: renderRowFn,
             renderDetail: detailFn || null,
             domainFn: domainFn || null,
@@ -703,11 +703,8 @@ Object.assign(JA.summary, {
         let html = `<span class="sum-pager-info">${showing}</span>`;
 
         // Page size selector
-        html += `<select class="sum-pager-size" onchange="JA.summary._pageSizeChange('${id}',parseInt(this.value))">`;
-        for (const sz of [10, 25, 50, 100]) {
-            html += `<option value="${sz}"${sz === s.pageSize ? ' selected' : ''}>${sz} / page</option>`;
-        }
-        html += '</select>';
+        html += `<select class="sum-pager-size" onchange="JA.summary._pageSizeChange('${id}',this.value)">`
+            + this._pageSizeOptions(s.pageSize, false) + '</select>';
 
         html += `<button class="sum-pager-btn" onclick="JA.summary._pageGo('${id}',${s.page - 1})" ${s.page <= 0 ? 'disabled' : ''}>&laquo;</button>`;
         // Page numbers (show up to 7)
@@ -754,11 +751,8 @@ Object.assign(JA.summary, {
             html += `<span class="sum-pager-info" style="color:var(--red,#c00)">${JA.utils.escapeHtml(s.loadError)}</span>`;
         }
 
-        html += `<select class="sum-pager-size" onchange="JA.summary._pageSizeChange('${id}',parseInt(this.value))">`;
-        for (const sz of [10, 25, 50, 100]) {
-            html += `<option value="${sz}"${sz === s.pageSize ? ' selected' : ''}>${sz} / page</option>`;
-        }
-        html += '</select>';
+        html += `<select class="sum-pager-size" onchange="JA.summary._pageSizeChange('${id}',this.value)">`
+            + this._pageSizeOptions(s.pageSize, true) + '</select>';
 
         html += `<button class="sum-pager-btn" onclick="JA.summary._pageGo('${id}',${s.page - 1})"${s.page <= 0 || s.loading ? ' disabled' : ''}>&laquo;</button>`;
         if (s.totalIsExact) {
@@ -805,10 +799,27 @@ Object.assign(JA.summary, {
         this._pageRender(id);
     },
 
+    /** The shared page-size options (10/25/50/100/250 + All for client tables). */
+    _pageSizeOptions(current, serverPaged) {
+        if (window.PA && PA.pageSize) return PA.pageSize.optionsHtml(current, serverPaged);
+        let out = [10, 25, 50, 100, 250].map((n) =>
+            `<option value="${n}"${n === current ? ' selected' : ''}>${n} / page</option>`).join('');
+        if (!serverPaged) out += `<option value="all"${current >= 1000000 ? ' selected' : ''}>All</option>`;
+        return out;
+    },
+
     _pageSizeChange(id, size) {
         const s = this._pageState[id];
         if (!s) return;
-        s.pageSize = size;
+        const ps = (window.PA && PA.pageSize) ? PA.pageSize : null;
+        if (String(size) === 'all') {
+            if (s.src) return;   // no All for a server page source
+            s.pageSize = Math.max(1, s.filtered.length);
+            if (ps) ps.set(ps.ALL);
+        } else {
+            s.pageSize = parseInt(size, 10) || s.pageSize;
+            if (ps) ps.set(s.pageSize);
+        }
         s.page = 0;
         // The page size is the server's `limit`, so every cached page was cut at the old size.
         if (s.src) { this._pageSourceRestart(id); return; }

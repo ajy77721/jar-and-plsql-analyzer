@@ -45,8 +45,14 @@ window.PA = window.PA || {};
 (function () {
     'use strict';
 
-    var DEFAULT_PAGE = 25;
+    var DEFAULT_PAGE = 10;
     var SNIPPET_LIMIT = 160;
+
+    /** The remembered page size (localStorage 'ampPageSize'), else 10. */
+    function pageSizeFor(opts) {
+        if (opts && opts.pageSize) return opts.pageSize;
+        return (window.PA && PA.pageSize) ? PA.pageSize.resolve(false) : DEFAULT_PAGE;
+    }
     var panels = {};          // id -> { kinds:Set, opts, rows }
     var srcCache = {};        // sourceFile -> Promise<string content>
 
@@ -327,7 +333,7 @@ window.PA = window.PA || {};
         // The first page is rendered inline (no DOM needed), so the panel is populated before
         // `mount` runs and the row-building stays testable without a browser. `PA.tf` re-renders
         // the same page on mount and takes over paging/filtering from there.
-        var first = paginate(rows.length, opts.pageSize || DEFAULT_PAGE, 0);
+        var first = paginate(rows.length, pageSizeFor(opts), 0);
         var rowFn = makeRowRenderer(id, opts);
         var body = '';
         for (var ri = first.start; ri < first.end; ri++) {
@@ -371,7 +377,7 @@ window.PA = window.PA || {};
             sortKeys[layout.procCol] = { fn: function (r) { return String(opts.procedure(r) || '').toUpperCase(); } };
         }
 
-        PA.tf.init(id, rows, opts.pageSize || DEFAULT_PAGE, makeRowRenderer(id, opts), {
+        PA.tf.init(id, rows, pageSizeFor(opts), makeRowRenderer(id, opts), {
             sortKeys: sortKeys,
             renderDetail: opts.full ? function (row, idx, e) { return '<div class="ut-full">' + opts.full(row) + '</div>'; } : null,
             searchFn: function (row, q) { return matchRow(row, q, opts); },
