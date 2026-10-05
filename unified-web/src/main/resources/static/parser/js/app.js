@@ -925,45 +925,13 @@ PA.detailsTab = {
      *
      * These are the counts the retired "All cases" accordion panel used to show, computed from the
      * current node doc (`PA.currentDetail`) by `PA.allCases.counts`. A count of 0 leaves the label
-     * bare (applicable-only, exactly as the panel omitted empty groups). "Triggers fired" is not on
-     * the node doc, so it is filled in asynchronously from the tables index.
-     *
-     * Called when the Details tab opens and whenever a new node detail is loaded, so the labels are
-     * never stale — it is cheap and idempotent.
+     * RETIRED (user decision, task 52): the sub-tab labels read "Cursors (43)", "Dynamic SQL (32)"
+     * … — the counts fought with the tab name for space and the numbers went stale as the node
+     * detail changed. The user wants the tab NAME only, so the count-suffix logic is retired and
+     * the labels stay exactly as authored in parser/index.html. The function is kept as a no-op
+     * (callers in switchRightTab/showProcedure unchanged) so reverting the decision is one edit.
      */
-    updateLabels: function(detail) {
-        if (typeof document === 'undefined') return;
-        detail = detail || PA.currentDetail;
-        var counts = (PA.allCases && PA.allCases.counts) ? PA.allCases.counts(detail || {}) : null;
-        if (!counts) return;
-        // Sub-tab key -> the counts field that labels it.
-        var map = { sequences: 'sequences', joinQuery: 'joins', dynamic: 'dynamic',
-            transactions: 'transactions', cursors: 'cursors', statements: 'statements',
-            exHandlers: 'exHandlers', views: 'views', globals: 'globals' };
-        document.querySelectorAll('#viewDetails .dt-subtab').forEach(function(btn) {
-            var key = btn.dataset.dtview;
-            // Remember the authored label once; the suffix is re-derived on every call.
-            if (btn.dataset.baseLabel == null) btn.dataset.baseLabel = btn.textContent.trim();
-            var n = (key in map) ? counts[map[key]] : null;
-            btn.textContent = (n != null && n > 0)
-                ? btn.dataset.baseLabel + ' (' + n + ')' : btn.dataset.baseLabel;
-        });
-        // "Triggers fired" arrives from the tables index, not the node doc.
-        if (detail && PA.allCases && PA.allCases.triggerCount) {
-            PA.allCases.triggerCount(detail, function(n) {
-                PA.detailsTab._setTabCount('triggers', n);
-            });
-        }
-    },
-
-    /** Sets one sub-tab label's count suffix (used by the async Triggers-fired count). */
-    _setTabCount: function(key, n) {
-        if (typeof document === 'undefined') return;
-        var btn = document.querySelector('#viewDetails .dt-subtab[data-dtview="' + key + '"]');
-        if (!btn) return;
-        if (btn.dataset.baseLabel == null) btn.dataset.baseLabel = btn.textContent.trim();
-        btn.textContent = (n > 0) ? btn.dataset.baseLabel + ' (' + n + ')' : btn.dataset.baseLabel;
-    }
+    updateLabels: function(detail) { },
 };
 
 /**

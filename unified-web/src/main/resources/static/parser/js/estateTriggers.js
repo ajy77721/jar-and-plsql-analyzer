@@ -194,7 +194,10 @@ PA.estateTriggers = {
             : '<span style="color:var(--text-muted)">-</span>';
 
         var html = '<tr class="to-row" onclick="PA.tf.toggleDetail(\'tg\',' + idx + ')">';
+        // Task 52 — the "def" link, same as the Views list: the trigger's body + WHEN clause on
+        // one click from the list, without expanding the row.
         html += '<td><span style="font-weight:600;color:var(--badge-orange)">' + esc(t.name || '') + '</span>'
+            + ' <span class="ut-link" style="font-size:9px" onclick="event.stopPropagation();PA.estateTriggers.openDef(\'' + PA.escJs(t.name || '') + '\')">def</span>'
             + (t.insteadOf ? '<span class="est-badge warn" style="margin-left:4px">INSTEAD OF</span>' : '')
             + (t.compound ? '<span class="est-badge warn" style="margin-left:4px">COMPOUND</span>' : '')
             + '</td>';
@@ -205,6 +208,50 @@ PA.estateTriggers = {
         html += '<td>' + (t.touchesCount || 0) + '</td>';
         html += '</tr>';
         return html;
+    },
+
+    /**
+     * Task 52 — the row's "def" link: the trigger's WHEN clause and body, one click from the
+     * list. Shares the expand panel's `_details` cache, so the modal and the panel can never
+     * disagree about the same trigger, and a trigger already opened costs nothing.
+     */
+    /** `line`, when given, is a line in the trigger's own body — the modal opens with that line
+     * marked and scrolled into view (the click target of a body-call row's "L<n>"). */
+    openDef: function(name, line) {
+        var cached = PA.estateTriggers._details[name];
+        if (cached !== undefined) { PA.estateTriggers._showDefModal(name, cached, line); return; }
+        PA.api.getTriggerDetail(name).then(function(d) {
+            var detail = (d && !(PA.failed && PA.failed(d))) ? d : null;
+            PA.estateTriggers._details[name] = detail;
+            PA.estateTriggers._showDefModal(name, detail, line);
+        }).catch(function() {
+            PA.estateTriggers._showDefModal(name, null, line);
+        });
+    },
+
+    _showDefModal: function(name, t, line) {
+        var title = 'Trigger — ' + name;
+        if (!t || (!t.body && !t.whenClause)) {
+            PA.definitionModal.open({
+                title: title,
+                sections: [{ html: '<div class="est-empty">No body captured for this trigger — the definition was not readable from the catalog'
+                    + (t && t.dbDiscovered ? ' (this trigger was discovered from the catalog only; a body is not available on that path).' : '.')
+                    + '</div>' }]
+            });
+            return;
+        }
+        // The bound table is clickable in the modal too — "which table does this fire on" is the
+        // first follow-up question a body answer raises.
+        var tableChip = (t.table)
+            ? '<span class="est-meta-item">on <b style="color:var(--teal);cursor:pointer" '
+              + 'onclick="PA.tableDetail.open(\'' + PA.escJs(t.table) + '\',\'' + PA.escJs(t.tableSchema || '') + '\')">'
+              + PA.esc((t.tableSchema ? t.tableSchema + '.' : '') + t.table) + '</b></span>'
+            : '';
+        var sections = [];
+        if (t.whenClause) sections.push({ title: 'WHEN Clause', pre: t.whenClause, preClass: 'est-when' });
+        if (t.body) sections.push({ title: 'Body', pre: t.body, preClass: 'est-body', preId: 'defmodal-pre' });
+        PA.definitionModal.open({ title: title, subtitle: tableChip, sections: sections });
+        if (line) PA.definitionModal.highlightLine('defmodal-pre', line);
     },
 
     _renderDetail: function(t, idx, esc) {
@@ -285,7 +332,7 @@ PA.estateTriggers = {
         // The procedures the trigger body calls (when the crawl captured them on the trigger node).
         if (t.bodyCalls && t.bodyCalls.length) {
             html += '<div class="est-section"><div class="est-section-title">Calls from the body (' + t.bodyCalls.length + ')</div>';
-            html += PA.estateTriggers._callsHtml(t.bodyCalls, esc, idx);
+            html += PA.estateTriggers._callsHtml(t.bodyCalls, esc, idx, t.name);
             html += '</div>';
         }
 
@@ -315,12 +362,20 @@ PA.estateTriggers = {
     },
 
     /** Procedures the trigger body calls — each a clickable link into the procedure explorer. */
-    _callsHtml: function(calls, esc, idx) {
+    _callsHtml: function(calls, esc, idx, triggerName) {
         return PA.usageTable.attach('ut-tg-bodycalls-' + idx, calls || [], {
             showTitle: false, nameLabel: 'Called procedure', countLabel: 'calls',
             name: function (c) { return c.objectName || c.target || c.name || ''; },
             nameLink: function (c) { return "PA.showProcedure('" + PA.escJs(c.objectName || c.target || c.name || '') + "')"; },
             line: function (c) { return (c.lines && c.lines.length) ? c.lines[0] : null; },
+            // The call's line is a line IN THE TRIGGER'S OWN BODY (captured on the trigger node)
+            // — clicking opens the trigger's definition with that line marked (task 52).
+            lineLink: function (c) {
+                var ln = (c.lines && c.lines.length) ? c.lines[0] : null;
+                return (triggerName && ln != null)
+                    ? "PA.estateTriggers.openDef('" + PA.escJs(triggerName) + "', " + ln + ")"
+                    : null;
+            },
             sub: function (c) { return c.count ? { text: c.count + 'x' } : null; },
             badges: function (c) { return [c.type]; },
             source: PA.usageTable.nodeSource
@@ -352,6 +407,13 @@ PA.estateTriggers = {
                 return Object.keys(ops || {});
             },
             line: function (u) { return PA.usageTable.firstLine(u); },
+            // The usage line is a line in the PROCEDURE'S SOURCE — click opens it there (task 52).
+            lineLink: function (u) {
+                var ln = PA.usageTable.firstLine(u);
+                return (u.nodeId && ln != null)
+                    ? "PA.sourceView.openNodeAtLine('" + PA.escJs(u.nodeId) + "', " + ln + ")"
+                    : null;
+            },
             source: PA.usageTable.nodeSource
         });
     },

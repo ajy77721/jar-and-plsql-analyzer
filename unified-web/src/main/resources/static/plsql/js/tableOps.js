@@ -189,9 +189,10 @@ PA.tableOps = {
             };
         } catch (e) {
             // Whole-list fetch failed — fall back to the closed Type enum that is always correct
-            // regardless of dataset; Schema genuinely needs the fetch, so it's simply omitted here
-            // rather than guessed at.
-            serverValues = { [String(typeCol)]: ['TABLE', 'VIEW', 'MATERIALIZED VIEW', 'MATERIALIZED_VIEW'] };
+            // regardless of dataset (TEMP included: task 52 — the server's Type column reads the
+            // row's effective kind, so the fallback must know the same set); Schema genuinely
+            // needs the fetch, so it's simply omitted here rather than guessed at.
+            serverValues = { [String(typeCol)]: ['TABLE', 'VIEW', 'MATERIALIZED VIEW', 'MATERIALIZED_VIEW', 'TEMP'] };
         }
         // A tab switch away and back calls load() -> _initTable() again, tearing down and rebuilding
         // #toContainer's whole <table> each time, so there's no stale-state to guard against here —

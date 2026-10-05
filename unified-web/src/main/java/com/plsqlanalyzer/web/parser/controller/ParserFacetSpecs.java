@@ -86,6 +86,32 @@ final class ParserFacetSpecs {
     }
 
     /**
+     * The row's EFFECTIVE type, for the Type column filter (cf "2").
+     *
+     * <p>Was {@code scalarColumn("objectType", "TABLE")} — raw objectType only — so the Type
+     * popover listed TABLE/VIEW/MATERIALIZED_VIEW and never TEMP: a temp table's objectType is
+     * still "TABLE", its TEMP-ness lives in {@code kind}/{@code tableKind} (the field the row's
+     * own badge and the TEMP operation pill already read). A user asking the popover for TEMP
+     * found nothing to tick, even on an analysis full of temp tables.
+     *
+     * <p>Now kind-first, normalized exactly as {@link #tableTypeValues} normalizes — so the
+     * popover lists TEMP when, and only when, the analysis HAS temp rows (the value list is
+     * aggregated from real rows), and a ticked TEMP matches the same rows the TEMP pill matches.
+     * The popover and the matcher share this one function, so they cannot drift.
+     */
+    private static List<String> tableTypeColumn(JsonNode row) {
+        String kind = row.path("kind").asText("");
+        if (kind.isEmpty() && "TEMP".equalsIgnoreCase(row.path("tableKind").asText(""))) {
+            kind = "TEMP";
+        }
+        if (!kind.isEmpty()) return List.of(kind.toUpperCase(Locale.ROOT));
+        String ot = row.path("objectType").asText("");
+        if (ot.isEmpty()) return List.of("TABLE");
+        return List.of(ot.contains("MATERIALIZED") ? "MATERIALIZED_VIEW"
+                : ot.contains("VIEW") ? "VIEW" : "TABLE");
+    }
+
+    /**
      * Table operations.
      *
      * <h2>Why this one reads different field names</h2>
@@ -137,7 +163,7 @@ final class ParserFacetSpecs {
             ParserFacetSpecs::tableProcedureIds,
             Map.of("0", FacetSpec.scalarColumn("schema", ""),
                    "1", FacetSpec.scalarColumn("name", null),
-                   "2", FacetSpec.scalarColumn("objectType", "TABLE"),
+                   "2", ParserFacetSpecs::tableTypeColumn,
                    "3", FacetSpec.arrayColumn("allOperations")),
             // "9" — free-text filter on the table name, for callers that want contains/regex over
             // it rather than the exact-match checkbox "1" already gives (kept for backward compat).

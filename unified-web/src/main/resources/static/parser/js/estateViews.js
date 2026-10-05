@@ -210,7 +210,10 @@ PA.estateViews = {
         }
 
         var html = '<tr class="to-row" onclick="PA.tf.toggleDetail(\'vw\',' + idx + ')">';
-        html += '<td><span style="font-weight:600;color:var(--badge-blue)">' + esc(v.name || '') + '</span></td>';
+        // Task 52 — the "def" link (same affordance the Tables tab's view rows carry): the user
+        // reading the LIST wants the definition SQL on one click, not a row expand + scroll.
+        html += '<td><span style="font-weight:600;color:var(--badge-blue)">' + esc(v.name || '') + '</span>'
+            + ' <span class="ut-link" style="font-size:9px" onclick="event.stopPropagation();PA.estateViews.openDef(\'' + PA.escJs(v.name || '') + '\')">def</span></td>';
         html += '<td>' + typeBadge + '</td>';
         html += '<td>' + schemaHtml + '</td>';
         html += '<td>' + (v.columnCount || 0) + '</td>';
@@ -229,6 +232,67 @@ PA.estateViews = {
         }
         if (!cached) return '<div class="est-detail">' + PA.estateViews._notAnalyzed(v.name) + '</div>';
         return '<div class="est-detail">' + PA.estateViews._detailHtml(cached, esc, idx) + '</div>';
+    },
+
+    /**
+     * Task 52 — the row's "def" link: the view's definition SQL, one click from the list.
+     * Reuses the SAME per-view detail cache the expand panel fills (`_details`), so a view already
+     * opened costs nothing and the modal can never disagree with the panel. The modal also lists
+     * the view's columns as chips — clicking a chip highlights that column's occurrences in the
+     * definition SQL above it, which is the "see where this field comes from" ask without adding
+     * any server surface.
+     */
+    /** `line`, when given, is a line in the view's own definition SQL — the modal opens with
+     * that line marked and scrolled into view (the click target of a Joins row's "L<n>"). */
+    openDef: function(name, line) {
+        var cached = PA.estateViews._details[name];
+        if (cached !== undefined) { PA.estateViews._showDefModal(name, cached, line); return; }
+        PA.api.getViewDetail(name).then(function(d) {
+            var detail = (d && !(PA.failed && PA.failed(d))) ? d : null;
+            PA.estateViews._details[name] = detail;
+            PA.estateViews._showDefModal(name, detail, line);
+        }).catch(function() {
+            PA.estateViews._showDefModal(name, null, line);
+        });
+    },
+
+    _showDefModal: function(name, d, line) {
+        var isMv = d && (d.objectType === 'MATERIALIZED_VIEW' || d.isMaterialized);
+        var title = (isMv ? 'Materialized View' : 'View') + ' — ' + name;
+        if (!d || !d.definition) {
+            PA.definitionModal.open({
+                title: title,
+                sections: [{ html: '<div class="est-empty">No definition captured for this view.'
+                    + (d ? '' : ' This view is listed, but its detail artifact is not present in this analysis — re-run the analysis to populate it.')
+                    + '</div>' }]
+            });
+            return;
+        }
+        var chips = '';
+        if (d.columns && d.columns.length) {
+            chips = '<div class="est-chips">';
+            for (var i = 0; i < d.columns.length; i++) {
+                var cn = d.columns[i].name || '';
+                if (!cn) continue;
+                chips += '<span class="est-chip"><span class="est-col-name ut-link" '
+                    + 'onclick="PA.definitionModal.highlight(\'defmodal-pre\',\'' + PA.escJs(cn) + '\')">' + PA.esc(cn) + '</span></span>';
+            }
+            chips += '</div>';
+        }
+        PA.definitionModal.open({
+            title: title,
+            sections: [
+                { title: 'Definition', pre: d.definition, preId: 'defmodal-pre' },
+                { title: 'Columns — click one to find it in the definition',
+                  html: chips || '<div class="est-empty">No columns captured.</div>' }
+            ]
+        });
+        if (line) PA.definitionModal.highlightLine('defmodal-pre', line);
+    },
+
+    /** The detail panel's own column name → the same highlight, scoped to the panel's definition. */
+    _highlightCol: function(idx, name) {
+        PA.definitionModal.highlight('vw-def-' + idx, name);
     },
 
     _fetchDetail: function(v, idx) {
@@ -271,20 +335,23 @@ PA.estateViews = {
         }
         html += '</div>';
 
-        // Definition — DB-sourced SQL is DATA: escaped, inside <pre>.
+        // Definition — DB-sourced SQL is DATA: escaped, inside <pre>. The id lets the Columns
+        // table's own name cells (below) highlight their occurrences in it.
         html += '<div class="est-section"><div class="est-section-title">Definition</div>';
         html += d.definition
-            ? '<pre class="est-sql">' + esc(d.definition) + '</pre>'
+            ? '<pre class="est-sql" id="vw-def-' + idx + '">' + esc(d.definition) + '</pre>'
             : '<div class="est-empty">No definition captured for this view.</div>';
         html += '</div>';
 
-        // Columns
+        // Columns — a column NAME is clickable: it highlights where that column appears in the
+        // view's definition SQL above (task 52 — "see the field in the definition" without
+        // eyeballing the SQL). No per-column server surface exists or is needed.
         html += '<div class="est-section"><div class="est-section-title">Columns (' + (d.columnCount || 0) + ')</div>';
         if (d.columns && d.columns.length) {
             html += '<table class="est-cols"><thead><tr><th>Name</th><th>Data Type</th><th>Nullable</th></tr></thead><tbody>';
             for (var i = 0; i < d.columns.length; i++) {
                 var col = d.columns[i];
-                html += '<tr><td class="est-col-name">' + esc(col.name || '') + '</td>'
+                html += '<tr><td class="est-col-name ut-link" onclick="PA.estateViews._highlightCol(' + idx + ',\'' + PA.escJs(col.name || '') + '\')">' + esc(col.name || '') + '</td>'
                     + '<td class="est-col-type">' + esc(col.dataType || '') + '</td>'
                     + '<td>' + (col.nullable ? 'YES' : 'NO') + '</td></tr>';
             }
@@ -302,7 +369,7 @@ PA.estateViews = {
         // Joins inside the view definition (catalog/grammar-captured).
         if (d.joins && d.joins.length) {
             html += '<div class="est-section"><div class="est-section-title">Joins (' + d.joins.length + ')</div>';
-            html += PA.estateViews._joinsHtml(d.joins, esc, idx);
+            html += PA.estateViews._joinsHtml(d.joins, esc, idx, d.name);
             html += '</div>';
         }
 
@@ -384,7 +451,7 @@ PA.estateViews = {
     },
 
     /** Joins inside the view definition: type, both tables, the ON condition, and the source line. */
-    _joinsHtml: function(joins, esc, idx) {
+    _joinsHtml: function(joins, esc, idx, viewName) {
         return PA.usageTable.attach('ut-vw-joins-' + idx, joins || [], {
             showTitle: false, nameLabel: 'Join', snippetLabel: 'Condition', countLabel: 'joins',
             nameClass: 'est-col-name',
@@ -394,6 +461,13 @@ PA.estateViews = {
                 return l + ' → ' + r;
             },
             line: function (j) { return j.line; },
+            // A join's line is a line IN THE VIEW'S OWN definition SQL — clicking opens the
+            // definition modal with that line marked (task 52).
+            lineLink: function (j) {
+                return (j.line != null && viewName)
+                    ? "PA.estateViews.openDef('" + PA.escJs(viewName) + "', " + j.line + ")"
+                    : null;
+            },
             snippet: function (j) { return j.condition; },
             badges: function (j) { return [j.joinType || 'JOIN']; }
         });
@@ -485,6 +559,12 @@ PA.estateViews = {
             name: function (r) { return r.procedureName || r.procedureId; },
             nameLink: function (r) { return "PA.showProcedure('" + PA.escJs(r.procedureId || '') + "')"; },
             line: function (r) { return r.lineNumber; },
+            // A reference's line is a line in the procedure's source — click opens it there (task 52).
+            lineLink: function (r) {
+                return (r.procedureId && r.lineNumber != null)
+                    ? "PA.sourceView.openNodeAtLine('" + PA.escJs(r.procedureId) + "', " + r.lineNumber + ")"
+                    : null;
+            },
             snippet: function (r) { return r.sqlExpression; },
             badges: function (r) { return [r.type || 'DYNAMIC']; },
             source: PA.usageTable.nodeSource
@@ -500,6 +580,14 @@ PA.estateViews = {
             sub: function (u) { return { text: u.nodeType || '' }; },
             badges: function (u) { return Object.keys(u.operations || {}); },
             line: function (u) { return PA.usageTable.firstLine(u); },
+            // The usage line is a line in the PROCEDURE'S SOURCE — clicking opens that source at
+            // the line (task 52). Without a node id there is nothing to open, so no link.
+            lineLink: function (u) {
+                var ln = PA.usageTable.firstLine(u);
+                return (u.nodeId && ln != null)
+                    ? "PA.sourceView.openNodeAtLine('" + PA.escJs(u.nodeId) + "', " + ln + ")"
+                    : null;
+            },
             source: PA.usageTable.nodeSource,
             full: function (u) {
                 var ops = u.operations || {};

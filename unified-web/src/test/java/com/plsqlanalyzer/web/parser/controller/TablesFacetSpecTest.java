@@ -156,4 +156,44 @@ class TablesFacetSpecTest {
         assertEquals(List.of("SELECT", "INSERT"), cols.get("3").apply(t),
                 "the Operation filter is empty");
     }
+
+    @Test
+    void theTypeColumnReadsTheRowsEffectiveTypeSoTempIsFilterable() {
+        // cf "2" was scalarColumn("objectType") — TEMP could never appear in the Type popover,
+        // because a temp table's objectType is still "TABLE" and its TEMP-ness lives in
+        // kind/tableKind (what the row's badge and the TEMP pill already read). The column now
+        // reads the effective type: kind-first, then the normalized objectType — so the popover
+        // lists TEMP exactly when the analysis HAS temp rows, and a ticked TEMP matches the same
+        // rows the TEMP pill matches. The popover list and the matcher share this one function.
+        var typeCol = ParserFacetSpecs.TABLES.filterColumns().get("2");
+
+        assertEquals(List.of("TEMP"),
+                typeCol.apply(row("{\"schema\":\"S\",\"name\":\"#T\",\"objectType\":\"TABLE\","
+                        + "\"kind\":\"TEMP\",\"allOperations\":[],\"usedBy\":[]}")),
+                "a crawler kind=TEMP row must read TEMP, not its objectType");
+        assertEquals(List.of("TEMP"),
+                typeCol.apply(row("{\"schema\":\"S\",\"name\":\"#T\",\"objectType\":\"TABLE\","
+                        + "\"tableKind\":\"TEMP\",\"allOperations\":[],\"usedBy\":[]}")),
+                "a row carrying only tableKind=TEMP (the older field) must read TEMP too");
+        assertEquals(List.of("TABLE"),
+                typeCol.apply(row("{\"schema\":\"S\",\"name\":\"T\",\"objectType\":\"TABLE\","
+                        + "\"allOperations\":[],\"usedBy\":[]}")),
+                "a plain table must be unchanged");
+        assertEquals(List.of("VIEW"),
+                typeCol.apply(row("{\"schema\":\"S\",\"name\":\"V\",\"objectType\":\"VIEW\","
+                        + "\"allOperations\":[],\"usedBy\":[]}")),
+                "a view must be unchanged");
+        assertEquals(List.of("MATERIALIZED_VIEW"),
+                typeCol.apply(row("{\"schema\":\"S\",\"name\":\"MV\",\"objectType\":\"MATERIALIZED_VIEW\","
+                        + "\"allOperations\":[],\"usedBy\":[]}")),
+                "a materialized view must stay normalized");
+        // The TEMP pill (types=TEMP) matches through the spec's typeValues fn, the popover through
+        // the cf column — both normalize the same fields, so the two can never disagree.
+        JsonNode tempRow = row("{\"schema\":\"S\",\"name\":\"#T\",\"objectType\":\"TABLE\","
+                + "\"kind\":\"TEMP\",\"allOperations\":[],\"usedBy\":[]}");
+        assertEquals(
+                ParserFacetSpecs.TABLES.typeValues().apply(tempRow).contains("TEMP"),
+                typeCol.apply(tempRow).contains("TEMP"),
+                "the Type column and the TEMP pill must agree on what is TEMP");
+    }
 }

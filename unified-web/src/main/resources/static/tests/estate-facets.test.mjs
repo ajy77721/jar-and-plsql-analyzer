@@ -76,7 +76,9 @@ export async function test_view_definition_is_rendered_escaped_inside_pre() {
     columnCount: 0, baseTableCount: 0, usedByCount: 0, chain: null
   };
   const html = PA.estateViews._detailHtml(d, esc);
-  includes(html, '<pre class="est-sql">', 'the definition must render in a <pre>');
+  // The pre carries the vw-def-<idx> id now (task 52): the Columns table's name cells highlight
+  // their occurrences in THIS pre.
+  includes(html, '<pre class="est-sql" id="vw-def-', 'the definition must render in an identified <pre>');
   excludes(html, 'x < 2', 'raw SQL reached the DOM unescaped');
   includes(html, 'x &lt; 2', 'the SQL must be escaped, not dropped');
 }

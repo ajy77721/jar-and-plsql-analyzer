@@ -270,18 +270,15 @@ export async function test_all_cases_panel_is_retired() {
   excludes(header, 'PA.allCases.render(detail)', 'the detail view must not render the retired panel');
 }
 
-export async function test_counts_are_wired_into_the_sub_tab_labels() {
+export async function test_counts_are_retired_from_the_sub_tab_labels() {
+  // Task 52 (user decision): the "Cursors (43)" suffixes fought with the tab name for space and
+  // went stale as the node detail changed — the sub-tabs read their NAME only now. updateLabels
+  // stays as a guarded no-op so its callers (detailHeader.js, switchRightTab) are untouched.
   const header = await read('parser/js/detailHeader.js');
   includes(header, 'PA.detailsTab.updateLabels(detail)',
-    'loading a node detail must refresh the Details sub-tab label counts');
+    'the updateLabels call site must remain (the function is a no-op, not deleted)');
   const app = await read('parser/js/app.js');
-  includes(app, 'updateLabels: function', 'detailsTab must expose the label-count updater');
-  includes(app, 'PA.allCases.counts', 'the labels must be built from the node-doc counts helper');
-  includes(app, "data-dtview", 'the updater must target the Details sub-tab buttons');
-  // The "Cursors (43)" suffix format and the async triggers count.
-  includes(app, "' (' + n + ')'", 'the count must render as a "(N)" suffix on the label');
-  includes(app, 'PA.allCases.triggerCount', 'the async Triggers-fired count must patch its label');
-  // Opened from the Details tab, not only on detail load.
-  includes(app, 'PA.detailsTab.updateLabels(PA.currentDetail)',
-    'opening the Details tab must compute the label counts');
+  includes(app, 'updateLabels: function', 'detailsTab must still expose updateLabels for its callers');
+  excludes(app, "' (' + n + ')'", 'a count suffix is being appended to a sub-tab label again');
+  excludes(app, 'dataset.baseLabel', 'the suffix re-derivation logic is alive again');
 }
