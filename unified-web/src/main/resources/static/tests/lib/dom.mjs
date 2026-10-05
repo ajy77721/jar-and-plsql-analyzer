@@ -79,7 +79,12 @@ export function installDom() {
     _attach(e) { e._doc = doc; if (e.id) els.set(e.id, e); },
     _detach(e) { if (e.id && els.get(e.id) === e) els.delete(e.id); },
     head: { appendChild() {} },
-    body: { appendChild() {} },
+    // Appending to <body> registers the element by id, the same way a child append does — an
+    // overlay created and appended by a module must be findable by its id afterwards.
+    body: {
+      children: [],
+      appendChild(c) { this.children.push(c); c.parentNode = this; if (c.id) els.set(c.id, c); },
+    },
     addEventListener() {},
     readyState: 'complete',
   };

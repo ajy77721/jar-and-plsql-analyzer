@@ -229,6 +229,17 @@
 
     <link rel="stylesheet" href="/shared/chat.css?v=1789232664">
     <script src="/shared/chat-api.js?v=1789240569"></script>
+    <!-- Top-bar "Logs" dropdown next to Sessions: app log / analysis run logs / session chat logs. -->
+    <script src="/shared/log-menu.js?v=1"></script>
+    <script>LogMenu.init({
+        currentId: function () { return (JA.app && (JA.app.currentJarId || JA.app.currentJar)) || ''; },
+        name: function (id) { return id; },
+        appLog: function () { JA.logviewer.open(); },
+        runLogs: function (id) { return JA.api.listRunLogs(id); },
+        getRunLog: function (id, logName) { return JA.api.getRunLog(id, logName); },
+        chatSessions: function () { return ChatAPI.listSessions(); },
+        chatMessages: function (id) { return ChatAPI.getMessages(id, { limit: 200 }); }
+    });</script>
     <script src="/shared/chat.js?v=1788355691"></script>
     <div id="chatRoot"></div>
     <script>ChatPanel.init('#chatRoot', 'WAR', () => ({ jarName: JA.app?.currentJar || '' }));</script>
