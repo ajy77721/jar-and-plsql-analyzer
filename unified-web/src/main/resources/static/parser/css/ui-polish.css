@@ -72,17 +72,17 @@
 /* Empty-state + count labels a touch clearer */
 .empty-msg { color: var(--text-secondary); padding: 16px; font-style: italic; }
 
-/* ── Inner scrolling for expandable / long panels ──────────────────────────
- * Long lists (e.g. "Access Details (96)") were expanding the whole row and
- * pushing the page; cap them and scroll internally instead. */
-/* Single fixed-size scroll box for the detail panel injected below a clicked
- * table row (Access Details / Cursors / Joins / Complexity / Exception Handlers
- * all share .to-detail). ONE scroller here — no nested per-section scrollbars. */
+/* ── Expandable / long panels ──────────────────────────────────────────────
+ * The detail panel injected below a clicked table row (Access Details / Cursors /
+ * Joins / Complexity / Exception Handlers all share .to-detail) is CONTENT-SIZED.
+ * It used to be a fixed 380px scroll box, but that cap — layered under the
+ * Details container's own max-height — cut the expanded usage table to a sliver
+ * of the card: the "thin white bar". Now the panel grows to its content and the
+ * container (or, when a row is open, the Details pane — see the
+ * :has(.to-detail-row.open) exemption in estate.css / table-ops.css) is the ONE
+ * scroller that reveals it. */
 .to-detail {
-    max-height: 380px;
-    overflow-y: auto;
-    overflow-x: hidden;
-    /* keep the box a stable size so the page below doesn't jump on expand */
+    overflow-x: clip;   /* no scroll container, so the sticky headers keep working */
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--bg-top-bar);

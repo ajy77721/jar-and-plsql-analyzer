@@ -24,6 +24,12 @@
 #viewDetails { overflow-y: auto; }
 #viewDetails .dt-subview.fit-subview { flex: 0 0 auto; overflow: visible; }
 #viewDetails .dt-subview.fit-subview .to-container { flex: none; max-height: 60vh; }
+/* An open row-expansion must not be clipped by the 60vh cap above: when a row
+   is expanded the cap is dropped so the panel sizes to its content and the
+   Details pane (already `overflow-y:auto`) scrolls. Same exemption as
+   estate.css's `#viewDetails .dt-subview .to-container` rule. The cap still
+   bounds a LONG, UNEXPANDED list so its toolbar/pager stay reachable. */
+#viewDetails .dt-subview.fit-subview .to-container:has(.to-detail-row.open) { max-height: none; }
 
 .to-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .to-table thead { background: var(--bg-top-bar); position: sticky; top: 0; z-index: 1; }

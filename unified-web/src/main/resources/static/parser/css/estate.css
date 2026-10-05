@@ -282,3 +282,21 @@
     max-height: calc(100vh - 230px);    /* long lists (e.g. 476 cursors) scroll inside the card */
     overflow: auto;
 }
+
+/* ==========================================================================
+   An OPEN row-expansion must not be clipped by the container's max-height.
+
+   The cap above bounds a LONG list so the toolbar/pager stay reachable — but
+   it also capped the panel below a clicked row. An expanded row lives inside
+   that container, so at a short viewport (or with DevTools docked) the usage
+   table was cut to a sliver of the card: the "thin white bar" instead of the
+   access-details / usage rows.
+
+   When a row is open the cap is dropped: the container grows to the panel's
+   height and the Details pane — already `overflow-y:auto` above — becomes the
+   single scroller that reveals all of it. The compact short-list behaviour
+   (the void fix) is untouched, because this only matches while a row is open.
+   ========================================================================== */
+#viewDetails .dt-subview .to-container:has(.to-detail-row.open) {
+    max-height: none;
+}
