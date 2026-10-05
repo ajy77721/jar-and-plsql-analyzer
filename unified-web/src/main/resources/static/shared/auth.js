@@ -39,12 +39,19 @@
         document.body.appendChild(btn);
     }
 
-    // Monkey-patch fetch to catch global 401 responses and redirect to login
+    // Monkey-patch fetch to catch global 401 responses and route them to re-authentication.
+    // The decision lives in one place — page-envelope.js's PA.handleUnauthorized — so this file
+    // (if it is ever loaded) behaves exactly like the universal fetch wrapper and the app layers
+    // rather than carrying a second, divergent redirect.
     const _origFetch = window.fetch;
     window.fetch = function (...args) {
         return _origFetch.apply(this, args).then(res => {
             if (res.status === 401) {
-                window.location.href = '/?login=1&next=' + encodeURIComponent(location.pathname);
+                if (window.PA && typeof window.PA.handleUnauthorized === 'function') {
+                    window.PA.handleUnauthorized(res);
+                } else {
+                    window.location.href = '/?login=1&next=' + encodeURIComponent(location.pathname);
+                }
             }
             return res;
         });

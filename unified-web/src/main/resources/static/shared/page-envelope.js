@@ -244,6 +244,13 @@
         // `url` variable through and 76 of 80 sites had no such variable in scope, which would have
         // thrown ReferenceError on nearly every request in the app. res.url is always present.
         if (!url) url = (res && res.url) ? res.url : '';
+        // An expired AWS session is not a panel failure: route it to sign-in and keep the red
+        // "a request failed" banner out of the way. That banner tells the user their data failed;
+        // the truth is they need to authenticate again.
+        if (handleUnauthorized(res)) {
+            if (window.console) console.warn('[api] unauthorized — routing to sign-in', status, url);
+            return FAILED;
+        }
         var key = status + ' ' + (url || '');
         _seen[key] = (_seen[key] || 0) + 1;
 
@@ -254,6 +261,53 @@
         }
         if (window.console) console.warn('[api] request failed', status, url);
         return FAILED;
+    }
+
+    /**
+     * True when a response is the AWS SSO gate rather than some other auth scheme.
+     *
+     * The gate answers {@code 401 {ok:false,error:"Authenticate via AWS SSO first"}} on any
+     * non-public {@code /api/**} path. The admin portal and the login endpoints have their own
+     * auth, so their 401s are not ours to act on.
+     */
+    function isSsoGate401(res) {
+        if (!res || res.status !== 401) return false;
+        var path = '';
+        try { path = new URL((res && res.url) || '', window.location.origin).pathname; }
+        catch (e) { path = (res && res.url) || ''; }
+        if (path.indexOf('/api/') !== 0) return false;
+        if (path.indexOf('/api/admin/') === 0) return false;   // admin portal's own 401
+        if (path.indexOf('/api/auth/') === 0) return false;    // login endpoints are public
+        return true;
+    }
+
+    var _unauthHandledAt = 0;
+
+    /**
+     * Route an expired AWS session to re-authentication, once.
+     *
+     * On the home page — which owns the sign-in modal — the page registers {@code PA._onUnauthorized}
+     * and that runs the resume-or-prompt flow in place. On a tool page there is no modal, so the
+     * user is sent to the one sign-in surface (the home page) carrying where to return to.
+     *
+     * A fan-out of parallel 401s produces a single prompt: a second call inside the debounce window
+     * is a no-op, so ten failing panels cannot stack ten logins.
+     *
+     * @returns true when the response was an SSO-gate 401 and has been routed
+     */
+    function handleUnauthorized(res) {
+        if (!isSsoGate401(res)) return false;
+        var now = Date.now();
+        if (now - _unauthHandledAt < 1500) return true;
+        _unauthHandledAt = now;
+        if (typeof PAsafe._onUnauthorized === 'function') {
+            try { PAsafe._onUnauthorized(res); }
+            catch (e) { /* the page handler must not break the caller */ }
+            return true;
+        }
+        var next = window.location.pathname + window.location.search;
+        window.location.href = '/?login=1&next=' + encodeURIComponent(next);
+        return true;
     }
 
     function _banner(status, url) {
@@ -284,11 +338,13 @@
     PAsafe.FAILED = FAILED;
     PAsafe.failed = failed;
     PAsafe.apiFail = apiFail;
+    PAsafe.handleUnauthorized = handleUnauthorized;
     // Both namespaces: the jar and war pages use JA, the rest use PA, and a shared helper that
     // exists under only one name is a helper half the app cannot call.
     JAsafe.FAILED = FAILED;
     JAsafe.failed = failed;
     JAsafe.apiFail = apiFail;
+    JAsafe.handleUnauthorized = handleUnauthorized;
 })();
 
 /* ─────────────────────────────────────────────────────────────────────────────

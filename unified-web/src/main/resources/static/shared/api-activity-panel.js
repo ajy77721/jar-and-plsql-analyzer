@@ -135,6 +135,13 @@
             }
             return result.then(function (res) {
                 recordDone(id, !!res.ok, res.status);
+                // An expired AWS session surfaces as a 401 on any gated /api/** call. Route it to
+                // the sign-in flow here — the one place every request passes — so a screen that
+                // never calls PA.apiFail still gets the prompt instead of a silent empty panel.
+                // handleUnauthorized is idempotent, so a fan-out prompts once.
+                if (res.status === 401 && window.PA && typeof window.PA.handleUnauthorized === 'function') {
+                    window.PA.handleUnauthorized(res);
+                }
                 return res;
             }, function (err) {
                 recordDone(id, false, 0);

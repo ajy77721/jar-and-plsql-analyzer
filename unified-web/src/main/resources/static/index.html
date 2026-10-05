@@ -347,6 +347,10 @@
                      "Approved — loading your workspace…". Text only; never token material. -->
                 <div id="awsSsoStatusLine" style="display:none;padding:10px 14px;background:var(--sidebar-hover);border:1px solid var(--sidebar-border);color:var(--sidebar-text);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
 
+                <!-- An expired session is a normal event, not an error: shown as a calm amber note
+                     above the code, never the red error strip. Text only; never token material. -->
+                <div id="awsSsoExpiredNote" style="display:none;padding:10px 14px;background:var(--badge-orange-bg);color:var(--orange);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px">Your session expired — one click to re-authenticate.</div>
+
                 <!-- Step 1 — choose the sign-in method, then start. -->
                 <div id="awsSsoStep1">
                     <div id="awsSsoError1" style="display:none;padding:10px 14px;background:var(--badge-red-bg);color:var(--badge-red);font-size:12px;font-weight:600;border-radius:var(--radius);margin-bottom:14px"></div>
@@ -1378,37 +1382,87 @@
     }
     loadAwsSsoStatus();
 
-    // Global 401 -> SSO login gate.
+    // Global 401 -> re-authentication.
     //
     // Data APIs (/api/** other than /api/auth/*) answer HTTP 401
-    // {ok:false, error:"Authenticate via AWS SSO first"} when this browser has no SSO session.
-    // Home-page data fetches call this right after the fetch, before any res.json()/.ok handling:
+    // {ok:false, error:"Authenticate via AWS SSO first"} when this browser's AWS session has
+    // expired or is absent. Home-page data fetches call this right after the fetch, before any
+    // res.json()/.ok handling:
     //
     //     const res = await fetch('/api/...');
-    //     if (awsSsoHandle401(res)) return;   // login modal replaces the generic "Error loading"
+    //     if (awsSsoHandle401(res)) return;   // re-auth flow replaces the generic "Error loading"
     //
-    // The status check is synchronous so the call-site guard stays a plain `if`; the body is
-    // inspected on a clone (with the SSO-gate message check) before the modal is popped. Only
-    // the error string is ever rendered — never token material.
+    // The decision lives in ONE place — page-envelope.js's PA.handleUnauthorized — which every
+    // page loads first and which the global fetch wrapper also calls. On this page it dispatches
+    // to the registered PA._onUnauthorized below, so an explicit call site and a wrapper-caught
+    // 401 can never diverge. The status check is synchronous so the call-site guard stays a
+    // plain `if`.
     function awsSsoHandle401(res) {
         if (!res || res.status !== 401) return false;
-        try {
-            res.clone().json().then(function (d) {
-                const msg = (d && d.error) || '';
-                if (msg.indexOf('Authenticate via AWS SSO') === -1) return;
-                // Server says there is no session: drop any stale client view so the modal
-                // opens on step 1 where the error strip lives, and don't let the boot session
-                // check auto-open on top of this.
-                _awsSsoSession = null;
-                _awsSsoAutoOpened = true;
-                setAwsSsoPill(null);
-                awsSsoAutoStartLogin();
-                awsSsoShowError(1, msg);
-            }).catch(function () { /* non-JSON 401 — leave it to the call site */ });
-        } catch (e) { /* clone unavailable — call site still short-circuits on the 401 */ }
+        if (window.PA && typeof window.PA.handleUnauthorized === 'function') {
+            window.PA.handleUnauthorized(res);
+        } else {
+            // page-envelope.js absent (should not happen): still re-auth, never an error popup.
+            awsSsoOnSessionExpired();
+        }
         return true;
     }
     window.awsSsoHandle401 = awsSsoHandle401;
+
+    // The page's own re-auth flow, registered with the shared 401 router. An expired AWS session
+    // is a normal event, not a failure: try to resume silently, and only if that cannot succeed
+    // open the sign-in screen with a calm note — never a red error strip about a lost session.
+    let _awsSsoExpiredInFlight = false;
+    async function awsSsoOnSessionExpired() {
+        if (_awsSsoExpiredInFlight) return;
+        _awsSsoExpiredInFlight = true;
+        try {
+            // Drop the stale client view and stop the boot check from opening a second modal on
+            // top of this one.
+            _awsSsoSession = null;
+            _awsSsoAutoOpened = true;
+            setAwsSsoPill(null);
+            awsSsoClearErrors();
+            if (await awsSsoTrySilentResume()) { awsSsoEnterWorkspace(); return; }
+            // Not resumable: resume the persisted device flow if there is one, else register a
+            // fresh one. Either way the user lands on the code + "Open AWS login" screen.
+            awsSsoAutoStartLogin();
+            awsSsoShowExpiredNote();
+        } finally {
+            _awsSsoExpiredInFlight = false;
+        }
+    }
+
+    // The server owns the SSO session and renews an expired access token with its refresh token.
+    // If it is still connected the 401 was the transient boundary and there is nothing for the
+    // user to do — take them straight back in. A couple of short probes cover a server-side
+    // reconnect that is still landing. Reads identity fields only, never token material.
+    async function awsSsoTrySilentResume() {
+        for (let i = 0; i < 2; i++) {
+            const d = await fetch('/api/auth/aws/session')
+                .then(r => r.ok ? r.json() : null).catch(() => null);
+            if (d && d.connected) {
+                _awsSsoSession = d;
+                setAwsSsoPill(d);
+                awsSsoFillTargets(d);
+                return true;
+            }
+            await new Promise(r => setTimeout(r, 600));
+        }
+        return false;
+    }
+
+    function awsSsoShowExpiredNote() {
+        const el = document.getElementById('awsSsoExpiredNote');
+        if (el) el.style.display = 'block';
+    }
+    function awsSsoClearExpiredNote() {
+        const el = document.getElementById('awsSsoExpiredNote');
+        if (el) el.style.display = 'none';
+    }
+    // Register with the shared router (page-envelope.js) so every 401 path converges here.
+    window.PA = window.PA || {};
+    window.PA._onUnauthorized = function () { awsSsoOnSessionExpired(); };
 
     // Three small permission badges. `caps` is the capabilities object from the connect/session
     // response; missing operations read as denied so a partial/failed probe is legible.
@@ -1574,6 +1628,8 @@
         const m = document.getElementById('awsSsoModal');
         if (m) m.style.display = 'none';
         awsSsoStopPoll();
+        // The session-expiry note belongs to this sign-in; a later open starts clean.
+        awsSsoClearExpiredNote();
         // The modal closing aborts the flow; forget the AWS tab handle so a later flow cannot
         // close a window it did not open.
         _awsSsoVerifyWindow = null;
