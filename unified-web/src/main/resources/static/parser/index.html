@@ -367,6 +367,7 @@
                                     <div class="ct-actions">
                                         <span id="txnCount" class="badge">0 transactions</span>
                                         <input type="text" id="txnSearchTrace" class="form-input" placeholder="Filter proc / type…" oninput="PA.txnTrace.onSearch(this.value)" style="width:150px;font-size:11px;padding:2px 6px">
+                                        <button class="btn btn-sm" id="txnViewRunsBtn" onclick="PA.txnTrace.setView('runs')" title="Runtime-accurate transaction flow: execution timelines per path, with what survives each commit/rollback">Flow</button>
                                         <button class="btn btn-sm active" id="txnViewTableBtn" onclick="PA.txnTrace.setView('table')">Table</button>
                                         <button class="btn btn-sm" id="txnViewGraphBtn" onclick="PA.txnTrace.setView('graph')">Graph</button>
                                     </div>

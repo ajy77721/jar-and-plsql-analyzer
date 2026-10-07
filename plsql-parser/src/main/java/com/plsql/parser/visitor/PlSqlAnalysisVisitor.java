@@ -111,6 +111,49 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     // Track current exception handler for body analysis
     private ExceptionHandlerInfo currentExceptionHandler = null;
 
+    // ---------------------------------------------------------------
+    // Transaction-scope enrichment: the innermost branch/loop guard a statement sits inside.
+    // Pushed on entering an IF / CASE / LOOP body and popped on leaving it, so every statement
+    // created while a guard is active is stamped with {kind, line, condition} by addStatement.
+    // ---------------------------------------------------------------
+    private final Deque<GuardCtx> guardStack = new ArrayDeque<>();
+
+    /** One branch/loop guard frame: kind = IF | CASE | LOOP, its start line, and its condition text. */
+    private static final class GuardCtx {
+        final String kind;
+        final int line;
+        String condition;
+        GuardCtx(String kind, int line, String condition) {
+            this.kind = kind;
+            this.line = line;
+            this.condition = condition;
+        }
+    }
+
+    /**
+     * The exception handler whose body is currently being visited (name + line), so statements
+     * inside a handler get the {@code handler} linkage. Saved/restored around each handler body
+     * (see {@code visitException_handler}) so nesting restores correctly.
+     */
+    private HandlerCtx currentHandler = null;
+
+    private static final class HandlerCtx {
+        final String name;
+        final int line;
+        HandlerCtx(String name, int line) { this.name = name; this.line = line; }
+    }
+
+    /**
+     * Collapses all runs of whitespace (incl. newlines) to single spaces and trims, then truncates
+     * to {@code maxLen} characters. Returns null for null/blank input so the field is omitted.
+     */
+    private static String collapseText(String s, int maxLen) {
+        if (s == null) return null;
+        String t = s.replaceAll("\\s+", " ").trim();
+        if (t.isEmpty()) return null;
+        return t.length() > maxLen ? t.substring(0, maxLen) : t;
+    }
+
     // Track subquery context classification (EXISTS, IN, SCALAR, FROM)
     private String currentSubqueryContext = null;
 
@@ -244,6 +287,20 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
     }
 
     private void addStatement(StatementInfo si) {
+        // Transaction-scope enrichment funnel: every statement created while a branch/loop guard
+        // or an exception-handler body is active carries that context. The guard is the INNERMOST
+        // frame; a statement that itself pushes a guard (the IF/CASE/LOOP row) is added BEFORE the
+        // push, so it is stamped only with an ENCLOSING guard, never its own.
+        if (!guardStack.isEmpty()) {
+            GuardCtx g = guardStack.peek();
+            si.setGuardKind(g.kind);
+            si.setGuardLine(g.line);
+            si.setGuardCondition(g.condition);
+        }
+        if (currentHandler != null) {
+            si.setHandlerName(currentHandler.name);
+            si.setHandlerLine(currentHandler.line);
+        }
         SubprogramInfo sub = currentSubprogram();
         if (sub != null) {
             sub.getStatements().add(si);
@@ -2426,6 +2483,12 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             si.setLine(getStartLine(ctx));
             si.setLineEnd(getStopLine(ctx));
             si.setSqlText(getOriginalText(ctx, 200));
+            // SELECT ... FOR UPDATE [OF cols] [WAIT n | NOWAIT | SKIP LOCKED] locks its rows — a
+            // transaction-relevant property kept on the SELECT row as a flag (not a new type).
+            // Set to true ONLY, never false, so NON_EMPTY serialization omits it otherwise.
+            if (!ctx.for_update_clause().isEmpty()) {
+                si.setForUpdate(true);
+            }
 
             String prevDml = currentDmlOperation;
             List<String> prevTables = currentDmlTables; Set<String> prevTablesSet = currentDmlTablesSet;
@@ -2827,7 +2890,13 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setLineEnd(getStopLine(ctx));
         si.setSqlText(getOriginalText(ctx, 200));
         addStatement(si);
-        return visitChildren(ctx);
+        // CASE is a guard: statements in its WHEN/ELSE branches sit inside it. The condition text
+        // is refined per WHEN branch in visitCase_when_part_statement below; "<case>" is the
+        // fallback for the ELSE branch and for a WHEN whose text is unavailable.
+        guardStack.push(new GuardCtx("CASE", getStartLine(ctx), "<case>"));
+        Void result = visitChildren(ctx);
+        guardStack.pop();
+        return result;
     }
 
     @Override
@@ -2838,7 +2907,29 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setLineEnd(getStopLine(ctx));
         si.setSqlText(getOriginalText(ctx, 200));
         addStatement(si);
-        return visitChildren(ctx);
+        guardStack.push(new GuardCtx("CASE", getStartLine(ctx), "<case>"));
+        Void result = visitChildren(ctx);
+        guardStack.pop();
+        return result;
+    }
+
+    /**
+     * A CASE statement's {@code WHEN <cond> THEN <statements>} branch. While its statements are
+     * visited, the enclosing CASE guard frame's condition is refined from the generic {@code
+     * "<case>"} to this WHEN's own condition text, then restored — so each branch's statements
+     * carry the branch that selects them rather than the whole CASE.
+     */
+    @Override
+    public Void visitCase_when_part_statement(PlSqlParser.Case_when_part_statementContext ctx) {
+        GuardCtx top = guardStack.peek();
+        if (top == null || !"CASE".equals(top.kind)) {
+            return visitChildren(ctx);
+        }
+        String prev = top.condition;
+        top.condition = collapseText(getOriginalText(ctx.expression(), 400), 200);
+        Void result = visitChildren(ctx);
+        top.condition = prev;
+        return result;
     }
 
     // ---------------------------------------------------------------
@@ -4043,6 +4134,18 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setNestingDepth(loopNestingDepth);
         addStatement(si);
 
+        // LOOP guard frame: bounds text for WHILE / numeric FOR / cursor FOR, else "<loop>". Pushed
+        // after the loop row so the row itself is not stamped with its own guard.
+        String loopBounds;
+        if (ctx.WHILE() != null) {
+            loopBounds = collapseText(getOriginalText(ctx.condition(), 400), 200);
+        } else if (ctx.cursor_loop_param() != null) {
+            loopBounds = collapseText(getOriginalText(ctx.cursor_loop_param(), 400), 200);
+        } else {
+            loopBounds = "<loop>";
+        }
+        guardStack.push(new GuardCtx("LOOP", getStartLine(ctx), loopBounds));
+
         // For inline cursor FOR loops, skip visiting the select_statement inside
         // cursor_loop_param — it was already fully processed by extractTableRefsWithLines above.
         // Visiting it again via visitChildren would fire visitTableview_name for every table in
@@ -4100,6 +4203,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
             loopRecordStack.pop();
         }
 
+        guardStack.pop();
         loopNestingDepth--;
         return result;
     }
@@ -4135,7 +4239,11 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         loopNestingDepth++;
         si.setNestingDepth(loopNestingDepth);
         addStatement(si);
+        // FORALL is a bulk loop over its bounds clause — same LOOP guard frame as a FOR loop.
+        guardStack.push(new GuardCtx("LOOP", getStartLine(ctx),
+                collapseText(getOriginalText(ctx.bounds_clause(), 400), 200)));
         Void result = visitChildren(ctx);
+        guardStack.pop();
         loopNestingDepth--;
         return result;
     }
@@ -4206,6 +4314,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setType("COMMIT");
         si.setLine(getStartLine(ctx));
         si.setLineEnd(getStopLine(ctx));
+        si.setSqlText(collapseText(getOriginalText(ctx, 400), 300));
         addStatement(si);
         return visitChildren(ctx);
     }
@@ -4219,6 +4328,7 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setType("ROLLBACK");
         si.setLine(getStartLine(ctx));
         si.setLineEnd(getStopLine(ctx));
+        si.setSqlText(collapseText(getOriginalText(ctx, 400), 300));
         // Bug 13 fix: ROLLBACK TO SAVEPOINT <name> must capture the target savepoint name,
         // same as plain SAVEPOINT already does.
         if (ctx.savepoint_name() != null && ctx.savepoint_name().identifier() != null) {
@@ -4237,9 +4347,41 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setType("SAVEPOINT");
         si.setLine(getStartLine(ctx));
         si.setLineEnd(getStopLine(ctx));
+        si.setSqlText(collapseText(getOriginalText(ctx, 400), 300));
         if (ctx.savepoint_name() != null && ctx.savepoint_name().identifier() != null) {
             si.setSavepointName(cleanId(ctx.savepoint_name().identifier().getText()));
         }
+        addStatement(si);
+        return visitChildren(ctx);
+    }
+
+    // ---------------------------------------------------------------
+    // SET TRANSACTION — Oracle: SET TRANSACTION READ ONLY | READ WRITE |
+    // ISOLATION LEVEL ... | USE ROLLBACK SEGMENT ... (grammar: set_transaction_command).
+    // Recorded as its own transaction statement type so the transaction scope can show it.
+    // ---------------------------------------------------------------
+    @Override
+    public Void visitSet_transaction_command(PlSqlParser.Set_transaction_commandContext ctx) {
+        StatementInfo si = new StatementInfo();
+        si.setType("SET_TRANSACTION");
+        si.setLine(getStartLine(ctx));
+        si.setLineEnd(getStopLine(ctx));
+        si.setSqlText(collapseText(getOriginalText(ctx, 400), 300));
+        addStatement(si);
+        return visitChildren(ctx);
+    }
+
+    // ---------------------------------------------------------------
+    // LOCK TABLE — Oracle: LOCK TABLE t[, t...] IN <mode> MODE [WAIT n | NOWAIT]
+    // (grammar: lock_table_statement). Recorded as its own transaction statement type.
+    // ---------------------------------------------------------------
+    @Override
+    public Void visitLock_table_statement(PlSqlParser.Lock_table_statementContext ctx) {
+        StatementInfo si = new StatementInfo();
+        si.setType("LOCK_TABLE");
+        si.setLine(getStartLine(ctx));
+        si.setLineEnd(getStopLine(ctx));
+        si.setSqlText(collapseText(getOriginalText(ctx, 400), 300));
         addStatement(si);
         return visitChildren(ctx);
     }
@@ -4370,7 +4512,12 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
         si.setLineEnd(getStopLine(ctx));
         addStatement(si);
         branchDepth++;
+        // One guard frame per IF (condition = the IF's own condition, i.e. the branch taken when
+        // true). Pushed AFTER the IF row is added so the row itself is not its own guard.
+        guardStack.push(new GuardCtx("IF", getStartLine(ctx),
+                collapseText(getOriginalText(ctx.condition(), 400), 200)));
         Void result = visitChildren(ctx);
+        guardStack.pop();
         branchDepth--;
         return result;
     }
@@ -4408,7 +4555,13 @@ public class PlSqlAnalysisVisitor extends PlSqlParserBaseVisitor<Void> {
 
         ExceptionHandlerInfo prevHandler = currentExceptionHandler;
         currentExceptionHandler = ehi;
+        // Statements in the handler body (including a nested BEGIN…END and a nested subprogram
+        // declared inside it) carry this handler's name+line. Saved/restored around the body so a
+        // handler nested in a handler's protected block restores the enclosing handler on exit.
+        HandlerCtx prevHandlerCtx = currentHandler;
+        currentHandler = new HandlerCtx(ehi.getExceptionName(), ehi.getLine());
         Void result = visitChildren(ctx);
+        currentHandler = prevHandlerCtx;
         currentExceptionHandler = prevHandler;
         return result;
     }

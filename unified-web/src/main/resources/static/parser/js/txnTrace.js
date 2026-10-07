@@ -9,16 +9,17 @@ window.PA = window.PA || {};
  * Data source: PA.analysisData.transactionStatements (read-only; no server call).
  */
 PA.txnTrace = {
-    _view: 'table',   // 'table' | 'graph'
+    _view: 'table',   // 'runs' | 'table' | 'graph' — runs = the runtime-accurate flow (needs a rooted proc)
     _q: '',
     _page: 1,
     _pageSize: 25,    // keep the DOM small even when the call trace has 100s of procs
 
     setView: function (v) {
-        PA.txnTrace._view = (v === 'graph') ? 'graph' : 'table';
-        var t = document.getElementById('txnViewTableBtn'), g = document.getElementById('txnViewGraphBtn');
-        if (t) t.classList.toggle('active', PA.txnTrace._view === 'table');
-        if (g) g.classList.toggle('active', PA.txnTrace._view === 'graph');
+        PA.txnTrace._view = v;
+        var r = document.getElementById('txnViewRunsBtn'), t = document.getElementById('txnViewTableBtn'), g = document.getElementById('txnViewGraphBtn');
+        if (r) r.classList.toggle('active', v === 'runs');
+        if (t) t.classList.toggle('active', v === 'table');
+        if (g) g.classList.toggle('active', v === 'graph');
         PA.txnTrace._page = 1;
         PA.txnTrace.render();
     },
@@ -175,7 +176,158 @@ PA.txnTrace = {
     render: function () {
         var c = document.getElementById('txnContainerTrace');
         if (!c) return;
+        if (PA.txnTrace._view === 'runs') { PA.txnTrace._renderRuns(c); return; }
         PA.txnTrace._ensureWrites(function () { PA.txnTrace._renderNow(c); });
+    },
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RUNS view — the runtime-accurate transaction flow (task: transaction capture
+    // reliability). Data: GET /analyses/{name}/txn-runs/{rootNodeId} — the backend's
+    // interprocedural resolver: per execution path (guarded conditional commits/rollbacks
+    // enumerate alternative runs), a merged event timeline ACROSS procedures (a callee's
+    // COMMIT persists the caller's work on Oracle — what the per-proc segments cannot
+    // show), and a per-write survival verdict replayed under the dialect's ownership
+    // semantics. Falls back to the statement views when no root proc is selected or the
+    // endpoint yields nothing.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _runsKey: null,
+    _runsCache: {},
+
+    _renderRuns: function (c) {
+        var name = (PA.api && PA.api._analysisName) || '';
+        var entry = (PA.context && PA.context.procId) || (PA.context && PA.context.callTreeRootId) || '';
+        if (!name || !entry) {
+            c.innerHTML = '<div class="empty-msg">The runtime flow needs a rooted procedure — select one (or “Make Root”), or use the Table/Graph statement views for the whole analysis.</div>';
+            return;
+        }
+        var key = name + '|' + entry;
+        if (PA.txnTrace._runsCache[key]) { PA.txnTrace._renderRunsNow(c, PA.txnTrace._runsCache[key]); return; }
+        c.innerHTML = '<div class="empty-msg">Resolving transaction runs…</div>';
+        fetch('/api/parser/analyses/' + encodeURIComponent(name) + '/txn-runs/' + encodeURIComponent(entry))
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                PA.txnTrace._runsCache[key] = data;
+                PA.txnTrace._renderRunsNow(c, data);
+            })
+            .catch(function () { PA.txnTrace._runsCache[key] = null; PA.txnTrace._renderRunsNow(c, null); });
+    },
+
+    _renderRunsNow: function (c, data) {
+        var runs = (data && data.runs) || [];
+        if (!runs.length) {
+            c.innerHTML = '<div class="empty-msg">No transaction runs resolved for this entry — use the Table/Graph statement views.</div>';
+            return;
+        }
+        var outcomeCls = { COMMITTED: 'commit', ROLLED_BACK: 'rollback', PARTIAL: 'partial', OPEN: 'open', AUTONOMOUS: 'auto' };
+        var SURV = {
+            survived: { label: 'survived', cls: 'commit', tip: 'committed — permanent' },
+            discarded: { label: 'discarded', cls: 'rollback', tip: 'undone by a rollback on this path' },
+            open: { label: 'open', cls: 'open', tip: 'transaction still open — survives only if a caller commits later' }
+        };
+        var html = '';
+
+        if (data.pathCountExceeded) html += '<div class="txn-resolve-line" style="color:var(--warn,#b58900)">More guarded statements than the path limit — showing the conservative run (all conditions assumed true). Check each event’s guard on the Table view.</div>';
+        html += '<div class="txn-summary"><span class="txn-sum-chip">' + runs.length + ' execution path' + (runs.length === 1 ? '' : 's') + '</span>'
+            + '<span class="txn-sum-chip">' + PA.esc((data.dialect || '') + (data.dialect ? ' semantics' : '')) + '</span></div>';
+
+        runs.forEach(function (run) {
+            var oc = outcomeCls[run.outcome] || 'open';
+            html += '<div class="txn-track' + (run.kind === 'autonomous' ? ' auto' : '') + '" style="display:block">';
+            html += '<div class="txn-track-tag"><span class="txn-tag' + (run.kind === 'autonomous' ? ' auto' : '') + '">R' + run.runId + '</span>'
+                + '<span class="txn-track-proc">' + PA.esc(run.kind === 'autonomous' ? 'autonomous side transaction' : 'execution path') + '</span>'
+                + '<span class="txn-exit-tag ' + (oc === 'commit' ? 'ok' : oc === 'rollback' ? 'err' : '') + '" style="margin-left:8px">' + PA.esc(run.outcome || '') + '</span>'
+                + '</div>';
+            // The resolver's own plain-English outcome — derived from the replay, not a template.
+            if (run.summary) html += '<div class="txn-resolve-line" style="padding:4px 8px">' + run.summary + '</div>';
+            if (run.assumptions && run.assumptions.length) {
+                html += '<div style="padding:0 8px;font-size:10px;color:var(--text-muted)">assuming: '
+                    + run.assumptions.map(function (a) {
+                        return PA.esc(a.condition || '?') + ' → <b style="color:var(--' + (a.taken ? 'badge-green' : 'red') + ')">' + (a.taken ? 'true' : 'false') + '</b>';
+                    }).join(', ') + '</div>';
+            }
+            // The merged event timeline — COLLAPSED like the other views: consecutive same-proc
+            // DML writes become ONE group chip per operation with the survival summary (a busy
+            // proc carried 200+ individual nodes — unreadable); savepoints collapse into their
+            // group; only the BOUNDARY events (COMMIT / ROLLBACK / BEGIN TRAN, with guards) and
+            // the CALL edges stay individual. The Details modal carries the full per-write list.
+            html += '<div class="txn-track-line" style="flex-wrap:wrap">';
+            var groups = [];
+            var cur = null;
+            (run.events || []).forEach(function (e) {
+                var boundary = (e.kind === 'COMMIT' || e.kind === 'ROLLBACK' || e.kind === 'ROLLBACK_TO' || e.kind === 'BEGIN_TRAN');
+                var isCall = e.kind === 'CALL';
+                if (boundary || isCall) {
+                    groups.push({ type: boundary ? 'boundary' : 'call', ev: e });
+                    cur = null;
+                    return;
+                }
+                // Group key: proc + op for WRITEs; proc for savepoint-ish markers.
+                var key = e.kind === 'WRITE'
+                    ? e.nodeId + '|' + e.op
+                    : e.nodeId + '|MARK';
+                if (!cur || cur.key !== key) {
+                    cur = { type: 'group', key: key, nodeId: e.nodeId, proc: e.proc, depth: e.depth,
+                            op: e.kind === 'WRITE' ? e.op : null, lines: [], surv: {}, marks: 0 };
+                    groups.push({ type: 'group', g: cur });
+                }
+                if (e.kind === 'WRITE') {
+                    cur.lines.push(e.line);
+                    var sv = e.survival || 'open';
+                    cur.surv[sv] = (cur.surv[sv] || 0) + 1;
+                } else {
+                    cur.marks++;
+                }
+            });
+
+            groups.forEach(function (g) {
+                if (g.type === 'boundary') {
+                    var e = g.ev;
+                    var map = { ROLLBACK_TO: ['RB→SP', 'sp'], ROLLBACK: ['ROLLBACK', 'rollback'], COMMIT: ['COMMIT', 'commit'], BEGIN_TRAN: ['BEGIN TRAN', 'begin'] };
+                    var m = map[e.kind] || [e.kind, 'begin'];
+                    var lbl = '<b>' + m[0] + '</b>' + (e.name ? ' ' + PA.esc(e.name) : '')
+                        + (e.guard ? '<br><span class="txn-implicit">if ' + PA.esc(e.guard.condition || '') + '</span>' : '');
+                    var jump = e.nodeId ? ' onclick="PA.sourceView.openNodeAtLine(\'' + PA.escJs(e.nodeId) + '\',' + (e.line || 0) + ')" style="cursor:pointer"' : '';
+                    html += '<div class="txn-node"' + jump + ' title="' + PA.esc(e.proc || '') + ' :line ' + (e.line || 0) + '">'
+                        + '<span class="txn-dot ' + m[1] + '"></span><span class="txn-node-lbl">' + lbl + '<br><span class="txn-implicit">' + PA.esc((e.proc || '').split('$').pop() || '') + ' :' + (e.line || 0) + '</span></span></div>';
+                    return;
+                }
+                if (g.type === 'call') {
+                    var ce = g.ev;
+                    html += '<div class="txn-node" title="calls ' + PA.esc(ce.proc || '') + '">'
+                        + '<span class="txn-dot call"></span><span class="txn-node-lbl"><b>CALLS</b> ' + PA.esc((ce.proc || '').replace(/\$/g, '.')) + '</span></div>';
+                    return;
+                }
+                var grp = g.g;
+                var procShort = PA.esc((grp.proc || '').split('$').pop() || '');
+                var jumpG = grp.nodeId ? ' onclick="PA.sourceView.openNodeAtLine(\'' + PA.escJs(grp.nodeId) + '\',' + (grp.lines.length ? grp.lines[0] : 0) + ')" style="cursor:pointer"' : '';
+                if (grp.op) {
+                    // One chip per proc+operation: "6 UPD — 4 survived · 2 discarded".
+                    var bits = [];
+                    var total = 0;
+                    Object.keys(grp.surv).forEach(function (sv) {
+                        var s = SURV[sv] || SURV.open;
+                        bits.push('<span class="txn-survival ' + s.cls + '" title="' + s.tip + '">' + grp.surv[sv] + ' ' + s.label + '</span>');
+                        total += grp.surv[sv];
+                    });
+                    html += '<div class="txn-node"' + jumpG + ' title="' + PA.esc(grp.proc || '') + ' lines ' + (grp.lines.length ? grp.lines[0] : '') + '–' + (grp.lines.length ? grp.lines[grp.lines.length - 1] : '') + '">'
+                        + '<span class="txn-dot ' + (grp.surv.discarded ? 'rollback' : grp.surv.open ? 'open' : 'commit') + '"></span>'
+                        + '<span class="txn-node-lbl"><b>' + total + ' ' + PA.esc(grp.op) + '</b> ' + procShort
+                        + '<br>' + bits.join(' ') + '</span></div>';
+                } else if (grp.marks) {
+                    html += '<div class="txn-node" title="savepoints in ' + PA.esc(grp.proc || '') + '">'
+                        + '<span class="txn-dot sp"></span><span class="txn-node-lbl"><b>' + grp.marks + ' savepoint' + (grp.marks === 1 ? '' : 's') + '</b> ' + procShort + '</span></div>';
+                }
+            });
+            html += '</div></div>';
+        });
+        html += '<div class="txn-legend">'
+            + '<span><i class="txn-dot commit"></i> survives (committed)</span>'
+            + '<span><i class="txn-dot rollback"></i> discarded by a rollback</span>'
+            + '<span><i class="txn-dot open"></i> open — needs a caller commit</span>'
+            + '<span><i class="txn-dot call"></i> call edge</span>'
+            + '<span><i class="txn-dot sp"></i> savepoint</span></div>';
+        c.innerHTML = html;
     },
 
     _scopeKey: null,
@@ -294,9 +446,16 @@ PA.txnTrace = {
         var html = '<table class="to-table txn-table" style="width:100%"><thead><tr>'
             + '<th>Txn</th><th>Opens</th><th>Savepoints</th><th>Success exit</th><th>Error exit</th><th>Auto</th><th>Ops</th><th></th></tr></thead><tbody>';
         segs.forEach(function (s) {
-            var sp = s.savepoints.map(function (p) {
-                return (p._revert ? '&#8617; rollback to ' : '') + PA.esc(p.name || '(unnamed)') + ' :' + (p.line || '');
-            }).join('<br>') || '—';
+            // The savepoint WALL made the table unreadable (a busy proc carries 12+ savepoints,
+            // each on its own line). A count chip now, the full list expandable beneath the row.
+            var spCount = s.savepoints.length;
+            var spCell = spCount
+                ? '<span class="txn-sp-count" onclick="PA.txnTrace.toggleSpList(\'' + s.id + '\')" title="Click to list the savepoints">' + spCount + ' savepoint' + (spCount === 1 ? '' : 's') + ' &#9662;</span>'
+                + '<div class="txn-sp-list" id="txn-sp-list-' + s.id + '" style="display:none">'
+                + s.savepoints.map(function (p) {
+                    return '<div>' + (p._revert ? '&#8617; rollback to ' : '') + PA.esc(p.name || '(unnamed)') + ' :' + (p.line || '') + '</div>';
+                }).join('') + '</div>'
+                : '<span style="color:var(--text-muted)">—</span>';
             var commitTxt = s.commit
                 ? '<span class="txn-close" style="color:var(--badge-green)">COMMIT</span> ' + PA.txnTrace._loc(s.commit)
                 : '<span class="txn-open-flag">no commit</span>';
@@ -306,7 +465,7 @@ PA.txnTrace = {
             html += '<tr class="txn-row">'
                 + '<td><span class="txn-tag' + (s.autonomous ? ' auto' : '') + '">' + s.id + '</span></td>'
                 + '<td ' + PA.txnTrace._jumpStart(s) + '>' + PA.txnTrace._openLabel(s) + '</td>'
-                + '<td>' + sp + '</td>'
+                + '<td>' + spCell + '</td>'
                 + '<td ' + PA.txnTrace._jump(s.commit) + '>' + commitTxt + '</td>'
                 + '<td ' + PA.txnTrace._jump(s.rollback) + ' title="error / exception handler path">' + rbTxt + '</td>'
                 + '<td>' + (s.autonomous ? '<span class="txn-badge-auto">AUTO</span>' : '—') + '</td>'
@@ -316,6 +475,12 @@ PA.txnTrace = {
         });
         html += '</tbody></table>';
         return html;
+    },
+
+    /** Expand/collapse the savepoint list under a table row (the count chip toggles it). */
+    toggleSpList: function (id) {
+        var el = document.getElementById('txn-sp-list-' + id);
+        if (el) el.style.display = (el.style.display === 'none') ? '' : 'none';
     },
 
     _graphHtml: function (segs) {
@@ -331,12 +496,19 @@ PA.txnTrace = {
             // Start (implicit — first observed activity of this transaction)
             html += '<div class="txn-node" ' + PA.txnTrace._jumpStart(s) + ' title="Transaction start">'
                 + '<span class="txn-dot begin"></span><span class="txn-node-lbl"><b>BEGIN</b><br>' + PA.txnTrace._openLabel(s) + '</span></div>';
-            s.savepoints.forEach(function (p) {
+            // The savepoint WALL made the track unreadable — one summary node now, the Details
+            // button (or the table view's expandable list) carries the individual points.
+            var spReverts = s.savepoints.filter(function (p) { return p._revert; }).length;
+            if (s.savepoints.length) {
                 html += '<span class="txn-conn"></span>'
-                    + '<div class="txn-node" ' + PA.txnTrace._jump(p) + ' title="' + (p._revert ? 'Rollback to savepoint' : 'Savepoint') + '">'
-                    + '<span class="txn-dot sp"></span><span class="txn-node-lbl"><b>' + (p._revert ? 'RB&rarr;SP' : 'SAVEPOINT') + '</b><br>'
-                    + PA.esc(p.name || '') + ' :' + (p.line || '') + '</span></div>';
-            });
+                    + '<div class="txn-node" title="' + PA.escAttr(s.savepoints.map(function (p) {
+                        return (p._revert ? 'rollback to ' : '') + (p.name || '(unnamed)') + ' :' + (p.line || '');
+                    }).join('\n')) + '">'
+                    + '<span class="txn-dot sp"></span><span class="txn-node-lbl"><b>SAVEPOINTS</b><br>'
+                    + s.savepoints.length + ' mark' + (s.savepoints.length === 1 ? '' : 's')
+                    + (spReverts ? ' · ' + spReverts + ' revert' + (spReverts === 1 ? '' : 's') : '')
+                    + '</span></div>';
+            }
             html += '<span class="txn-conn"></span>';
             // Two mutually-exclusive exits: COMMIT (success) and ROLLBACK (error / handler path).
             if (s.commit || s.rollback) {

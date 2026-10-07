@@ -160,6 +160,11 @@ PA.statements = {
     _getTypeClass: function(type) {
         var dml = { SELECT: 'blue', INSERT: 'green', UPDATE: 'orange', DELETE: 'red', MERGE: 'purple' };
         if (dml[type]) return 'stmt-' + dml[type];
+        // Transaction-control statements get their own visual family (task: transaction capture
+        // reliability) — they used to fall into the generic muted "other" bucket.
+        var txn = { COMMIT: 'txn', ROLLBACK: 'txn', SAVEPOINT: 'txn', BEGIN_TRAN: 'txn',
+                    START_TRANSACTION: 'txn', SET_TRANSACTION: 'txn', RELEASE_SAVEPOINT: 'txn' };
+        if (txn[type]) return 'stmt-txn';
         var ctrl = { IF: 'ctrl', CASE: 'ctrl', LOOP: 'ctrl', FOR_LOOP: 'ctrl', WHILE_LOOP: 'ctrl' };
         if (ctrl[type]) return 'stmt-ctrl';
         return 'stmt-other';
@@ -176,7 +181,12 @@ PA.statements = {
             RETURN: 'var(--accent-hover)', EXECUTE_IMMEDIATE: 'var(--pink)',
             RAISE: 'var(--badge-red)', CURSOR: 'var(--purple)',
             OPEN: 'var(--badge-green)', FETCH: 'var(--badge-blue)',
-            CLOSE: 'var(--badge-red)'
+            CLOSE: 'var(--badge-red)',
+            // Transaction-control: green persists, red discards, purple marks.
+            COMMIT: 'var(--badge-green)', ROLLBACK: 'var(--badge-red)',
+            SAVEPOINT: 'var(--purple)', BEGIN_TRAN: 'var(--badge-teal)',
+            START_TRANSACTION: 'var(--badge-teal)', SET_TRANSACTION: 'var(--badge-teal)',
+            RELEASE_SAVEPOINT: 'var(--purple)'
         };
         return colors[type] || 'var(--text-muted)';
     },

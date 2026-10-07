@@ -72,6 +72,7 @@ public class ParserAnalysisController {
     private final com.analyzer.repo.EntityIngestConfig.EntityIngestConnection entityIngestConnection;
     private final boolean entityReadDefault;
     private final ClaudePurposeSummaryService purposeSummaryService;
+    private final com.plsqlanalyzer.web.parser.service.TxnRunResolver txnRunResolver;
 
     public ParserAnalysisController(@Qualifier("parserAnalysisService") AnalysisService service,
                                      AnalysisQueueService queueService,
@@ -97,7 +98,8 @@ public class ParserAnalysisController {
                                      com.analyzer.repo.EntityIngestConfig.EntityIngestConnection entityIngestConnection,
                                      @org.springframework.beans.factory.annotation.Value(
                                              "${app.storage.entity-read.enabled:false}") boolean entityReadDefault,
-                                     ClaudePurposeSummaryService purposeSummaryService) {
+                                     ClaudePurposeSummaryService purposeSummaryService,
+                                     com.plsqlanalyzer.web.parser.service.TxnRunResolver txnRunResolver) {
         this.service = service;
         this.queueService = queueService;
         this.joinComplexityConfig = joinComplexityConfig;
@@ -122,6 +124,7 @@ public class ParserAnalysisController {
         this.entityIngestConnection = entityIngestConnection;
         this.entityReadDefault = entityReadDefault;
         this.purposeSummaryService = purposeSummaryService;
+        this.txnRunResolver = txnRunResolver;
     }
 
     /**
@@ -1524,6 +1527,27 @@ public class ParserAnalysisController {
                     : service.getCallTree(name, nodeId));
         } catch (Exception e) {
             return ResponseEntity.notFound().build();
+        }
+    }
+
+    /**
+     * The interprocedural transaction runs for one entry point — the runtime-accurate transaction
+     * flow the Explore → Transactions view renders: event timelines (writes, savepoints,
+     * commits/rollbacks, call edges) under the dialect's ownership semantics, alternative runs for
+     * guarded (conditional) statements, and a per-write survival verdict from replaying each run.
+     * Memoized as the {@code views/txn-runs/<nodeId>.json} sidecar — same staleness/invalidation
+     * as every other view.
+     */
+    @GetMapping("/analyses/{name}/txn-runs/{nodeId}")
+    public ResponseEntity<JsonNode> getTxnRuns(
+            @PathVariable("name") String name,
+            @PathVariable("nodeId") String nodeId) {
+        try {
+            JsonNode runs = txnRunResolver.txnRuns(name, nodeId);
+            if (runs == null) return ResponseEntity.notFound().build();
+            return ResponseEntity.ok(runs);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().build();
         }
     }
 

@@ -18,6 +18,19 @@ public class MySqlStatementInfo {
     private String conditionName;
     private String messageText;
 
+    // ── Enrichment (additive; nulls omitted by the writer) ────────────────────
+    // Branch/loop context the statement sits inside, if any. kind ∈ {IF, CASE, LOOP}.
+    private String guardKind;
+    private Integer guardLine;
+    private String guardCondition;  // collapsed, ≤ 200 chars
+    // Exception-handler body the statement sits inside, if any.
+    private String handlerName;     // handler condition/name, or "OTHERS"
+    private Integer handlerLine;
+    // SELECT ... FOR UPDATE / FOR SHARE (only where the grammar exposes it).
+    private Boolean forUpdate;
+    // Collapsed source text of the statement (≤ 300 chars).
+    private String sqlText;
+
     public MySqlStatementInfo() {}
     public MySqlStatementInfo(String type, int line) { this.type = type; this.line = line; }
 
@@ -35,4 +48,19 @@ public class MySqlStatementInfo {
     public void setConditionName(String v) { this.conditionName = v; }
     public String getMessageText() { return messageText; }
     public void setMessageText(String v) { this.messageText = v; }
+
+    public String getGuardKind() { return guardKind; }
+    public void setGuardKind(String v) { this.guardKind = v; }
+    public Integer getGuardLine() { return guardLine; }
+    public void setGuardLine(Integer v) { this.guardLine = v; }
+    public String getGuardCondition() { return guardCondition; }
+    public void setGuardCondition(String v) { this.guardCondition = v; }
+    public String getHandlerName() { return handlerName; }
+    public void setHandlerName(String v) { this.handlerName = v; }
+    public Integer getHandlerLine() { return handlerLine; }
+    public void setHandlerLine(Integer v) { this.handlerLine = v; }
+    public Boolean getForUpdate() { return forUpdate; }
+    public void setForUpdate(Boolean v) { this.forUpdate = v; }
+    public String getSqlText() { return sqlText; }
+    public void setSqlText(String v) { this.sqlText = v; }
 }

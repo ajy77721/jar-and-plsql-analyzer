@@ -1074,6 +1074,8 @@ public class ChunkedFlowWriter {
         // concurrently; the per-node results are then folded in resolved-node order, keeping
         // transactionStatements byte-identical to the sequential pass.
         int txCommits = 0, txRollbacks = 0, txSavepoints = 0, txAutonomousProcs = 0;
+        int txPartialRollbacks = 0, txConditionalCommits = 0, txBeginTrans = 0;
+        int txSetTransactions = 0, txReleaseSavepoints = 0;
         List<Map<String, Object>> txnStatements = new ArrayList<>();
         List<Callable<TxnNodeResult>> txnTasks = new ArrayList<>(resolvedNodes.size());
         for (ResolvedNode rn : resolvedNodes) {
@@ -1085,13 +1087,24 @@ public class ChunkedFlowWriter {
             txCommits += r.commits();
             txRollbacks += r.rollbacks();
             txSavepoints += r.savepoints();
+            txPartialRollbacks += r.partialRollbacks();
+            txConditionalCommits += r.conditionalCommits();
+            txBeginTrans += r.beginTrans();
+            txSetTransactions += r.setTransactions();
+            txReleaseSavepoints += r.releaseSavepoints();
             txnStatements.addAll(r.statements());
         }
         Map<String, Object> txnSummary = new LinkedHashMap<>();
+        // Existing keys first, byte-identical; new count keys appended after them.
         txnSummary.put("commits", txCommits);
         txnSummary.put("rollbacks", txRollbacks);
         txnSummary.put("savepoints", txSavepoints);
         txnSummary.put("autonomousProcs", txAutonomousProcs);
+        txnSummary.put("partialRollbacks", txPartialRollbacks);
+        txnSummary.put("conditionalCommits", txConditionalCommits);
+        txnSummary.put("beginTrans", txBeginTrans);
+        txnSummary.put("setTransactions", txSetTransactions);
+        txnSummary.put("releaseSavepoints", txReleaseSavepoints);
         indexRoot.put("transactionSummary", txnSummary);
         indexRoot.put("transactionStatements", txnStatements);
         if (!cycles.isEmpty()) {
@@ -1525,25 +1538,40 @@ public class ChunkedFlowWriter {
         detail.put("statementSummary", nodeMetrics.getOrDefault(nodeId,
                 EMPTY_NODE_METRICS).statementSummary());
 
-        // Transaction scope — COMMIT / ROLLBACK / SAVEPOINT + autonomous transaction
+        // Transaction scope — COMMIT / ROLLBACK / SAVEPOINT + the cross-dialect transaction
+        // statement types + autonomous transaction.
         java.util.List<Map<String, Object>> txnStmts = new ArrayList<>();
         int commits = 0, rollbacks = 0, savepoints = 0;
+        int partialRollbacks = 0, conditionalCommits = 0, beginTrans = 0, setTransactions = 0, releaseSavepoints = 0;
         if (node.getStatements() != null) {
             for (StatementInfo s : node.getStatements()) {
                 String t = s.getType();
                 if (t == null) continue;
                 String T = t.toUpperCase();
-                if (T.equals("COMMIT") || T.equals("ROLLBACK") || T.equals("SAVEPOINT")) {
+                if (isTransactionStatementType(T)) {
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("type", T);
                     m.put("line", s.getLine());
                     if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) {
                         m.put("name", s.getSavepointName());
                     }
+                    putTxnRowExtras(m, s, T);
                     txnStmts.add(m);
-                    if (T.equals("COMMIT")) commits++;
-                    else if (T.equals("ROLLBACK")) rollbacks++;
-                    else savepoints++;
+                    if (T.equals("COMMIT")) {
+                        commits++;
+                        if (s.getGuardKind() != null) conditionalCommits++;
+                    } else if (T.equals("ROLLBACK")) {
+                        rollbacks++;
+                        if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) partialRollbacks++;
+                    } else if (T.equals("SAVEPOINT")) {
+                        savepoints++;
+                    } else if (T.equals("BEGIN_TRAN") || T.equals("START_TRANSACTION")) {
+                        beginTrans++;
+                    } else if (T.equals("SET_TRANSACTION")) {
+                        setTransactions++;
+                    } else if (T.equals("RELEASE_SAVEPOINT")) {
+                        releaseSavepoints++;
+                    }
                 }
             }
         }
@@ -1554,11 +1582,17 @@ public class ChunkedFlowWriter {
         txnStmts.sort(Comparator.comparingInt(m -> ((Number) m.get("line")).intValue()));
         if (!txnStmts.isEmpty() || node.isAutonomousTransaction()) {
             Map<String, Object> ts = new LinkedHashMap<>();
+            // Existing keys first, byte-identical; new count keys appended after them.
             ts.put("commits", commits);
             ts.put("rollbacks", rollbacks);
             ts.put("savepoints", savepoints);
             ts.put("autonomous", node.isAutonomousTransaction());
             ts.put("statements", txnStmts);
+            ts.put("partialRollbacks", partialRollbacks);
+            ts.put("conditionalCommits", conditionalCommits);
+            ts.put("beginTrans", beginTrans);
+            ts.put("setTransactions", setTransactions);
+            ts.put("releaseSavepoints", releaseSavepoints);
             detail.put("transactionScope", ts);
         }
 
@@ -1748,12 +1782,61 @@ public class ChunkedFlowWriter {
 
     /** One node's transaction-scope contribution: its COMMIT/ROLLBACK/SAVEPOINT rows and counts. */
     private record TxnNodeResult(List<Map<String, Object>> statements, int commits, int rollbacks,
-                                 int savepoints, boolean autonomous) {}
+                                 int savepoints, int partialRollbacks, int conditionalCommits,
+                                 int beginTrans, int setTransactions, int releaseSavepoints,
+                                 boolean autonomous) {}
+
+    /**
+     * The statement types the transaction scope aggregates — the Oracle COMMIT/ROLLBACK/SAVEPOINT
+     * plus the cross-dialect transaction control types other parser modules emit.
+     */
+    private static boolean isTransactionStatementType(String T) {
+        return T.equals("COMMIT") || T.equals("ROLLBACK") || T.equals("SAVEPOINT")
+                || T.equals("BEGIN_TRAN") || T.equals("START_TRANSACTION") || T.equals("SET_TRANSACTION")
+                || T.equals("RELEASE_SAVEPOINT") || T.equals("LOCK_TABLE");
+    }
+
+    /**
+     * Appends the additive transaction-scope row keys shared by the node-scope and flow-scope
+     * emitters: {@code isPartial} (ROLLBACK TO SAVEPOINT), {@code sqlText} (truncated to 300),
+     * {@code guard}, {@code handler}, and {@code forUpdate}. Existing keys are written by the
+     * caller FIRST, so these always trail them.
+     */
+    private static void putTxnRowExtras(Map<String, Object> m, StatementInfo s, String T) {
+        if (T.equals("ROLLBACK") && s.getSavepointName() != null && !s.getSavepointName().isBlank()) {
+            m.put("isPartial", true);
+        }
+        if (s.getSqlText() != null && !s.getSqlText().isBlank()) {
+            String sql = s.getSqlText();
+            m.put("sqlText", sql.length() > 300 ? sql.substring(0, 300) : sql);
+        }
+        // SQL Server's transaction nesting depth at this statement (BEGIN_TRAN after increment,
+        // COMMIT/ROLLBACK before decrement). Null everywhere else — omitted, never a zero guess.
+        if (s.getTransactionDepth() != null) {
+            m.put("transactionDepth", s.getTransactionDepth());
+        }
+        if (s.getGuardKind() != null) {
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("kind", s.getGuardKind());
+            if (s.getGuardLine() != null) g.put("line", s.getGuardLine());
+            if (s.getGuardCondition() != null) g.put("condition", s.getGuardCondition());
+            m.put("guard", g);
+        }
+        if (s.getHandlerName() != null) {
+            Map<String, Object> h = new LinkedHashMap<>();
+            h.put("name", s.getHandlerName());
+            if (s.getHandlerLine() != null) h.put("line", s.getHandlerLine());
+            m.put("handler", h);
+        }
+        if (Boolean.TRUE.equals(s.getForUpdate())) {
+            m.put("forUpdate", true);
+        }
+    }
 
     /**
      * Collects one node's transaction-scope statements from its chunk, on the save pool. Returns
      * {@code null} for a dangling chunk reference. The autonomous flag is reported even when the
-     * node has no COMMIT/ROLLBACK/SAVEPOINT, matching the sequential aggregation.
+     * node has no transaction statement, matching the sequential aggregation.
      */
     private TxnNodeResult txnForNode(ResolvedNode rn, Map<String, ArtifactKey> chunkIndex) throws IOException {
         FlowNode fn = readNodeChunk(rn.originalId(), chunkIndex);
@@ -1762,15 +1845,28 @@ public class ChunkedFlowWriter {
         boolean autonomous = fn.isAutonomousTransaction();
         List<Map<String, Object>> stmts = new ArrayList<>();
         int commits = 0, rollbacks = 0, savepoints = 0;
+        int partialRollbacks = 0, conditionalCommits = 0, beginTrans = 0, setTransactions = 0, releaseSavepoints = 0;
         if (fn.getStatements() != null) {
             for (StatementInfo s : fn.getStatements()) {
                 String t = s.getType();
                 if (t == null) continue;
                 String T = t.toUpperCase();
-                if (!T.equals("COMMIT") && !T.equals("ROLLBACK") && !T.equals("SAVEPOINT")) continue;
-                if (T.equals("COMMIT")) commits++;
-                else if (T.equals("ROLLBACK")) rollbacks++;
-                else savepoints++;
+                if (!isTransactionStatementType(T)) continue;
+                if (T.equals("COMMIT")) {
+                    commits++;
+                    if (s.getGuardKind() != null) conditionalCommits++;
+                } else if (T.equals("ROLLBACK")) {
+                    rollbacks++;
+                    if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) partialRollbacks++;
+                } else if (T.equals("SAVEPOINT")) {
+                    savepoints++;
+                } else if (T.equals("BEGIN_TRAN") || T.equals("START_TRANSACTION")) {
+                    beginTrans++;
+                } else if (T.equals("SET_TRANSACTION")) {
+                    setTransactions++;
+                } else if (T.equals("RELEASE_SAVEPOINT")) {
+                    releaseSavepoints++;
+                }
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("nodeId", fn.getNodeId());
                 m.put("proc", fn.getObjectName());
@@ -1779,10 +1875,12 @@ public class ChunkedFlowWriter {
                 m.put("line", s.getLine());
                 if (s.getSavepointName() != null && !s.getSavepointName().isBlank()) m.put("name", s.getSavepointName());
                 m.put("autonomous", fn.isAutonomousTransaction());
+                putTxnRowExtras(m, s, T);
                 stmts.add(m);
             }
         }
-        return new TxnNodeResult(stmts, commits, rollbacks, savepoints, autonomous);
+        return new TxnNodeResult(stmts, commits, rollbacks, savepoints, partialRollbacks,
+                conditionalCommits, beginTrans, setTransactions, releaseSavepoints, autonomous);
     }
 
     /**

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -38,8 +39,15 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ObjectShapedChildTest {
 
-    private static final Path ANALYSIS =
-            Path.of("../data/plsql-parse/ORACLE/ORACLEDEMO/LOCAL/ERP_USP_RUN_CYCLE");
+    /** Either data layout: the LOCAL store's own tree (data/plsql-parse/...) or the S3-mode
+     *  cache mirror (data/cache/store/parser/plsql-parse/...) — same artifacts, whichever
+     *  storage mode populated this machine. The first that exists wins; if neither, the class
+     *  skips (the assumption below). */
+    private static final Path ANALYSIS = Stream.of(
+            Path.of("../data/plsql-parse/ORACLE/ORACLEDEMO/LOCAL/ERP_USP_RUN_CYCLE"),
+            Path.of("../data/cache/store/parser/plsql-parse/ORACLE/ORACLEDEMO/LOCAL/ERP_USP_RUN_CYCLE"))
+            .filter(Files::isDirectory).findFirst().orElseGet(() ->
+                    Path.of("../data/plsql-parse/ORACLE/ORACLEDEMO/LOCAL/ERP_USP_RUN_CYCLE"));
 
     /** Measured from {@code api/nodes/*.json}, not copied from a plan. */
     private static final long EXPECTED_TXN = 135;

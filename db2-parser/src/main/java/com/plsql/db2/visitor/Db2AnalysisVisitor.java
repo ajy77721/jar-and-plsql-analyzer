@@ -5,7 +5,9 @@ import com.plsql.db2.grammar.Db2Parser;
 import com.plsql.db2.grammar.Db2ParserBaseVisitor;
 import com.plsql.db2.model.*;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -55,6 +57,29 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
      * statement name, silently dropping the SQL text that was already known from PREPARE.
      */
     private final Map<String, String> preparedStmtSql = new HashMap<>();
+
+    /**
+     * Enrichment: branch/loop context stack. Each frame records the enclosing IF/CASE/LOOP and
+     * its (collapsed, ≤200 char) condition, so a transaction statement emitted while inside a
+     * branch carries {@code guardKind/guardLine/guardCondition}. Purely additive.
+     */
+    private final Deque<Guard> guardStack = new ArrayDeque<>();
+
+    /** Enrichment: name/line of the handler body currently being visited, or null. */
+    private String currentHandlerName = null;
+    private Integer currentHandlerLine = null;
+
+    /** One branch/loop frame. {@code kind} ∈ {IF, CASE, LOOP}; {@code condition} may be null. */
+    private static final class Guard {
+        final String kind;
+        final int line;
+        final String condition;
+        Guard(String kind, int line, String condition) {
+            this.kind = kind;
+            this.line = line;
+            this.condition = condition;
+        }
+    }
 
     public Db2AnalysisVisitor(String objectName, String schema) {
         this.result = new Db2RoutineInfo();
@@ -998,7 +1023,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
                 // A subquery in a MERGE ON condition / WHEN-branch predicate — the MERGE tail's
                 // equivalent of SelectRestTokenContext (see mergeRestToken's first alternative).
                 || parent instanceof Db2Parser.MergeRestTokenContext) {
-            result.getStatements().add(new Db2StatementInfo("SUBQUERY", ctx.getStart().getLine()));
+            addStatement(new Db2StatementInfo("SUBQUERY", ctx.getStart().getLine()));
         }
         if (ctx.withClause() != null) {
             for (Db2Parser.CteDefContext cte : ctx.withClause().cteDef()) {
@@ -1007,7 +1032,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
                 }
                 // Emit a common "CTE" statement per WITH factoring clause so it is captured
                 // uniformly with the other dialects (visible in the UI construct breakdown).
-                result.getStatements().add(new Db2StatementInfo("CTE", cte.getStart().getLine()));
+                addStatement(new Db2StatementInfo("CTE", cte.getStart().getLine()));
             }
         }
         return visitChildren(ctx);
@@ -1505,13 +1530,17 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
 
     @Override
     public Void visitTxnCommit(Db2Parser.TxnCommitContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("COMMIT", ctx.getStart().getLine()));
+        Db2StatementInfo si = new Db2StatementInfo("COMMIT", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
     @Override
     public Void visitTxnRollback(Db2Parser.TxnRollbackContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("ROLLBACK", ctx.getStart().getLine()));
+        Db2StatementInfo si = new Db2StatementInfo("ROLLBACK", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1519,7 +1548,8 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     public Void visitTxnRollbackTo(Db2Parser.TxnRollbackToContext ctx) {
         Db2StatementInfo si = new Db2StatementInfo("ROLLBACK", ctx.getStart().getLine());
         si.setSavepointName(cleanId(ctx.id().getText()));
-        result.getStatements().add(si);
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1527,7 +1557,18 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     public Void visitTxnSavepoint(Db2Parser.TxnSavepointContext ctx) {
         Db2StatementInfo si = new Db2StatementInfo("SAVEPOINT", ctx.getStart().getLine());
         si.setSavepointName(cleanId(ctx.id().getText()));
-        result.getStatements().add(si);
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
+        return visitChildren(ctx);
+    }
+
+    /** {@code RELEASE [TO] SAVEPOINT name} — grammar rule exists (txnReleaseSavepoint), no hook. */
+    @Override
+    public Void visitTxnReleaseSavepoint(Db2Parser.TxnReleaseSavepointContext ctx) {
+        Db2StatementInfo si = new Db2StatementInfo("RELEASE_SAVEPOINT", ctx.getStart().getLine());
+        si.setSavepointName(cleanId(ctx.id().getText()));
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1539,32 +1580,84 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
 
     @Override
     public Void visitIfStatement(Db2Parser.IfStatementContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("IF", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new Db2StatementInfo("IF", ctx.getStart().getLine()));
+        pushGuard("IF", ctx.getStart().getLine(),
+                ctx.expr().isEmpty() ? null : conditionText(ctx.expr(0)));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
+    }
+
+    /**
+     * Statement-level CASE. No CASE record is emitted here (unchanged behavior — CASE rows come
+     * from the exprAtom token hook); this override only pushes the branch guard so statements in a
+     * WHEN/ELSE body carry it.
+     */
+    @Override
+    public Void visitCaseStatement(Db2Parser.CaseStatementContext ctx) {
+        pushGuard("CASE", ctx.getStart().getLine(), "<case>");
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
+    }
+
+    /** Per-WHEN branch of a statement-level CASE: push the WHEN condition as the guard. */
+    @Override
+    public Void visitCaseWhenClause(Db2Parser.CaseWhenClauseContext ctx) {
+        pushGuard("CASE", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitWhileStatement(Db2Parser.WhileStatementContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("WHILE_LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new Db2StatementInfo("WHILE_LOOP", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitForStatement(Db2Parser.ForStatementContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("FOR_LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new Db2StatementInfo("FOR_LOOP", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), null);
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitLoopStatement(Db2Parser.LoopStatementContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new Db2StatementInfo("LOOP", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), null);
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitRepeatStatement(Db2Parser.RepeatStatementContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("REPEAT", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new Db2StatementInfo("REPEAT", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
@@ -1590,7 +1683,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
         Db2StatementInfo si = new Db2StatementInfo(type, line);
         String label = cleanId(rawLabel);
         if (label != null && !label.isBlank()) si.setLabel(label);
-        result.getStatements().add(si);
+        addStatement(si);
     }
 
     /**
@@ -1603,7 +1696,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     @Override
     public Void visitExprAtom(Db2Parser.ExprAtomContext ctx) {
         if (ctx.CASE() != null) {
-            result.getStatements().add(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
+            addStatement(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
         }
         if (ctx.FOR() != null) {
             List<Db2Parser.IdContext> ids = ctx.id();
@@ -1654,7 +1747,18 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
         h.setConditions(conditions);
         h.setLine(ctx.getStart().getLine());
         result.getExceptionHandlers().add(h);
-        return visitChildren(ctx);
+
+        // Tag statements in this handler body with the handler context (save/restore for nesting).
+        String previousName = currentHandlerName;
+        Integer previousLine = currentHandlerLine;
+        currentHandlerName = conditions.isEmpty() ? "OTHERS" : String.join(" OR ", conditions);
+        currentHandlerLine = h.getLine();
+        try {
+            return visitChildren(ctx);
+        } finally {
+            currentHandlerName = previousName;
+            currentHandlerLine = previousLine;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1669,7 +1773,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
         si.setSavepointName(null);
         si.setConditionName(condName);
         si.setSqlstate(sqlstate);
-        result.getStatements().add(si);
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1686,7 +1790,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
             si.setConditionName(cleanId(ctx.id(0).getText()));
         }
         si.setMessageText(extractMessageText(ctx.expr()));
-        result.getStatements().add(si);
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1704,7 +1808,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
             si.setConditionName(cleanId(ctx.id(0).getText()));
         }
         si.setMessageText(extractMessageText(ctx.expr()));
-        result.getStatements().add(si);
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1733,7 +1837,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     @Override
     public Void visitStmtToken(Db2Parser.StmtTokenContext ctx) {
         if (ctx.CASE() != null) {
-            result.getStatements().add(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
+            addStatement(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
         }
         // Mirrors visitExprAtom's NEXT VALUE FOR / id FOR sequence-reference handling: stmtToken
         // (the permissive rule that consumes an INSERT ... VALUES(...) tuple, among other
@@ -1757,7 +1861,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     @Override
     public Void visitMergeRestToken(Db2Parser.MergeRestTokenContext ctx) {
         if (ctx.CASE() != null) {
-            result.getStatements().add(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
+            addStatement(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
         }
         return visitChildren(ctx);
     }
@@ -1765,7 +1869,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     @Override
     public Void visitSelectRestToken(Db2Parser.SelectRestTokenContext ctx) {
         if (ctx.CASE() != null) {
-            result.getStatements().add(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
+            addStatement(new Db2StatementInfo("CASE", ctx.getStart().getLine()));
         }
         return visitChildren(ctx);
     }
@@ -1781,7 +1885,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     // no isTemporary flag, so schema/table are captured as best-effort.
     @Override
     public Void visitDeclareGlobalTempTable(Db2Parser.DeclareGlobalTempTableContext ctx) {
-        result.getStatements().add(new Db2StatementInfo("DECLARE_GLOBAL_TEMPORARY_TABLE", ctx.getStart().getLine()));
+        addStatement(new Db2StatementInfo("DECLARE_GLOBAL_TEMPORARY_TABLE", ctx.getStart().getLine()));
         List<Db2Parser.IdContext> ids = ctx.id();
         // ids = [GLOBAL, TEMPORARY, TABLE, name] or [GLOBAL, TEMPORARY, TABLE, schema, name]
         if (ids.size() >= 4) {
@@ -1826,7 +1930,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
             // shape ever does land here, still record the statement — but no table ops, since
             // without a parse tree there is nothing structural to read them from (the old
             // regex-over-raw-text extraction that used to live here has been removed).
-            result.getStatements().add(new Db2StatementInfo("MERGE", ctx.getStart().getLine()));
+            addStatement(new Db2StatementInfo("MERGE", ctx.getStart().getLine()));
         }
         return visitChildren(ctx);
     }
@@ -1845,7 +1949,7 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     @Override
     public Void visitMergeStatement(Db2Parser.MergeStatementContext ctx) {
         int line = ctx.getStart().getLine();
-        result.getStatements().add(new Db2StatementInfo("MERGE", line));
+        addStatement(new Db2StatementInfo("MERGE", line));
 
         Db2TableOpInfo target = new Db2TableOpInfo();
         target.setSchemaName(extractTableSchema(ctx.tableRef()));
@@ -1887,6 +1991,76 @@ public class Db2AnalysisVisitor extends Db2ParserBaseVisitor<Void> {
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Adds a statement row, stamping the current guard/handler context (all additive; nulls left
+     * unset). Every statement row in this visitor flows through here.
+     */
+    private void addStatement(Db2StatementInfo si) {
+        stampContext(si);
+        result.getStatements().add(si);
+    }
+
+    /** Stamps the current guard + handler context onto a statement row (nulls left unset). */
+    private void stampContext(Db2StatementInfo si) {
+        Guard g = guardStack.peek();
+        if (g != null) {
+            si.setGuardKind(g.kind);
+            si.setGuardLine(g.line);
+            if (g.condition != null) si.setGuardCondition(g.condition);
+        }
+        if (currentHandlerName != null) {
+            si.setHandlerName(currentHandlerName);
+            si.setHandlerLine(currentHandlerLine);
+        }
+    }
+
+    private void pushGuard(String kind, int line, String condition) {
+        guardStack.push(new Guard(kind, line, condition));
+    }
+
+    private void popGuard() {
+        guardStack.poll();
+    }
+
+    /** The collapsed source text of a statement context, capped at 300 chars. */
+    private String statementText(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        return collapse(originalText(ctx), 300);
+    }
+
+    /** The collapsed source text of a condition context, capped at 200 chars. */
+    private String conditionText(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        return collapse(rawSpan(ctx), 200);
+    }
+
+    /**
+     * The exact source span of {@code ctx} (start..stop token indices). Unlike {@link #originalText},
+     * which is {@link com.plsql.dialect.StatementTextCapture} and deliberately scans forward to the
+     * end of the enclosing statement, this returns only the context's own text — required for a
+     * condition expression, which would otherwise swallow the following {@code THEN}/{@code DO}
+     * body up to the next semicolon.
+     */
+    private String rawSpan(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        if (ctx == null || ctx.getStart() == null) return null;
+        try {
+            org.antlr.v4.runtime.CharStream cs = ctx.getStart().getInputStream();
+            if (cs == null) return null;
+            int a = ctx.getStart().getStartIndex();
+            int b = ctx.getStop() != null ? ctx.getStop().getStopIndex() : -1;
+            if (b < a) return null;
+            return cs.getText(org.antlr.v4.runtime.misc.Interval.of(a, b));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Collapses all whitespace runs to single spaces, trims, and truncates to {@code max}. */
+    private static String collapse(String s, int max) {
+        if (s == null) return null;
+        String c = s.replaceAll("\\s+", " ").trim();
+        if (c.isEmpty()) return null;
+        return c.length() > max ? c.substring(0, max) : c;
+    }
 
     private String cleanId(String s) {
         if (s == null) return null;

@@ -266,6 +266,18 @@ public class SqlServerProcedureParser implements StoredProcedureParser {
             si.setType(s.getType());
             si.setLine(s.getLine());
             if (s.getSavepointName() != null) si.setSavepointName(s.getSavepointName());
+            // Task: transaction-capture enrichment — carry the new fields through the
+            // dialect→common copy. The writer's txn-row emitter maps these to the additive
+            // artifact keys (guard/handler/sqlText/transactionDepth); without this copy the
+            // fields were captured and then silently dropped for SQL Server.
+            si.setSqlText(s.getSqlText());
+            si.setGuardKind(s.getGuardKind());
+            si.setGuardLine(s.getGuardLine());
+            si.setGuardCondition(s.getGuardCondition());
+            si.setHandlerName(s.getHandlerName());
+            si.setHandlerLine(s.getHandlerLine());
+            si.setForUpdate(s.getForUpdate());
+            si.setTransactionDepth(s.getTransactionDepth());
             out.add(si);
         }
         return out;

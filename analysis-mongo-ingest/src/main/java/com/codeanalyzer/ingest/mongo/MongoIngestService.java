@@ -372,6 +372,36 @@ public final class MongoIngestService {
 
                 for (ArtifactMapper m : postNodeMappers) {
                     long t0 = System.currentTimeMillis();
+                    // The call-edge artifact is CHUNKED since the parallel-save writer
+                    // (edges/edges_NNNN.json, one file per chunk) — the single edges.json this
+                    // mapper's artifact() names no longer exists on any fresh analysis, so
+                    // am_call_edge (the per-call-occurrence rows) was silently EMPTY on every new
+                    // run while am_call_edge_unique (from api/call_graph.json) looked fine. The
+                    // chunk files are mapped the same way the nodes are: listed, then one stream
+                    // each. The old single-file layout keeps working for older analyses.
+                    if (m instanceof EdgesMapper) {
+                        List<String> chunks = source.list("edges");
+                        if (chunks == null || chunks.isEmpty()) {
+                            log.info("run {}: no edges/ chunks in the source — falling back to the single {} layout", runId, m.artifact());
+                            try (InputStream in = source.open(m.artifact())) {
+                                if (in != null) { m.map(ctx, in, writer::upsert); writer.flushAll(); }
+                            }
+                        } else {
+                            int n = 0;
+                            for (String chunkPath : chunks) {
+                                if (!chunkPath.endsWith(".json")) continue;
+                                try (InputStream in = source.open(chunkPath)) {
+                                    if (in == null) continue;
+                                    m.map(ctx, in, writer::upsert);
+                                    n++;
+                                }
+                            }
+                            writer.flushAll();
+                            log.info("run {}: chunked edge artifacts ({} files) mapped+flushed in {}ms",
+                                    runId, n, System.currentTimeMillis() - t0);
+                        }
+                        continue;
+                    }
                     try (InputStream in = source.open(m.artifact())) {
                         if (in == null) {
                             log.info("run {}: artifact {} absent, skipping", runId, m.artifact());

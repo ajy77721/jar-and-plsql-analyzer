@@ -283,6 +283,16 @@ public class MySqlProcedureParser implements StoredProcedureParser {
             si.setType(s.getType());
             si.setLine(s.getLine());
             if (s.getSavepointName() != null) si.setSavepointName(s.getSavepointName());
+            // Transaction-capture enrichment — carry the new fields through the dialect→common
+            // copy (the writer maps them to the additive artifact keys); without this they were
+            // captured by the visitor and silently dropped here.
+            si.setSqlText(s.getSqlText());
+            si.setGuardKind(s.getGuardKind());
+            si.setGuardLine(s.getGuardLine());
+            si.setGuardCondition(s.getGuardCondition());
+            si.setHandlerName(s.getHandlerName());
+            si.setHandlerLine(s.getHandlerLine());
+            si.setForUpdate(s.getForUpdate());
             out.add(si);
         }
         return out;

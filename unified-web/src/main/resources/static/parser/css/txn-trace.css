@@ -62,6 +62,23 @@
 .txn-dot.commit   { background: var(--green); }
 .txn-dot.rollback { background: var(--red); }
 .txn-dot.open     { background: var(--orange); }
+/* The runs (Flow) view — a call-edge node and the per-write survival tag. */
+.txn-dot.call     { background: var(--text-muted); border-radius: var(--radius-sm); }
+.txn-survival     { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.txn-survival.commit   { color: var(--green); }
+.txn-survival.rollback { color: var(--red); text-decoration: line-through; }
+.txn-survival.open     { color: var(--orange); }
+.txn-survival.partial  { color: var(--orange); }
+
+/* The collapsed savepoint cell in the table view (the wall of per-savepoint lines made the
+   table unreadable — a count chip now, the list expandable beneath it). */
+.txn-sp-count { cursor: pointer; color: var(--accent-hover); font-size: 11px; font-weight: 600;
+                border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+                padding: 1px 6px; display: inline-block; }
+.txn-sp-count:hover { background: var(--bg-hover, rgba(128,128,128,.08)); }
+.txn-sp-list  { max-height: 140px; overflow-y: auto; margin-top: 4px; padding: 4px 8px;
+                border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+                font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); }
 
 /* Connector line between nodes */
 .txn-conn {

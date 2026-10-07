@@ -46,6 +46,29 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
         variableScopeStack.push(new HashSet<>()); // base/routine-level scope frame
     }
 
+    /**
+     * Enrichment: branch/loop context stack. Each frame records the enclosing IF/CASE/LOOP and
+     * its (collapsed, ≤200 char) condition, so a transaction statement emitted while inside a
+     * branch carries {@code guardKind/guardLine/guardCondition}. Purely additive.
+     */
+    private final Deque<Guard> guardStack = new ArrayDeque<>();
+
+    /** Enrichment: name/line of the exception handler body currently being visited, or null. */
+    private String currentHandlerName = null;
+    private Integer currentHandlerLine = null;
+
+    /** One branch/loop frame. {@code kind} ∈ {IF, CASE, LOOP}; {@code condition} may be null. */
+    private static final class Guard {
+        final String kind;
+        final int line;
+        final String condition;
+        Guard(String kind, int line, String condition) {
+            this.kind = kind;
+            this.line = line;
+            this.condition = condition;
+        }
+    }
+
     public PostgresAnalysisVisitor(String objectName, String schema) {
         this.result = new PostgresRoutineInfo();
         result.setName(objectName);
@@ -1033,8 +1056,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
             op.setSqlText(originalText(ctx));
             result.getTableOps().add(op);
         }
-        result.getStatements().add(
-                new PostgresStatementInfo("TRUNCATE", ctx.getStart().getLine()));
+        addStatement(new PostgresStatementInfo("TRUNCATE", ctx.getStart().getLine()));
         return null;
     }
 
@@ -1961,7 +1983,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
             }
             si.setDetail(detail.length() > 0 ? detail.toString() : withoutLeadId.trim());
         }
-        result.getStatements().add(si);
+        addStatement(si);
         return null;
     }
 
@@ -1971,13 +1993,17 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
 
     @Override
     public Void visitTxnCommit(PostgresParser.TxnCommitContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("COMMIT", ctx.getStart().getLine()));
+        PostgresStatementInfo si = new PostgresStatementInfo("COMMIT", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
     @Override
     public Void visitTxnRollback(PostgresParser.TxnRollbackContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("ROLLBACK", ctx.getStart().getLine()));
+        PostgresStatementInfo si = new PostgresStatementInfo("ROLLBACK", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1985,7 +2011,8 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
     public Void visitTxnRollbackTo(PostgresParser.TxnRollbackToContext ctx) {
         PostgresStatementInfo si = new PostgresStatementInfo("ROLLBACK", ctx.getStart().getLine());
         si.setSavepointName(cleanId(ctx.id().getText()));
-        result.getStatements().add(si);
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1993,7 +2020,18 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
     public Void visitTxnSavepoint(PostgresParser.TxnSavepointContext ctx) {
         PostgresStatementInfo si = new PostgresStatementInfo("SAVEPOINT", ctx.getStart().getLine());
         si.setSavepointName(cleanId(ctx.id().getText()));
-        result.getStatements().add(si);
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
+        return visitChildren(ctx);
+    }
+
+    /** {@code RELEASE [TO] SAVEPOINT name} — grammar rule exists (txnReleaseSavepoint), no hook. */
+    @Override
+    public Void visitTxnReleaseSavepoint(PostgresParser.TxnReleaseSavepointContext ctx) {
+        PostgresStatementInfo si = new PostgresStatementInfo("RELEASE_SAVEPOINT", ctx.getStart().getLine());
+        si.setSavepointName(cleanId(ctx.id().getText()));
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -2007,22 +2045,40 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
     /** IF … THEN … [ELSEIF …] [ELSE …] END IF */
     @Override
     public Void visitIfStatement(PostgresParser.IfStatementContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("IF", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new PostgresStatementInfo("IF", ctx.getStart().getLine()));
+        pushGuard("IF", ctx.getStart().getLine(),
+                ctx.expr().isEmpty() ? null : conditionText(ctx.expr(0)));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     /** CASE [expr] WHEN … THEN … [ELSE …] END CASE (statement form). */
     @Override
     public Void visitCaseStatement(PostgresParser.CaseStatementContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("CASE", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new PostgresStatementInfo("CASE", ctx.getStart().getLine()));
+        // WHEN branches are inline in this grammar (no caseWhenClause rule), so a single generic
+        // "<case>" guard is pushed for the whole construct.
+        pushGuard("CASE", ctx.getStart().getLine(), "<case>");
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     /** WHILE expr (DO | LOOP) body END (WHILE | LOOP) */
     @Override
     public Void visitWhileStatement(PostgresParser.WhileStatementContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("WHILE_LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new PostgresStatementInfo("WHILE_LOOP", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     /**
@@ -2032,15 +2088,25 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      */
     @Override
     public Void visitForStatement(PostgresParser.ForStatementContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("FOR_LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new PostgresStatementInfo("FOR_LOOP", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), null);
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     /** Plain LOOP … END LOOP */
     @Override
     public Void visitLoopStatement(PostgresParser.LoopStatementContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        addStatement(new PostgresStatementInfo("LOOP", ctx.getStart().getLine()));
+        pushGuard("LOOP", ctx.getStart().getLine(), null);
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     /**
@@ -2050,7 +2116,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      */
     @Override
     public Void visitAtomSubquery(PostgresParser.AtomSubqueryContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("SUBQUERY", ctx.getStart().getLine()));
+        addStatement(new PostgresStatementInfo("SUBQUERY", ctx.getStart().getLine()));
         return visitChildren(ctx);
     }
 
@@ -2060,7 +2126,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      */
     @Override
     public Void visitCteDef(PostgresParser.CteDefContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("CTE", ctx.getStart().getLine()));
+        addStatement(new PostgresStatementInfo("CTE", ctx.getStart().getLine()));
         return visitChildren(ctx);
     }
 
@@ -2071,7 +2137,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      */
     @Override
     public Void visitSubquery(PostgresParser.SubqueryContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("SUBQUERY", ctx.getStart().getLine()));
+        addStatement(new PostgresStatementInfo("SUBQUERY", ctx.getStart().getLine()));
         return visitChildren(ctx);
     }
 
@@ -2081,7 +2147,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      */
     @Override
     public Void visitMergeStatement(PostgresParser.MergeStatementContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("MERGE", ctx.getStart().getLine()));
+        addStatement(new PostgresStatementInfo("MERGE", ctx.getStart().getLine()));
         return visitChildren(ctx);
     }
 
@@ -2091,7 +2157,7 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
      */
     @Override
     public Void visitOnConflictClause(PostgresParser.OnConflictClauseContext ctx) {
-        result.getStatements().add(new PostgresStatementInfo("UPSERT", ctx.getStart().getLine()));
+        addStatement(new PostgresStatementInfo("UPSERT", ctx.getStart().getLine()));
         return visitChildren(ctx);
     }
 
@@ -2115,12 +2181,93 @@ public class PostgresAnalysisVisitor extends PostgresParserBaseVisitor<Void> {
         eh.setStatementsCount(ctx.statement() != null ? ctx.statement().size() : 0);
 
         result.getExceptionHandlers().add(eh);
-        return visitChildren(ctx);
+
+        // Tag statements in this handler body with the handler context (save/restore for nesting).
+        String previousName = currentHandlerName;
+        Integer previousLine = currentHandlerLine;
+        currentHandlerName = names.isEmpty() ? "OTHERS" : String.join(" OR ", names);
+        currentHandlerLine = eh.getLine();
+        try {
+            return visitChildren(ctx);
+        } finally {
+            currentHandlerName = previousName;
+            currentHandlerLine = previousLine;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Adds a statement row, stamping the current guard/handler context (all additive; nulls left
+     * unset). Every statement row in this visitor flows through here.
+     */
+    private void addStatement(PostgresStatementInfo si) {
+        stampContext(si);
+        result.getStatements().add(si);
+    }
+
+    /** Stamps the current guard + handler context onto a statement row (nulls left unset). */
+    private void stampContext(PostgresStatementInfo si) {
+        Guard g = guardStack.peek();
+        if (g != null) {
+            si.setGuardKind(g.kind);
+            si.setGuardLine(g.line);
+            if (g.condition != null) si.setGuardCondition(g.condition);
+        }
+        if (currentHandlerName != null) {
+            si.setHandlerName(currentHandlerName);
+            si.setHandlerLine(currentHandlerLine);
+        }
+    }
+
+    private void pushGuard(String kind, int line, String condition) {
+        guardStack.push(new Guard(kind, line, condition));
+    }
+
+    private void popGuard() {
+        guardStack.poll();
+    }
+
+    /** The collapsed source text of a statement context, capped at 300 chars. */
+    private String statementText(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        return collapse(originalText(ctx), 300);
+    }
+
+    /** The collapsed source text of a condition context, capped at 200 chars. */
+    private String conditionText(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        return collapse(rawSpan(ctx), 200);
+    }
+
+    /**
+     * The exact source span of {@code ctx} (start..stop token indices). Unlike {@link #originalText},
+     * which is {@link com.plsql.dialect.StatementTextCapture} and deliberately scans forward to the
+     * end of the enclosing statement, this returns only the context's own text — required for a
+     * condition expression, which would otherwise swallow the following {@code THEN}/{@code DO}
+     * body up to the next semicolon.
+     */
+    private String rawSpan(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        if (ctx == null || ctx.getStart() == null) return null;
+        try {
+            org.antlr.v4.runtime.CharStream cs = ctx.getStart().getInputStream();
+            if (cs == null) return null;
+            int a = ctx.getStart().getStartIndex();
+            int b = ctx.getStop() != null ? ctx.getStop().getStopIndex() : -1;
+            if (b < a) return null;
+            return cs.getText(org.antlr.v4.runtime.misc.Interval.of(a, b));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Collapses all whitespace runs to single spaces, trims, and truncates to {@code max}. */
+    private static String collapse(String s, int max) {
+        if (s == null) return null;
+        String c = s.replaceAll("\\s+", " ").trim();
+        if (c.isEmpty()) return null;
+        return c.length() > max ? c.substring(0, max) : c;
+    }
 
     private String cleanId(String s) {
         if (s == null) return null;

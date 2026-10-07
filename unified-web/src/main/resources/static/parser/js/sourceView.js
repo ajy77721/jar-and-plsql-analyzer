@@ -730,6 +730,7 @@ PA.sourceView = {
     _srcSearchIdx: -1,
     // Map<lineNumber(1-based) → { nodeId, label }> — built when opening source
     _callLineMap: {},
+    _txnLineMap: {},   // line → COMMIT/ROLLBACK/SAVEPOINT — the gutter badges (set from the node's transactionScope)
 
     /**
      * Build the call-line map from a node detail's calls array.
@@ -1895,6 +1896,16 @@ PA.sourceView = {
             if (detail && detail.calls) {
                 PA.sourceView._callLineMap = PA.sourceView._buildCallLineMap(detail.calls);
             }
+            // Transaction gutter markers (task: transaction capture reliability): the lines this
+            // proc COMMITs / ROLLBACKs / SAVEPOINTs get a badge in the gutter — the sidebar's
+            // "Transaction Scope" list already links them; now the source shows them in place.
+            PA.sourceView._txnLineMap = {};
+            var ts = detail && detail.transactionScope;
+            if (ts && ts.statements) {
+                ts.statements.forEach(function(t) {
+                    if (t && t.line) PA.sourceView._txnLineMap[t.line] = t.type;
+                });
+            }
         });
     },
 
@@ -1913,6 +1924,12 @@ PA.sourceView = {
                 var re = new RegExp('\\b(' + objName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')\\b', 'i');
                 s = s.replace(re, '<span class="src-call-link" data-tip="Open ' + PA.escAttr(entry.label) + '" onclick="PA.sourceView.openModal(\'' + PA.escJs(entry.nodeId) + '\')" >$1</span>');
             }
+        }
+        // Transaction gutter badge (task: transaction capture reliability) — the line COMMITs /
+        // ROLLBACKs / SAVEPOINTs: mark it in place, matching the sidebar's Transaction Scope list.
+        if (ln && PA.sourceView._txnLineMap && PA.sourceView._txnLineMap[ln]) {
+            var tType = PA.sourceView._txnLineMap[ln];
+            s = '<span class="src-txn-mark txn-' + tType.toLowerCase() + '" data-tip="' + PA.escAttr(tType) + '"></span>' + s;
         }
         return s;
     }

@@ -34,3 +34,7 @@
 .op-filter-pill.stmt-ctrl.active { background: var(--badge-teal-bg); color: var(--badge-teal); border-color: var(--badge-teal); }
 .op-filter-pill.stmt-other { border-color: var(--border); }
 .op-filter-pill.stmt-other.active { background: var(--bg); color: var(--text); }
+/* Transaction-control statements (task: transaction capture reliability) — their own pill
+   family: green persists, red discards, purple marks. */
+.op-filter-pill.stmt-txn { border-color: var(--border); }
+.op-filter-pill.stmt-txn.active { background: var(--badge-green-bg, rgba(80,200,120,.15)); color: var(--badge-green, var(--badge-teal)); border-color: var(--badge-green, var(--badge-teal)); }

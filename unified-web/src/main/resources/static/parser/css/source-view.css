@@ -45,6 +45,20 @@
     cursor: pointer;
     border-radius: var(--radius-sm);
 }
+/* Transaction gutter marker (task: transaction capture reliability) — a small colored bar left
+   of the line number for the lines that COMMIT / ROLLBACK / SAVEPOINT, matching the sidebar's
+   Transaction Scope list. Green persists, red discards, purple marks. */
+.src-txn-mark {
+    display: inline-block; width: 4px; height: 14px; border-radius: 2px;
+    margin-right: 5px; vertical-align: middle; background: var(--text-muted);
+}
+.src-txn-mark.txn-commit           { background: var(--green); }
+.src-txn-mark.txn-rollback         { background: var(--red); }
+.src-txn-mark.txn-savepoint        { background: var(--purple); }
+.src-txn-mark.txn-begin_tran,
+.src-txn-mark.txn-start_transaction,
+.src-txn-mark.txn-set_transaction  { background: var(--badge-teal, var(--accent)); }
+.src-txn-mark.txn-release_savepoint{ background: var(--purple); }
 .src-call-link:hover {
     background: var(--accent-subtle, var(--badge-blue-bg));
     text-decoration: underline;

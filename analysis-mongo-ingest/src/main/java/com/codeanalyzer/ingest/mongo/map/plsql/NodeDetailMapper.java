@@ -150,7 +150,7 @@ public final class NodeDetailMapper {
         // Splitter still split the inner arrays out of the proc_node document, but they landed in
         // `am_proc_node__statements` / `__type_refs` / `__plain` — names derived from the source
         // field rather than the names PLAN-04 specifies and the middle layer queries.
-        emitChildren(ctx, sink, entityKey, txnStatementsNode, Collections.TXN_STATEMENT, "txn");
+        emitTxnStatements(ctx, sink, entityKey, txnStatementsNode);
         emitVariableRefs(ctx, sink, entityKey, varBuckets);
         emitForeignKeys(ctx, sink, entityKey, foreignKeysNode);
 
@@ -352,6 +352,45 @@ public final class NodeDetailMapper {
             d.put("nodeRef", nodeRef);
             d.put("key", id.key());
             sink.emit(collection, d);
+        }
+    }
+
+    /**
+     * TXN_STATEMENT rows — the transaction-capture enrichment (task: transaction capture
+     * reliability) added `guard: {kind, line, condition}` and `handler: {name, line}` NESTED
+     * OBJECTS to each row (plus isPartial/sqlText scalars). Lift the two objects to scalars
+     * (guardKind/guardLine/guardCondition, handlerName/handlerLine) on a COPY before flatten, so
+     * the data-keyed-map gate never sees an inline object on these rows — the same class of
+     * wide-key abort the strip-block above exists for — and so "all conditional commits" /
+     * "all handler rollbacks" stay one flat filter. Old rows (no guard/handler) emit exactly as
+     * they did before: the copy is field-for-field.
+     */
+    private void emitTxnStatements(IngestContext ctx, DocSink sink, String nodeRef, JsonNode arr) {
+        if (!arr.isArray()) return;
+        int ordinal = 0;
+        for (JsonNode e : arr) {
+            int line = e.path("line").asInt(0);
+            Ids id = IdCodec.nodeChild(Collections.TXN_STATEMENT, nodeRef, "txn", line, ordinal++);
+            ObjectNode row = json.createObjectNode();
+            e.fields().forEachRemaining(f -> {
+                String k = f.getKey();
+                JsonNode v = f.getValue();
+                if (k.equals("guard") && v.isObject()) {
+                    if (v.hasNonNull("kind")) row.put("guardKind", v.path("kind").asText());
+                    if (v.hasNonNull("line")) row.put("guardLine", v.path("line").asInt());
+                    if (v.hasNonNull("condition")) row.put("guardCondition", v.path("condition").asText());
+                } else if (k.equals("handler") && v.isObject()) {
+                    if (v.hasNonNull("name")) row.put("handlerName", v.path("name").asText());
+                    if (v.hasNonNull("line")) row.put("handlerLine", v.path("line").asInt());
+                } else {
+                    row.set(k, v.deepCopy());
+                }
+            });
+            Document d = Splitter.flatten(ctx, sink, Collections.TXN_STATEMENT, id.key(), row);
+            d.put("runId", ctx.runId());
+            d.put("nodeRef", nodeRef);
+            d.put("key", id.key());
+            sink.emit(Collections.TXN_STATEMENT, d);
         }
     }
 

@@ -12,7 +12,9 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.misc.Interval;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -262,6 +264,31 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     // addTransactionStatement()'s javadoc / SqlServerStatementInfo.transactionDepth for the
     // recording convention). Simple additive metadata only; no correlation/pairing objects.
     private int transactionDepth = 0;
+    // Innermost enclosing control-flow guard (IF / CASE / WHILE) at the point each statement is
+    // recorded. Pushed/popped around the branch/loop body walk; the TOP of the stack is stamped
+    // onto every statement recorded inside it (see applyContextMetadata). Reset per routine.
+    private final Deque<GuardCtx> guardStack = new ArrayDeque<>();
+    // Innermost enclosing TRY...CATCH handler (currently only "CATCH"). Pushed when the walk
+    // crosses the BEGIN CATCH token of a tryBlock and popped when the block ends, so every
+    // statement inside the CATCH body carries the handler linkage. Reset per routine.
+    private final Deque<HandlerCtx> handlerStack = new ArrayDeque<>();
+
+    /** A control-flow guard (IF / CASE / WHILE) currently enclosing the walk. */
+    private static final class GuardCtx {
+        final String kind;        // "IF" | "CASE" | "LOOP"
+        final int line;
+        final String condition;   // whitespace-collapsed, <=200 chars (may be null/empty)
+        GuardCtx(String kind, int line, String condition) {
+            this.kind = kind; this.line = line; this.condition = condition;
+        }
+    }
+
+    /** A TRY...CATCH handler context currently enclosing the walk. */
+    private static final class HandlerCtx {
+        final String name;        // "CATCH"
+        final int line;           // line of the BEGIN CATCH keyword
+        HandlerCtx(String name, int line) { this.name = name; this.line = line; }
+    }
     // Bug 6: DECLARE'd cursor names — excluded from table extraction the same way CTE names are,
     // so "FETCH NEXT FROM cur" is not mis-scanned as a FROM-clause table reference.
     private final Set<String> cursorNames = new HashSet<>();
@@ -358,6 +385,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitRoutineDefinition(SqlServerParser.RoutineDefinitionContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         // Routine type
         String kw = ctx.routineKw().getText().toUpperCase();
         result.setType(kw.startsWith("FUNC")
@@ -407,6 +436,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitTriggerDefinition(SqlServerParser.TriggerDefinitionContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         result.setType(SqlServerRoutineInfo.RoutineType.TRIGGER);
         applyRoutineName(ctx.routineName());
         result.setLineStart(ctx.getStart().getLine());
@@ -469,6 +500,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitViewDefinition(SqlServerParser.ViewDefinitionContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         result.setType(SqlServerRoutineInfo.RoutineType.VIEW);
         applyRoutineName(ctx.routineName());
         result.setLineStart(ctx.getStart().getLine());
@@ -496,6 +529,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitCreateSequence(SqlServerParser.CreateSequenceContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         result.setType(SqlServerRoutineInfo.RoutineType.SEQUENCE);
         applyRoutineName(ctx.routineName());
         result.setLineStart(ctx.getStart().getLine());
@@ -584,6 +619,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitCreateIndex(SqlServerParser.CreateIndexContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         result.setType(SqlServerRoutineInfo.RoutineType.INDEX);
         applyRoutineName(ctx.routineName());
         result.setLineStart(ctx.getStart().getLine());
@@ -663,6 +700,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitCreateType(SqlServerParser.CreateTypeContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         result.setType(SqlServerRoutineInfo.RoutineType.TYPE);
         applyRoutineName(ctx.routineName());
         result.setLineStart(ctx.getStart().getLine());
@@ -719,6 +758,8 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
     @Override
     public Void visitAlterTable(SqlServerParser.AlterTableContext ctx) {
         transactionDepth = 0;
+        guardStack.clear();
+        handlerStack.clear();
         int line = ctx.getStart().getLine();
         result.setLineStart(line);
         result.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : line);
@@ -1015,8 +1056,18 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             } else {
                 String type = statementType(c0);
                 if (type != null) {
-                    result.getStatements().add(
-                            new SqlServerStatementInfo(type, ctx.getStart().getLine()));
+                    SqlServerStatementInfo si =
+                            new SqlServerStatementInfo(type, ctx.getStart().getLine());
+                    // SET IMPLICIT_TRANSACTIONS ON|OFF — emitted with its own type (the raw
+                    // "SET IMPLICIT_TRANSACTIONS ON" text carried in sqlText), so downstream can
+                    // tell an implicit-transaction mode switch apart from an ordinary SET.
+                    if (c0 instanceof SqlServerParser.SetStatementContext setCtx
+                            && isImplicitTransactions(setCtx)) {
+                        si.setType("SET_TRANSACTION");
+                        si.setSqlText(collapse(originalText(setCtx), 300));
+                    }
+                    applyContextMetadata(si);
+                    result.getStatements().add(si);
                 }
                 // Task #26: a statement-level bare SELECT is one result set handed to the client.
                 // Subqueries are a different grammar rule and never reach a `statement`, and
@@ -1052,13 +1103,18 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         int line = ctx.getStart().getLine();
         SqlServerStatementInfo si = new SqlServerStatementInfo();
         si.setLine(line);
+        si.setSqlText(collapse(originalText(ctx), 300));
         String name = ctx.ID() != null ? ctx.ID().getText() : null;
         if (ctx.COMMIT() != null) {
             si.setType("COMMIT");
             if (transactionDepth > 0) si.setTransactionDepth(transactionDepth--);
         } else if (ctx.ROLLBACK() != null) {
             si.setType("ROLLBACK");
-            if (name != null) si.setSavepointName(name);
+            if (name != null) {
+                si.setSavepointName(name);
+                // ROLLBACK TRANSACTION <savepoint> — a partial (savepoint) rollback.
+                si.setIsPartial(Boolean.TRUE);
+            }
             if (transactionDepth > 0) si.setTransactionDepth(transactionDepth--);
         } else if (ctx.SAVE() != null) {
             si.setType("SAVEPOINT");
@@ -1066,9 +1122,51 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             si.setTransactionDepth(transactionDepth);
         } else {
             si.setType("BEGIN_TRAN");
+            if (name != null) si.setSavepointName(name);   // named BEGIN TRAN, e.g. BEGIN TRAN outer_tran
             si.setTransactionDepth(++transactionDepth);
         }
+        applyContextMetadata(si);
         result.getStatements().add(si);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Control-flow guard + TRY/CATCH handler metadata (additive enrichment)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Stamps the innermost enclosing guard (IF / CASE / WHILE) and TRY...CATCH handler onto a
+     * statement row. Called from every statement-creation site on the main parse walk (the
+     * visitStatement funnel incl. transaction rows, and the THROW/RAISERROR visitors), so the
+     * guard/handler context is uniform. Only sets a field when there is context to set (nulls are
+     * left unset and omitted downstream).
+     */
+    private void applyContextMetadata(SqlServerStatementInfo si) {
+        GuardCtx g = guardStack.peek();
+        if (g != null) {
+            si.setGuardKind(g.kind);
+            si.setGuardLine(g.line);
+            if (g.condition != null && !g.condition.isEmpty()) si.setGuardCondition(g.condition);
+        }
+        HandlerCtx h = handlerStack.peek();
+        if (h != null) {
+            si.setHandlerName(h.name);
+            si.setHandlerLine(h.line);
+        }
+    }
+
+    /** Collapses runs of whitespace to single spaces and trims to {@code max} chars (contract cap). */
+    private static String collapse(String text, int max) {
+        if (text == null) return null;
+        String s = text.replaceAll("\\s+", " ").trim();
+        if (s.length() > max) s = s.substring(0, max);
+        return s;
+    }
+
+    /** True for {@code SET IMPLICIT_TRANSACTIONS ON|OFF} (the session-option form of setStatement). */
+    private static boolean isImplicitTransactions(SqlServerParser.SetStatementContext ctx) {
+        String text = ctx.getText();
+        return text != null
+                && text.toUpperCase().startsWith("SETIMPLICIT_TRANSACTIONS");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1087,6 +1185,7 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             si.setMessage(args.get(1).getText());
             si.setState(args.get(2).getText());
         }
+        applyContextMetadata(si);
         result.getStatements().add(si);
         return visitChildren(ctx);
     }
@@ -1100,6 +1199,7 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
             if (args.size() > 1) si.setSeverity(args.get(1).getText());
             if (args.size() > 2) si.setState(args.get(2).getText());
         }
+        applyContextMetadata(si);
         result.getStatements().add(si);
         return visitChildren(ctx);
     }
@@ -1111,7 +1211,26 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
         eh.setLineEnd(ctx.getStop() != null ? ctx.getStop().getLine() : ctx.getStart().getLine());
         eh.setStatementsCount(ctx.statement() != null ? ctx.statement().size() : 0);
         result.getExceptionHandlers().add(eh);
-        return visitChildren(ctx);
+
+        // The tryBlock rule is `BEGIN TRY statement* END TRY BEGIN CATCH statement* END CATCH`
+        // with no separate TRY/CATCH body nodes, so the boundary is the CATCH keyword token itself.
+        // Walk the children in order, pushing a CATCH handler context the moment that token is
+        // crossed (so every statement after it — the CATCH body — carries the handler linkage)
+        // and popping it when the block ends. Statements in the TRY body are visited before the
+        // token, so they get no handler. Nesting (a TRY/CATCH inside a CATCH body) is handled
+        // naturally: the inner push/pop sits above the outer handler on the stack.
+        boolean pushedHandler = false;
+        for (int i = 0; i < ctx.getChildCount(); i++) {
+            org.antlr.v4.runtime.tree.ParseTree child = ctx.getChild(i);
+            if (child instanceof org.antlr.v4.runtime.tree.TerminalNode tn
+                    && tn.getSymbol().getType() == SqlServerParser.CATCH) {
+                handlerStack.push(new HandlerCtx("CATCH", tn.getSymbol().getLine()));
+                pushedHandler = true;
+            }
+            visit(child);
+        }
+        if (pushedHandler) handlerStack.pop();
+        return null;
     }
 
     private String statementType(org.antlr.v4.runtime.tree.ParseTree child) {
@@ -1230,7 +1349,47 @@ public class SqlServerAnalysisVisitor extends SqlServerParserBaseVisitor<Void> {
                 extractExistsSubqueryTables(originalText(ctx.expr()), ctx.getStart().getLine());
             }
         }
-        return visitChildren(ctx);
+        // Guard context: statements in the THEN/ELSE branch bodies carry this IF's condition.
+        guardStack.push(new GuardCtx("IF", ctx.getStart().getLine(),
+                ctx.expr() != null ? collapse(originalText(ctx.expr()), 200) : null));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            guardStack.pop();
+        }
+    }
+
+    /**
+     * WHILE loop — push a LOOP guard so statements in the loop body carry the loop condition.
+     * The WHILE_LOOP statement row itself is emitted by the visitStatement funnel (before this
+     * override runs), so it is not stamped with its own guard, only with any enclosing one.
+     */
+    @Override
+    public Void visitWhileStatement(SqlServerParser.WhileStatementContext ctx) {
+        guardStack.push(new GuardCtx("LOOP", ctx.getStart().getLine(),
+                ctx.expr() != null ? collapse(originalText(ctx.expr()), 200) : null));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            guardStack.pop();
+        }
+    }
+
+    /**
+     * CASE expression — push a CASE guard so statements nested inside the CASE carry it. The CASE
+     * statement-inventory row itself is emitted separately by extractCaseAndSubqueries() (which
+     * runs after the main walk, when the guard stack is empty), so this guard enriches statements
+     * nested within the CASE's own branches.
+     */
+    @Override
+    public Void visitCaseExpression(SqlServerParser.CaseExpressionContext ctx) {
+        guardStack.push(new GuardCtx("CASE", ctx.getStart().getLine(),
+                collapse(originalText(ctx), 200)));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            guardStack.pop();
+        }
     }
 
     /** Scans an IF condition for EXISTS(...)/NOT EXISTS(...) subqueries and records the

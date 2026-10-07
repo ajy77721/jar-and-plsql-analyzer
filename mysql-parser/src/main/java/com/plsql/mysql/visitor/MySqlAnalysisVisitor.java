@@ -60,6 +60,30 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     private final java.util.Deque<Integer> handlerStack = new java.util.ArrayDeque<>();
 
     /**
+     * Enrichment: branch/loop context stack. Each frame records the enclosing IF/CASE/LOOP and
+     * its (collapsed, ≤200 char) condition, so a transaction statement emitted while inside a
+     * branch carries {@code guardKind/guardLine/guardCondition}. Purely additive — never changes
+     * which statements are captured.
+     */
+    private final java.util.Deque<Guard> guardStack = new java.util.ArrayDeque<>();
+
+    /** Enrichment: name/line of the handler whose body is currently being visited, or null. */
+    private String currentHandlerName = null;
+    private Integer currentHandlerLine = null;
+
+    /** One branch/loop frame. {@code kind} ∈ {IF, CASE, LOOP}; {@code condition} may be null. */
+    private static final class Guard {
+        final String kind;
+        final int line;
+        final String condition;
+        Guard(String kind, int line, String condition) {
+            this.kind = kind;
+            this.line = line;
+            this.condition = condition;
+        }
+    }
+
+    /**
      * Bug 8 (MySQL portion): user variable name (without the leading {@code @}) → name of the
      * runtime identifier that interrupted a {@code CONCAT('SELECT * FROM ', v_table_name, ...)}
      * assigned to it via {@code SET @var = CONCAT(...)}. Populated by {@link #visitSetAssignment}
@@ -1359,13 +1383,17 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
 
     @Override
     public Void visitTxnCommit(MySqlParser.TxnCommitContext ctx) {
-        addStatement(new MySqlStatementInfo("COMMIT", ctx.getStart().getLine()));
+        MySqlStatementInfo si = new MySqlStatementInfo("COMMIT", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
     @Override
     public Void visitTxnRollback(MySqlParser.TxnRollbackContext ctx) {
-        addStatement(new MySqlStatementInfo("ROLLBACK", ctx.getStart().getLine()));
+        MySqlStatementInfo si = new MySqlStatementInfo("ROLLBACK", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
         return visitChildren(ctx);
     }
 
@@ -1373,6 +1401,7 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     public Void visitTxnRollbackTo(MySqlParser.TxnRollbackToContext ctx) {
         MySqlStatementInfo si = new MySqlStatementInfo("ROLLBACK", ctx.getStart().getLine());
         si.setSavepointName(extractObjectId(ctx.objectId()));
+        si.setSqlText(statementText(ctx));
         addStatement(si);
         return visitChildren(ctx);
     }
@@ -1381,6 +1410,26 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     public Void visitTxnSavepoint(MySqlParser.TxnSavepointContext ctx) {
         MySqlStatementInfo si = new MySqlStatementInfo("SAVEPOINT", ctx.getStart().getLine());
         si.setSavepointName(extractObjectId(ctx.objectId()));
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
+        return visitChildren(ctx);
+    }
+
+    /** {@code START TRANSACTION} — grammar rule exists (txnStart) but had no visitor hook. */
+    @Override
+    public Void visitTxnStart(MySqlParser.TxnStartContext ctx) {
+        MySqlStatementInfo si = new MySqlStatementInfo("START_TRANSACTION", ctx.getStart().getLine());
+        si.setSqlText(statementText(ctx));
+        addStatement(si);
+        return visitChildren(ctx);
+    }
+
+    /** {@code RELEASE SAVEPOINT name} — grammar rule exists (txnReleaseSavepoint), no visitor hook. */
+    @Override
+    public Void visitTxnReleaseSavepoint(MySqlParser.TxnReleaseSavepointContext ctx) {
+        MySqlStatementInfo si = new MySqlStatementInfo("RELEASE_SAVEPOINT", ctx.getStart().getLine());
+        si.setSavepointName(extractObjectId(ctx.objectId()));
+        si.setSqlText(statementText(ctx));
         addStatement(si);
         return visitChildren(ctx);
     }
@@ -1392,13 +1441,36 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     @Override
     public Void visitIfStatement(MySqlParser.IfStatementContext ctx) {
         addStatement(new MySqlStatementInfo("IF", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        pushGuard("IF", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitCaseStatement(MySqlParser.CaseStatementContext ctx) {
         addStatement(new MySqlStatementInfo("CASE", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        // Statement-level CASE: a per-WHEN guard (visitCaseWhenClause) is pushed for each WHEN
+        // branch; anything outside a WHEN (e.g. ELSE) sees the generic "<case>" guard.
+        pushGuard("CASE", ctx.getStart().getLine(), "<case>");
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
+    }
+
+    /** Per-WHEN branch of a statement-level CASE: push the WHEN condition as the guard. */
+    @Override
+    public Void visitCaseWhenClause(MySqlParser.CaseWhenClauseContext ctx) {
+        pushGuard("CASE", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
@@ -1410,19 +1482,34 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
     @Override
     public Void visitWhileStatement(MySqlParser.WhileStatementContext ctx) {
         addStatement(new MySqlStatementInfo("WHILE_LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        pushGuard("LOOP", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitLoopStatement(MySqlParser.LoopStatementContext ctx) {
         addStatement(new MySqlStatementInfo("LOOP", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        pushGuard("LOOP", ctx.getStart().getLine(), null);
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     @Override
     public Void visitRepeatStatement(MySqlParser.RepeatStatementContext ctx) {
         addStatement(new MySqlStatementInfo("REPEAT", ctx.getStart().getLine()));
-        return visitChildren(ctx);
+        pushGuard("LOOP", ctx.getStart().getLine(), conditionText(ctx.expr()));
+        try {
+            return visitChildren(ctx);
+        } finally {
+            popGuard();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1455,10 +1542,54 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
         return visitChildren(ctx);
     }
 
-    /** Adds a statement, tagging it with the handler it's inside (if any). */
+    /**
+     * Adds a statement, tagging it with the handler it's inside (if any) and with the enclosing
+     * branch/loop guard (if any). All tags are additive — the statement is always added.
+     */
     private void addStatement(MySqlStatementInfo si) {
         si.setHandlerIndex(currentHandlerIndex);
+        stampContext(si);
         result.getStatements().add(si);
+    }
+
+    /** Stamps the current guard + handler context onto a statement row (nulls left unset). */
+    private void stampContext(MySqlStatementInfo si) {
+        Guard g = guardStack.peek();
+        if (g != null) {
+            si.setGuardKind(g.kind);
+            si.setGuardLine(g.line);
+            if (g.condition != null) si.setGuardCondition(g.condition);
+        }
+        if (currentHandlerName != null) {
+            si.setHandlerName(currentHandlerName);
+            si.setHandlerLine(currentHandlerLine);
+        }
+    }
+
+    private void pushGuard(String kind, int line, String condition) {
+        guardStack.push(new Guard(kind, line, condition));
+    }
+
+    private void popGuard() {
+        guardStack.poll();
+    }
+
+    /** The collapsed source text of a statement context, capped at 300 chars. */
+    private String statementText(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        return collapse(originalText(ctx), 300);
+    }
+
+    /** The collapsed source text of a condition context, capped at 200 chars. */
+    private String conditionText(org.antlr.v4.runtime.ParserRuleContext ctx) {
+        return collapse(originalText(ctx), 200);
+    }
+
+    /** Collapses all whitespace runs to single spaces, trims, and truncates to {@code max}. */
+    private static String collapse(String s, int max) {
+        if (s == null) return null;
+        String c = s.replaceAll("\\s+", " ").trim();
+        if (c.isEmpty()) return null;
+        return c.length() > max ? c.substring(0, max) : c;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1492,8 +1623,13 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
         result.getExceptionHandlers().add(h);
 
         Integer previous = currentHandlerIndex;
+        String previousName = currentHandlerName;
+        Integer previousLine = currentHandlerLine;
         int thisIndex = result.getExceptionHandlers().size() - 1;
         currentHandlerIndex = thisIndex;
+        currentHandlerName = h.getConditions().isEmpty()
+                ? "OTHERS" : String.join(" OR ", h.getConditions());
+        currentHandlerLine = h.getLine();
         handlerStack.push(thisIndex);
         try {
             if (ctx.routineStatement() != null) {
@@ -1502,6 +1638,8 @@ public class MySqlAnalysisVisitor extends MySqlParserBaseVisitor<Void> {
         } finally {
             handlerStack.pop();
             currentHandlerIndex = previous;
+            currentHandlerName = previousName;
+            currentHandlerLine = previousLine;
         }
         return null;
     }
